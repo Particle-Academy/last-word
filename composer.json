@@ -1,0 +1,57 @@
+{
+    "name": "particle-academy/last-word",
+    "description": "Standalone word-processing document read/write tool for agentic docs. Framework-agnostic PHP core that writes .docx (Office Open XML / WordprocessingML) from a JSON document model — headings, styled runs, nested lists, tables, code blocks, quotes, embedded images — reads them back with high fidelity, and bridges to/from GFM markdown so WYSIWYG editors round-trip Word files without converter sandwiches.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "word",
+        "docx",
+        "document",
+        "office",
+        "markdown",
+        "agentic",
+        "ai",
+        "document-creation",
+        "particle-academy"
+    ],
+    "homepage": "https://github.com/Particle-Academy/last-word",
+    "support": {
+        "issues": "https://github.com/Particle-Academy/last-word/issues",
+        "source": "https://github.com/Particle-Academy/last-word"
+    },
+    "authors": [
+        {
+            "name": "Particle Academy",
+            "homepage": "https://github.com/Particle-Academy"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "ext-zip": "*",
+        "ext-dom": "*",
+        "ext-libxml": "*"
+    },
+    "require-dev": {
+        "pestphp/pest": "^3.0|^4.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "LastWord\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "LastWord\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "pest"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}
