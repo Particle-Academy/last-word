@@ -24,7 +24,7 @@ it('exports a JSON Schema for LLM tool registration', function () {
 });
 
 it('reports its version', function () {
-    expect(Agent::version())->toBe('0.1.0')
+    expect(Agent::version())->toBe('0.2.0')
         ->and(Agent::version())->toBe(Schema::VERSION);
 });
 

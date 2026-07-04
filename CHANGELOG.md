@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0
+
+Cross-language metadata parity with the Node mirror
+(@particle-academy/last-word) — last-word-js#1.
+
+- **Title** now lives in `docProps/core.xml` (`dc:title`), byte-identical
+  to the Node writer's part (+ its content-type override and package rel),
+  instead of a Title-styled body paragraph. The reader prefers core.xml
+  and still consumes the legacy Title paragraph from 0.1.x files.
+- **Code blocks** are wrapped in a `w:sdt` content control tagged
+  `lastword:code[:{lang}]` (the canonical cross-language language slot;
+  survives Word edits) instead of an invisible `LastWordCode_{lang}`
+  bookmark; **quotes** get the matching `lastword:quote` sdt wrapper. The
+  reader parses the sdt tags, keeps the legacy bookmark read, and still
+  handles bare pStyle-only files.
+- Tables no longer emit a trailing pad paragraph (only between adjacent
+  tables), matching the Node writer's structure.
+- New frozen cross-read vector: `tests/fixtures/node-canonical.docx`
+  (written by the Node engine) + its JSON, asserted semantically
+  deep-equal on read.
+
 ## 0.1.0
 
 Initial release — the docx sibling of holy-sheet (xlsx) and dark-slide

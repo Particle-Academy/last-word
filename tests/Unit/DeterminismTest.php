@@ -41,6 +41,7 @@ it('writes zip entries in the fixed documented order', function () {
     expect($names)->toBe([
         '[Content_Types].xml',
         '_rels/.rels',
+        'docProps/core.xml',
         'word/document.xml',
         'word/styles.xml',
         'word/numbering.xml',

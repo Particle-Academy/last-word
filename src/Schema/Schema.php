@@ -14,7 +14,7 @@ namespace LastWord\Schema;
 final class Schema
 {
     /** Package version reported by Agent::version(). */
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.2.0';
 
     /** @var list<string> */
     public const BLOCK_TYPES = [

@@ -165,6 +165,17 @@ on strange XML.
 entry order, and every entry's mtime pinned. The same document yields the
 same bytes on every call — diff-able artifacts, cache-friendly outputs.
 
+## Cross-language parity
+
+As of 0.2.0 the metadata slots match the Node mirror exactly: the title is
+carried in `docProps/core.xml` (`dc:title`) and the code block `language`
+in a `lastword:code:{lang}` content-control tag (quotes use
+`lastword:quote`), so the **same file opens in either engine** — title and
+code language round-trip PHP ↔ Node in both directions. Files written by
+0.1.x (Title-styled paragraph, `LastWordCode_{lang}` bookmark) still read
+fine; the sibling repo's canonical fixture is frozen into each test suite
+as a cross-read vector.
+
 ## Testing
 
 ```bash

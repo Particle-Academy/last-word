@@ -19,6 +19,7 @@ use ZipArchive;
  *
  *   [Content_Types].xml
  *   _rels/.rels
+ *   docProps/core.xml      (dc:title — only when the doc has a title)
  *   word/document.xml
  *   word/styles.xml        (Normal, Title, Heading1-6, Quote, CodeBlock,
  *                           ListParagraph + InlineCode / Hyperlink char styles)
@@ -32,15 +33,24 @@ use ZipArchive;
  * every zip entry's mtime pinned via ZipArchive::setMtimeIndex() — calling
  * toBytes() twice on the same doc yields identical bytes.
  *
+ * Cross-language parity: the metadata slots match the Node mirror
+ * (@particle-academy/last-word) byte-for-byte — the title lives in
+ * docProps/core.xml (dc:title) and code/quote blocks are wrapped in w:sdt
+ * content controls tagged `lastword:code[:{lang}]` / `lastword:quote`, so a
+ * file written by either engine reads identically in the other. (Before
+ * 0.2.0 this writer used a Title-styled paragraph and an invisible
+ * `LastWordCode_{lang}` bookmark; the reader still accepts both.)
+ *
  * Block → OOXML mapping:
  *   heading    — w:p with pStyle Heading{n}
  *   paragraph  — w:p (+ w:jc for align)
  *   list       — w:p per item with numPr (ilvl per nesting depth)
  *   table      — w:tbl with grid; header rows get w:tblHeader + shading +
  *                forced-bold runs
- *   code       — one CodeBlock-styled w:p per line; the language survives
- *                round-trips via an invisible `LastWordCode_{lang}` bookmark
- *   quote      — inner paragraphs styled Quote
+ *   code       — w:sdt tagged `lastword:code[:{lang}]` wrapping one
+ *                CodeBlock-styled w:p per line
+ *   quote      — w:sdt tagged `lastword:quote` wrapping Quote-styled
+ *                paragraphs
  *   image      — w:drawing inline; extents from widthPx/heightPx or sniffed
  *                from the bytes (PNG IHDR / JPEG SOF), capped at 6.5in width
  *   pageBreak  — w:br w:type="page"
@@ -69,6 +79,15 @@ final class DocxWriter
     /** Shaded fill for header cells + code blocks (hex, no #). */
     private const HEADER_FILL = 'E7E7E7';
 
+    /**
+     * SDT tag prefixes used to round-trip block metadata that OOXML has no
+     * slot for. Shared verbatim with the Node mirror (`SDT_TAG_CODE` /
+     * `SDT_TAG_QUOTE` in @particle-academy/last-word).
+     */
+    public const SDT_TAG_CODE = 'lastword:code';
+
+    public const SDT_TAG_QUOTE = 'lastword:quote';
+
     /** Relationships beyond styles(rId1) + numbering(rId2), keyed by rId. */
     private array $rels = [];
 
@@ -78,8 +97,6 @@ final class DocxWriter
     private int $relCounter = 2;
 
     private int $imageCounter = 0;
-
-    private int $bookmarkCounter = 0;
 
     /** Number of ordered-list numbering instances allocated (numIds 2..N+1). */
     private int $orderedListCount = 0;
@@ -132,8 +149,9 @@ final class DocxWriter
         $this->mediaFiles = [];
         $this->relCounter = 2;
         $this->imageCounter = 0;
-        $this->bookmarkCounter = 0;
         $this->orderedListCount = 0;
+
+        $hasTitle = array_key_exists('title', $doc);
 
         // Build document.xml first — it registers hyperlink/image rels and
         // media files, and counts the ordered-list numbering instances the
@@ -157,8 +175,11 @@ final class DocxWriter
             }
 
             // Fixed entry order — part of the determinism contract.
-            $zip->addFromString('[Content_Types].xml', $this->buildContentTypes());
-            $zip->addFromString('_rels/.rels', $this->buildTopRels());
+            $zip->addFromString('[Content_Types].xml', $this->buildContentTypes($hasTitle));
+            $zip->addFromString('_rels/.rels', $this->buildTopRels($hasTitle));
+            if ($hasTitle) {
+                $zip->addFromString('docProps/core.xml', $this->buildCoreXml((string) $doc['title']));
+            }
             $zip->addFromString('word/document.xml', $documentXml);
             $zip->addFromString('word/styles.xml', $this->buildStyles());
             $zip->addFromString('word/numbering.xml', $this->buildNumbering());
@@ -188,7 +209,7 @@ final class DocxWriter
 
     // ─── Parts ───────────────────────────────────────────────────────────
 
-    private function buildContentTypes(): string
+    private function buildContentTypes(bool $hasTitle): string
     {
         $xml = Xml::declaration();
         $xml .= '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">';
@@ -199,19 +220,41 @@ final class DocxWriter
         $xml .= '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>';
         $xml .= '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
         $xml .= '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>';
+        if ($hasTitle) {
+            $xml .= '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>';
+        }
         $xml .= '</Types>';
 
         return $xml;
     }
 
-    private function buildTopRels(): string
+    private function buildTopRels(bool $hasTitle): string
     {
         $xml = Xml::declaration();
         $xml .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
         $xml .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>';
+        if ($hasTitle) {
+            $xml .= '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>';
+        }
         $xml .= '</Relationships>';
 
         return $xml;
+    }
+
+    /**
+     * docProps/core.xml carrying dc:title — the cross-language title slot.
+     * Byte-for-byte identical to the Node mirror's coreXml() output so the
+     * canonical fixtures match across engines. Deterministic: no dcterms
+     * created/modified timestamps.
+     */
+    private function buildCoreXml(string $title): string
+    {
+        return Xml::declaration()
+            . '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            . 'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+            . 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            . '<dc:title>' . Xml::text($title) . '</dc:title>'
+            . '</cp:coreProperties>';
     }
 
     private function buildDocumentRels(): string
@@ -237,16 +280,9 @@ final class DocxWriter
      */
     private function buildDocumentXml(array $doc): string
     {
-        $body = '';
-
-        $title = $doc['title'] ?? null;
-        if (is_string($title) && $title !== '') {
-            $body .= '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr>'
-                . $this->renderRuns([['text' => $title]])
-                . '</w:p>';
-        }
-
-        $body .= $this->renderBlocks($doc['blocks'] ?? []);
+        // The title lives in docProps/core.xml (dc:title) — the cross-language
+        // slot shared with the Node mirror — not in a body paragraph.
+        $body = $this->renderBlocks($doc['blocks'] ?? []);
 
         $body .= '<w:sectPr>'
             . '<w:pgSz w:w="12240" w:h="15840"/>'
@@ -274,22 +310,30 @@ final class DocxWriter
     private function renderBlocks(array $blocks, ?string $paragraphStyle = null): string
     {
         $xml = '';
+        $prevWasTable = false;
         foreach ($blocks as $block) {
             if (!is_array($block)) {
                 continue;
             }
-            $xml .= match ($block['type'] ?? null) {
+            $type = $block['type'] ?? null;
+            // OOXML merges adjacent tables — pad with an empty paragraph
+            // (both readers recognise and drop content-free paragraphs).
+            if ($type === 'table' && $prevWasTable) {
+                $xml .= '<w:p/>';
+            }
+            $xml .= match ($type) {
                 'heading' => $this->renderHeading($block),
                 'paragraph' => $this->renderParagraph($block, $paragraphStyle),
                 'list' => $this->renderList($block),
                 'table' => $this->renderTable($block),
                 'code' => $this->renderCode($block),
-                'quote' => $this->renderBlocks($block['blocks'] ?? [], 'Quote'),
+                'quote' => $this->renderQuote($block),
                 'image' => $this->renderImage($block),
                 'pageBreak' => '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
                 'hr' => '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>',
                 default => '',
             };
+            $prevWasTable = $type === 'table';
         }
 
         return $xml;
@@ -408,9 +452,7 @@ final class DocxWriter
         }
         $xml .= '</w:tbl>';
 
-        // OOXML requires a paragraph between/after tables so consecutive
-        // tables don't merge — the reader recognises and drops this pad.
-        return $xml . '<w:p/>';
+        return $xml;
     }
 
     /**
@@ -448,24 +490,32 @@ final class DocxWriter
         $lines = explode("\n", str_replace("\r\n", "\n", (string) ($block['text'] ?? '')));
         $language = $block['language'] ?? null;
 
-        // The model's `language` has no native WordprocessingML slot; stash it
-        // in an invisible bookmark on the first line so it survives the
-        // round-trip. Only simple identifiers — bookmark names are restricted.
-        $marker = '';
-        if (is_string($language) && preg_match('/^[A-Za-z][A-Za-z0-9_-]*$/', $language) === 1) {
-            $id = ++$this->bookmarkCounter;
-            $marker = '<w:bookmarkStart w:id="' . $id . '" w:name="LastWordCode_' . Xml::attr($language) . '"/><w:bookmarkEnd w:id="' . $id . '"/>';
+        // The model's `language` has no native WordprocessingML slot; carry it
+        // in the w:sdt content control's tag — the canonical cross-language
+        // slot (survives Word edits; same shape as the Node mirror). The
+        // pre-0.2.0 `LastWordCode_{lang}` bookmark is still read for
+        // back-compat but no longer written.
+        $tag = is_string($language) && $language !== ''
+            ? self::SDT_TAG_CODE . ':' . $language
+            : self::SDT_TAG_CODE;
+
+        $body = '';
+        foreach ($lines as $line) {
+            $run = $line === '' ? '' : '<w:r><w:t xml:space="preserve">' . Xml::text($line) . '</w:t></w:r>';
+            $body .= '<w:p><w:pPr><w:pStyle w:val="CodeBlock"/></w:pPr>' . $run . '</w:p>';
         }
 
-        $xml = '';
-        foreach ($lines as $i => $line) {
-            $xml .= '<w:p><w:pPr><w:pStyle w:val="CodeBlock"/></w:pPr>'
-                . ($i === 0 ? $marker : '')
-                . '<w:r><w:t xml:space="preserve">' . Xml::text($line) . '</w:t></w:r>'
-                . '</w:p>';
-        }
+        return '<w:sdt><w:sdtPr><w:alias w:val="Code"/><w:tag w:val="' . Xml::attr($tag) . '"/></w:sdtPr>'
+            . '<w:sdtContent>' . $body . '</w:sdtContent></w:sdt>';
+    }
 
-        return $xml;
+    /** @param  array<string, mixed>  $block */
+    private function renderQuote(array $block): string
+    {
+        $body = $this->renderBlocks($block['blocks'] ?? [], 'Quote');
+
+        return '<w:sdt><w:sdtPr><w:alias w:val="Quote"/><w:tag w:val="' . self::SDT_TAG_QUOTE . '"/></w:sdtPr>'
+            . '<w:sdtContent>' . ($body === '' ? '<w:p/>' : $body) . '</w:sdtContent></w:sdt>';
     }
 
     /** @param  array<string, mixed>  $block */

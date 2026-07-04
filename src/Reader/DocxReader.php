@@ -7,6 +7,7 @@ namespace LastWord\Reader;
 use DOMDocument;
 use DOMElement;
 use DOMNode;
+use LastWord\Writer\DocxWriter;
 use RuntimeException;
 use ZipArchive;
 
@@ -14,8 +15,15 @@ use ZipArchive;
  * DOCX reader — parses .docx bytes back into the Doc model.
  *
  * Handles this package's own writer output (lossless round-trip of the
- * semantic model) AND tolerates Word-authored files:
+ * semantic model), the Node mirror's output (@particle-academy/last-word —
+ * same metadata slots since 0.2.0) AND tolerates Word-authored files:
  *
+ *   - title from docProps/core.xml (dc:title, the cross-language slot);
+ *     falls back to the pre-0.2.0 Title-styled paragraph
+ *   - code blocks via `lastword:code[:{lang}]` w:sdt content controls
+ *     (canonical), pre-0.2.0 `LastWordCode_{lang}` bookmarks, or bare
+ *     CodeBlock-styled paragraphs; quotes via `lastword:quote` sdt or bare
+ *     Quote-styled paragraphs
  *   - headings via pStyle Heading1-9 (clamped to 6) OR outlineLvl
  *   - run formatting: b / i / u / strike / color / highlight (named colors
  *     mapped to hex) / run shading fills / InlineCode char style
@@ -52,6 +60,9 @@ final class DocxReader
     /** zip entry name (without leading word/) → bytes, for media resolution. */
     private array $media = [];
 
+    /** docProps/core.xml contents, when the archive has one. */
+    private ?string $coreXml = null;
+
     private ?string $title = null;
 
     public function __construct(
@@ -79,7 +90,11 @@ final class DocxReader
 
         $body = $this->firstChildByName($dom->documentElement, 'body');
 
-        $this->title = null;
+        // Canonical title slot: docProps/core.xml dc:title (shared with the
+        // Node mirror). When absent, the pre-0.2.0 legacy slot — the first
+        // top-level Title-styled paragraph — is consumed instead (see
+        // parseBlockContainer()).
+        $this->title = $this->parseCoreTitle();
         $blocks = $body !== null ? $this->parseBlockContainer($body, true) : [];
 
         $doc = [];
@@ -126,6 +141,9 @@ final class DocxReader
                 $numberingXml = $zip->getFromName('word/numbering.xml');
                 $this->numbering = is_string($numberingXml) ? $this->parseNumbering($numberingXml) : [];
 
+                $coreXml = $zip->getFromName('docProps/core.xml');
+                $this->coreXml = is_string($coreXml) ? $coreXml : null;
+
                 $this->media = [];
                 for ($i = 0; $i < $zip->numFiles; $i++) {
                     $name = $zip->getNameIndex($i);
@@ -145,6 +163,33 @@ final class DocxReader
             @unlink($tmp);
             @rmdir($tmpDir);
         }
+    }
+
+    /**
+     * dc:title from docProps/core.xml — null when the part is missing,
+     * unparsable, or the title element is absent/empty.
+     */
+    private function parseCoreTitle(): ?string
+    {
+        if ($this->coreXml === null) {
+            return null;
+        }
+
+        $dom = new DOMDocument();
+        $prev = libxml_use_internal_errors(true);
+        $ok = $dom->loadXML($this->coreXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$ok || $dom->documentElement === null) {
+            return null;
+        }
+
+        $title = $this->firstChildByName($dom->documentElement, 'title');
+        if ($title === null || $title->textContent === '') {
+            return null;
+        }
+
+        return $title->textContent;
     }
 
     /**
@@ -237,11 +282,13 @@ final class DocxReader
     /**
      * Walk the children of a block container (w:body, w:tc, w:sdtContent, …)
      * and assemble model blocks, grouping consecutive list / code / quote
-     * paragraphs.
+     * paragraphs. `$insideQuote` marks content already wrapped by a
+     * `lastword:quote` sdt so its Quote-styled paragraphs read as plain
+     * paragraphs instead of nesting another quote.
      *
      * @return list<array<string, mixed>>
      */
-    private function parseBlockContainer(DOMElement $container, bool $topLevel = false): array
+    private function parseBlockContainer(DOMElement $container, bool $topLevel = false, bool $insideQuote = false): array
     {
         $blocks = [];
         /** @var list<array{ilvl: int, ordered: bool, runs: list<array<string, mixed>>}> $pendingList */
@@ -285,7 +332,15 @@ final class DocxReader
         foreach ($this->blockChildren($container) as $node) {
             if ($node->localName === 'tbl') {
                 $flushAll();
-                $blocks[] = $this->parseTable($node);
+                $blocks[] = $this->parseTable($node, $insideQuote);
+
+                continue;
+            }
+            if ($node->localName === 'sdt') {
+                // Only lastword-tagged sdts surface here (blockChildren
+                // flattens the rest) — the canonical code / quote carriers.
+                $flushAll();
+                array_push($blocks, ...$this->parseTaggedSdt($node));
 
                 continue;
             }
@@ -325,7 +380,7 @@ final class DocxReader
                 continue;
             }
 
-            if ($p['style'] === 'Quote') {
+            if ($p['style'] === 'Quote' && !$insideQuote) {
                 $flushList();
                 $flushCode();
                 $para = ['type' => 'paragraph', 'runs' => $p['runs']];
@@ -389,8 +444,11 @@ final class DocxReader
     }
 
     /**
-     * Children of a block container, descending into w:sdt / w:customXml
-     * wrappers so wrapped content degrades gracefully instead of vanishing.
+     * Children of a block container, descending into w:customXml and
+     * unknown w:sdt wrappers so wrapped content degrades gracefully instead
+     * of vanishing. Sdts carrying a `lastword:` tag (the canonical code /
+     * quote metadata slots, shared with the Node mirror) are returned as-is
+     * for {@see parseTaggedSdt()}.
      *
      * @return list<DOMElement>
      */
@@ -408,6 +466,11 @@ final class DocxReader
 
                     break;
                 case 'sdt':
+                    if ($this->lastWordSdtTag($node) !== null) {
+                        $out[] = $node;
+
+                        break;
+                    }
                     $content = $this->firstChildByName($node, 'sdtContent');
                     if ($content !== null) {
                         array_push($out, ...$this->blockChildren($content));
@@ -424,6 +487,68 @@ final class DocxReader
         }
 
         return $out;
+    }
+
+    /**
+     * The sdt's w:tag value when it is one of ours (`lastword:code[:{lang}]`
+     * or `lastword:quote`); null for foreign / untagged sdts.
+     */
+    private function lastWordSdtTag(DOMElement $sdt): ?string
+    {
+        $sdtPr = $this->firstChildByName($sdt, 'sdtPr');
+        $tagNode = $sdtPr !== null ? $this->firstChildByName($sdtPr, 'tag') : null;
+        $tag = $tagNode !== null ? $this->wAttr($tagNode, 'val') : null;
+        if ($tag === null) {
+            return null;
+        }
+
+        $isCode = $tag === DocxWriter::SDT_TAG_CODE || str_starts_with($tag, DocxWriter::SDT_TAG_CODE . ':');
+        if ($isCode || $tag === DocxWriter::SDT_TAG_QUOTE) {
+            return $tag;
+        }
+
+        return null;
+    }
+
+    /**
+     * A `lastword:`-tagged sdt → the code or quote block it carries. The
+     * sdt tag is the canonical cross-language slot for the code block's
+     * `language` (the pre-0.2.0 bookmark is still honoured for old files
+     * via {@see parseParagraphNode()}).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function parseTaggedSdt(DOMElement $sdt): array
+    {
+        $tag = $this->lastWordSdtTag($sdt);
+        $content = $this->firstChildByName($sdt, 'sdtContent');
+        if ($tag === null || $content === null) {
+            return [];
+        }
+
+        if ($tag === DocxWriter::SDT_TAG_QUOTE) {
+            return [[
+                'type' => 'quote',
+                'blocks' => $this->parseBlockContainer($content, false, true),
+            ]];
+        }
+
+        // Code: one line per direct w:p child; language from the tag suffix.
+        $lines = [];
+        foreach ($content->childNodes as $node) {
+            if ($node instanceof DOMElement && $node->localName === 'p') {
+                $lines[] = $this->plainText($this->parseParagraphNode($node)['runs']);
+            }
+        }
+
+        $block = ['type' => 'code'];
+        $prefix = DocxWriter::SDT_TAG_CODE . ':';
+        if (str_starts_with($tag, $prefix) && strlen($tag) > strlen($prefix)) {
+            $block['language'] = substr($tag, strlen($prefix));
+        }
+        $block['text'] = implode("\n", $lines);
+
+        return [$block];
     }
 
     /**
@@ -478,7 +603,8 @@ final class DocxReader
             }
         }
 
-        // Code-language bookmark convention (see DocxWriter::renderCode()).
+        // Pre-0.2.0 code-language bookmark convention (`LastWordCode_{lang}`)
+        // — kept for back-compat; the canonical slot is the sdt tag.
         foreach ($p->childNodes as $child) {
             if ($child instanceof DOMElement && $child->localName === 'bookmarkStart') {
                 $name = $this->wAttr($child, 'name') ?? '';
@@ -732,7 +858,7 @@ final class DocxReader
     /**
      * @return array<string, mixed>
      */
-    private function parseTable(DOMElement $tbl): array
+    private function parseTable(DOMElement $tbl, bool $insideQuote = false): array
     {
         $rows = [];
         foreach ($tbl->childNodes as $node) {
@@ -747,7 +873,7 @@ final class DocxReader
             $cells = [];
             foreach ($node->childNodes as $tc) {
                 if ($tc instanceof DOMElement && $tc->localName === 'tc') {
-                    $cellBlocks = $this->parseBlockContainer($tc);
+                    $cellBlocks = $this->parseBlockContainer($tc, false, $insideQuote);
                     // The writer pads cells/tables with empty paragraphs to
                     // satisfy OOXML; parseBlockContainer already drops
                     // content-free paragraphs, so this is what remains.
