@@ -102,6 +102,31 @@ final class DocxWriter
     private int $orderedListCount = 0;
 
     /**
+     * Twips of horizontal space between the page margins, set from the doc's
+     * `page` block before any block renders. Table grids are laid out against
+     * it.
+     */
+    private int $contentWidth = 9360;
+
+    /** Page sizes in twips (1/1440in), portrait. */
+    private const PAGE_SIZES = [
+        'letter' => [12240, 15840],
+        'legal' => [12240, 20160],
+        'a4' => [11906, 16838],
+    ];
+
+    /**
+     * Cell margins every table gets unless it says otherwise, in POINTS —
+     * 3 / 5.4 / 3 / 5.4, which is 60 / 108 / 60 / 108 twips. 108 is the value
+     * Word itself uses for default side margins, which is why it reads as an
+     * odd number rather than a round one.
+     */
+    private const DEFAULT_CELL_MARGINS_PT = ['top' => 3, 'left' => 5.4, 'bottom' => 3, 'right' => 5.4];
+
+    /** The border every table edge gets unless it says otherwise. */
+    private const DEFAULT_BORDER = ['style' => 'single', 'sz' => 4, 'color' => 'auto'];
+
+    /**
      * @param  string|null  $tempDir  Override the temp dir used while ZipArchive
      *                                assembles the archive. Defaults to
      *                                {@see sys_get_temp_dir()}; callers running in
@@ -181,7 +206,7 @@ final class DocxWriter
                 $zip->addFromString('docProps/core.xml', $this->buildCoreXml((string) $doc['title']));
             }
             $zip->addFromString('word/document.xml', $documentXml);
-            $zip->addFromString('word/styles.xml', $this->buildStyles());
+            $zip->addFromString('word/styles.xml', $this->buildStyles($doc));
             $zip->addFromString('word/numbering.xml', $this->buildNumbering());
             $zip->addFromString('word/_rels/document.xml.rels', $this->buildDocumentRels());
             foreach ($this->mediaFiles as $archivePath => $bytes) {
@@ -280,13 +305,23 @@ final class DocxWriter
      */
     private function buildDocumentXml(array $doc): string
     {
+        $page = self::pageGeometry($doc['page'] ?? null);
+        // Table grids are laid out against the section's content width, so it
+        // has to be known before any block renders. Carrying 9360 as a literal
+        // — which all three engines did — silently gives a document with
+        // narrowed margins a table that no longer matches its own page.
+        $this->contentWidth = $page['w'] - $page['left'] - $page['right'];
+
         // The title lives in docProps/core.xml (dc:title) — the cross-language
         // slot shared with the Node mirror — not in a body paragraph.
         $body = $this->renderBlocks($doc['blocks'] ?? []);
 
+        $orient = $page['orientation'] === 'landscape' ? ' w:orient="landscape"' : '';
         $body .= '<w:sectPr>'
-            . '<w:pgSz w:w="12240" w:h="15840"/>'
-            . '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+            . '<w:pgSz w:w="' . $page['w'] . '" w:h="' . $page['h'] . '"' . $orient . '/>'
+            . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
+            . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'
+            . ' w:header="720" w:footer="720" w:gutter="0"/>'
             . '</w:sectPr>';
 
         return Xml::declaration()
@@ -344,7 +379,11 @@ final class DocxWriter
     {
         $level = max(1, min(6, (int) ($block['level'] ?? 1)));
 
-        return '<w:p><w:pPr><w:pStyle w:val="Heading' . $level . '"/></w:pPr>'
+        // A heading is a paragraph and takes the same properties. Without
+        // that, a section label that needed spacing or alignment had to be a
+        // bold paragraph impersonating a heading — and so appeared in no
+        // navigation pane and no table of contents.
+        return '<w:p>' . self::pPrXml($block, 'Heading' . $level)
             . $this->renderRuns($block['runs'] ?? [])
             . '</w:p>';
     }
@@ -352,24 +391,7 @@ final class DocxWriter
     /** @param  array<string, mixed>  $block */
     private function renderParagraph(array $block, ?string $styleOverride = null): string
     {
-        $pPr = '';
-        if ($styleOverride !== null) {
-            $pPr .= '<w:pStyle w:val="' . $styleOverride . '"/>';
-        }
-        $align = $block['align'] ?? null;
-        if (is_string($align) && $align !== 'left') {
-            $jc = match ($align) {
-                'center' => 'center',
-                'right' => 'right',
-                'justify' => 'both',
-                default => null,
-            };
-            if ($jc !== null) {
-                $pPr .= '<w:jc w:val="' . $jc . '"/>';
-            }
-        }
-
-        return '<w:p>' . ($pPr !== '' ? "<w:pPr>{$pPr}</w:pPr>" : '')
+        return '<w:p>' . self::pPrXml($block, $styleOverride)
             . $this->renderRuns($block['runs'] ?? [])
             . '</w:p>';
     }
@@ -409,6 +431,95 @@ final class DocxWriter
         return $xml;
     }
 
+    /**
+     * Lay a table's authored rows onto a grid, resolving both merge
+     * directions.
+     *
+     * The author writes cells HTML-style: a `rowSpan` cell appears ONCE, and
+     * the rows it covers list only their own remaining cells. OOXML has no
+     * such shorthand — every row must carry a cell for every grid column, and
+     * a row that is short is a malformed table Word repairs by shifting
+     * everything left. So the covered rows get a synthesised `w:vMerge`
+     * continuation here.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return array{0: list<list<array<string, mixed>>>, 1: int}
+     *         The laid-out rows, and the column count they need.
+     */
+    private static function layoutRows(array $rows): array
+    {
+        /** @var array<int, array{rows: int, span: int, shading: mixed}> $pending */
+        $pending = [];
+        $out = [];
+        $colCount = 1;
+
+        foreach ($rows as $row) {
+            $authored = array_values(array_filter($row['cells'] ?? [], 'is_array'));
+            $line = [];
+            $col = 0;
+            $next = 0;
+
+            while (true) {
+                if (isset($pending[$col]) && $pending[$col]['rows'] > 0) {
+                    // A continuation carries the origin's shading and nothing
+                    // else: without the fill the merged block renders striped,
+                    // and with the origin's borders it would draw a rule
+                    // straight through its own middle.
+                    $line[] = [
+                        'cell' => ['blocks' => []],
+                        'span' => $pending[$col]['span'],
+                        'vMerge' => 'continue',
+                        'shading' => $pending[$col]['shading'],
+                    ];
+                    $pending[$col]['rows']--;
+                    $col += $pending[$col]['span'];
+
+                    continue;
+                }
+
+                if ($next < count($authored)) {
+                    $cell = $authored[$next++];
+                    $span = max(1, (int) ($cell['colSpan'] ?? 1));
+                    $rowSpan = max(1, (int) ($cell['rowSpan'] ?? 1));
+                    $line[] = [
+                        'cell' => $cell,
+                        'span' => $span,
+                        'vMerge' => $rowSpan > 1 ? 'restart' : null,
+                        'shading' => $cell['shading'] ?? null,
+                    ];
+                    if ($rowSpan > 1) {
+                        $pending[$col] = [
+                            'rows' => $rowSpan - 1,
+                            'span' => $span,
+                            'shading' => $cell['shading'] ?? null,
+                        ];
+                    }
+                    $col += $span;
+
+                    continue;
+                }
+
+                // Nothing authored left — but a merge started further right
+                // still owes this row a continuation.
+                $ahead = null;
+                foreach ($pending as $at => $p) {
+                    if ($at > $col && $p['rows'] > 0 && ($ahead === null || $at < $ahead)) {
+                        $ahead = $at;
+                    }
+                }
+                if ($ahead === null) {
+                    break;
+                }
+                $col = $ahead;
+            }
+
+            $colCount = max($colCount, $col);
+            $out[] = $line;
+        }
+
+        return [$out, $colCount];
+    }
+
     /** @param  array<string, mixed>  $block */
     private function renderTable(array $block): string
     {
@@ -416,43 +527,116 @@ final class DocxWriter
         if ($rows === []) {
             return '';
         }
-        $colCount = 1;
-        foreach ($rows as $row) {
-            $colCount = max($colCount, count($row['cells'] ?? []));
+
+        [$laid, $colCount] = self::layoutRows($rows);
+
+        // A table narrower than the text column narrows its grid too: emitting
+        // w:tblW pct while leaving the grid at full width hands Word two
+        // contradictory answers.
+        $tableWidth = $this->contentWidth;
+        $tblW = '<w:tblW w:w="0" w:type="auto"/>';
+        if (is_numeric($block['width'] ?? null) && (float) $block['width'] > 0) {
+            $pct = min(100.0, (float) $block['width']);
+            $tableWidth = (int) round($this->contentWidth * ($pct / 100));
+            $tblW = '<w:tblW w:w="' . (int) round($pct * 50) . '" w:type="pct"/>';
         }
-        $colWidth = intdiv(9360, $colCount); // 6.5in of twips split evenly
 
-        $xml = '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
-            . '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            . '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            . '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            . '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            . '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            . '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            . '</w:tblBorders></w:tblPr>';
-        $xml .= '<w:tblGrid>' . str_repeat('<w:gridCol w:w="' . $colWidth . '"/>', $colCount) . '</w:tblGrid>';
+        $weights = null;
+        if (is_array($block['widths'] ?? null) && count($block['widths']) === $colCount) {
+            $weights = array_map(static fn ($w) => is_numeric($w) ? (float) $w : 0.0, array_values($block['widths']));
+        }
+        $grid = self::splitColumns($tableWidth, $colCount, $weights);
 
-        foreach ($rows as $row) {
-            $isHeader = (bool) ($row['header'] ?? false);
+        $tblPr = $tblW;
+        $align = $block['align'] ?? null;
+        if (is_string($align) && in_array($align, ['center', 'right'], true)) {
+            $tblPr .= '<w:jc w:val="' . $align . '"/>';
+        }
+        $borders = is_array($block['borders'] ?? null) ? $block['borders'] : null;
+        $tblPr .= self::bordersXml(
+            'tblBorders',
+            $borders ?? array_fill_keys(['top', 'left', 'bottom', 'right', 'insideH', 'insideV'], self::DEFAULT_BORDER),
+            ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'],
+        );
+        if ($weights !== null) {
+            // Without w:tblLayout fixed, Word re-fits columns to their content
+            // and the requested proportions are advisory.
+            $tblPr .= '<w:tblLayout w:type="fixed"/>';
+        }
+        $padding = is_array($block['cellPadding'] ?? null) ? $block['cellPadding'] : self::DEFAULT_CELL_MARGINS_PT;
+        $tblPr .= self::marginsXml('tblCellMar', $padding);
+
+        $xml = '<w:tbl><w:tblPr>' . $tblPr . '</w:tblPr><w:tblGrid>';
+        foreach ($grid as $w) {
+            $xml .= '<w:gridCol w:w="' . $w . '"/>';
+        }
+        $xml .= '</w:tblGrid>';
+
+        foreach ($laid as $r => $line) {
+            $isHeader = (bool) ($rows[$r]['header'] ?? false);
             $xml .= '<w:tr>';
             if ($isHeader) {
                 $xml .= '<w:trPr><w:tblHeader/></w:trPr>';
             }
-            $cells = array_values(array_filter($row['cells'] ?? [], 'is_array'));
-            for ($c = 0; $c < $colCount; $c++) {
-                $cell = $cells[$c] ?? ['blocks' => []];
-                $tcPr = '<w:tcW w:w="' . $colWidth . '" w:type="dxa"/>';
-                if ($isHeader) {
-                    $tcPr .= '<w:shd w:val="clear" w:color="auto" w:fill="' . self::HEADER_FILL . '"/>';
+            $col = 0;
+            foreach ($line as $slot) {
+                $span = $slot['span'];
+                $width = 0;
+                for ($i = $col; $i < min($col + $span, count($grid)); $i++) {
+                    $width += $grid[$i];
                 }
-                $content = $this->renderCellBlocks($cell['blocks'] ?? [], $isHeader);
-                $xml .= '<w:tc><w:tcPr>' . $tcPr . '</w:tcPr>' . $content . '</w:tc>';
+                $col += $span;
+                $xml .= '<w:tc>' . $this->tcPrXml($slot, $span, $width, $isHeader) . '</w:tc>';
             }
             $xml .= '</w:tr>';
         }
-        $xml .= '</w:tbl>';
 
-        return $xml;
+        return $xml . '</w:tbl>';
+    }
+
+    /**
+     * Cell properties, in CT_TcPr order:
+     * tcW, gridSpan, vMerge, tcBorders, shd, tcMar, vAlign — followed by the
+     * cell's content, which every cell must end with a w:p of.
+     *
+     * @param  array<string, mixed>  $slot
+     */
+    private function tcPrXml(array $slot, int $span, int $width, bool $isHeader): string
+    {
+        /** @var array<string, mixed> $cell */
+        $cell = $slot['cell'];
+        $continuation = $slot['vMerge'] === 'continue';
+
+        $tcPr = '<w:tcW w:w="' . $width . '" w:type="dxa"/>';
+        if ($span > 1) {
+            $tcPr .= '<w:gridSpan w:val="' . $span . '"/>';
+        }
+        if ($slot['vMerge'] === 'restart') {
+            $tcPr .= '<w:vMerge w:val="restart"/>';
+        } elseif ($continuation) {
+            $tcPr .= '<w:vMerge/>';
+        }
+
+        if (!$continuation && is_array($cell['borders'] ?? null)) {
+            $tcPr .= self::bordersXml('tcBorders', $cell['borders'], ['top', 'left', 'bottom', 'right']);
+        }
+
+        $shading = $slot['shading'] ?? null;
+        if ($shading === null && $isHeader && !$continuation) {
+            $shading = '#' . self::HEADER_FILL;
+        }
+        $tcPr .= self::shadingXml($shading);
+
+        if (!$continuation && is_array($cell['padding'] ?? null)) {
+            $tcPr .= self::marginsXml('tcMar', $cell['padding']);
+        }
+        if (!$continuation && is_string($cell['valign'] ?? null)
+            && in_array($cell['valign'], ['top', 'center', 'bottom'], true)) {
+            $tcPr .= '<w:vAlign w:val="' . $cell['valign'] . '"/>';
+        }
+
+        return '<w:tcPr>' . $tcPr . '</w:tcPr>'
+            . $this->renderCellBlocks($cell['blocks'] ?? [], $isHeader && !$continuation);
     }
 
     /**
@@ -645,14 +829,24 @@ final class DocxWriter
     /** @param  array<string, mixed>  $run */
     private function renderRun(array $run): string
     {
-        // rPr children in CT_RPr schema order:
-        // rStyle, rFonts, b, i, strike, color, u, shd
+        // rPr children in CT_RPr schema order — it is an xsd:sequence, so this
+        // is the schema's order and not a preference:
+        // rStyle, rFonts, b, i, smallCaps, strike, color, spacing, sz, szCs, u, shd
         $rPr = '';
+        $font = is_string($run['font'] ?? null) && $run['font'] !== '' ? $run['font'] : null;
         if (!empty($run['code'])) {
+            // `code` wins over an explicit font: it is the more specific request.
             $rPr .= '<w:rStyle w:val="InlineCode"/>';
-            $rPr .= '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/>';
+            $font = 'Consolas';
         } elseif (isset($run['link']) && is_string($run['link']) && $run['link'] !== '') {
             $rPr .= '<w:rStyle w:val="Hyperlink"/>';
+        }
+        if ($font !== null) {
+            // Three attributes, not one: with only w:ascii, Word picks its own
+            // face for anything it classes as high-ANSI or complex-script and
+            // one run renders in two fonts.
+            $f = Xml::attr($font);
+            $rPr .= '<w:rFonts w:ascii="' . $f . '" w:hAnsi="' . $f . '" w:cs="' . $f . '"/>';
         }
         if (!empty($run['bold'])) {
             $rPr .= '<w:b/>';
@@ -660,20 +854,35 @@ final class DocxWriter
         if (!empty($run['italic'])) {
             $rPr .= '<w:i/>';
         }
+        if (!empty($run['smallCaps'])) {
+            $rPr .= '<w:smallCaps/>';
+        }
         if (!empty($run['strike'])) {
             $rPr .= '<w:strike/>';
         }
-        if (isset($run['color']) && is_string($run['color']) && preg_match('/^#([0-9A-Fa-f]{6})$/', $run['color'], $m) === 1) {
-            $rPr .= '<w:color w:val="' . strtoupper($m[1]) . '"/>';
+        $color = self::hex($run['color'] ?? null);
+        if ($color !== null) {
+            $rPr .= '<w:color w:val="' . $color . '"/>';
+        }
+        // Tracking of zero is already the default, so it is absent rather than
+        // w:val="0" — otherwise every untracked run would differ from the same
+        // run written before this feature existed. Negative is legal, and is
+        // how a large display size gets tightened.
+        if (is_numeric($run['letterSpacing'] ?? null) && (float) $run['letterSpacing'] != 0.0) {
+            $rPr .= '<w:spacing w:val="' . self::twips($run['letterSpacing']) . '"/>';
+        }
+        $size = self::halfPoints($run['size'] ?? null);
+        if ($size !== null) {
+            // szCs is not decoration: omit it and a complex-script run
+            // silently keeps the default size.
+            $rPr .= '<w:sz w:val="' . $size . '"/><w:szCs w:val="' . $size . '"/>';
         }
         if (!empty($run['underline'])) {
             $rPr .= '<w:u w:val="single"/>';
         }
-        if (isset($run['highlight']) && is_string($run['highlight']) && preg_match('/^#([0-9A-Fa-f]{6})$/', $run['highlight'], $m) === 1) {
-            // Exact-hex highlight via run shading — w:highlight only takes
-            // named colors; the reader maps both back to `highlight`.
-            $rPr .= '<w:shd w:val="clear" w:color="auto" w:fill="' . strtoupper($m[1]) . '"/>';
-        }
+        // Exact-hex highlight via run shading — w:highlight only takes named
+        // colors; the reader maps both back to `highlight`.
+        $rPr .= self::shadingXml($run['highlight'] ?? null);
 
         $text = (string) ($run['text'] ?? '');
         $parts = explode("\n", str_replace("\r\n", "\n", $text));
@@ -693,16 +902,280 @@ final class DocxWriter
         return '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '') . $body . '</w:r>';
     }
 
+    // ─── Units and property fragments ────────────────────────────────────
+    //
+    // WordprocessingML measures four different things in four different
+    // units, and getting one wrong produces a document that opens fine and is
+    // the wrong size. They are collected here, once, so the three engines can
+    // be compared line for line:
+    //
+    //   points → TWENTIETHS of a point (twips)  spacing, indents, margins
+    //   points → HALF-points                    font size
+    //   points → EIGHTHS of a point             border width
+    //   percent → FIFTIETHS of a percent        table width
+    //
+    // Suite: fancy-conformance `last-word/docx-constructs`.
+
+    /** Points → twips. */
+    private static function twips(mixed $pt): ?int
+    {
+        return is_numeric($pt) ? (int) round(((float) $pt) * 20) : null;
+    }
+
+    /** Points → half-points (w:sz on a run). */
+    private static function halfPoints(mixed $pt): ?int
+    {
+        return is_numeric($pt) && (float) $pt > 0 ? (int) round(((float) $pt) * 2) : null;
+    }
+
+    /** #RRGGBB → RRGGBB, upper-cased. Anything else is null. */
+    private static function hex(mixed $value): ?string
+    {
+        return is_string($value) && preg_match('/^#([0-9A-Fa-f]{6})$/', $value, $m) === 1
+            ? strtoupper($m[1])
+            : null;
+    }
+
+    /** `<w:shd>` — the one spelling used for runs, paragraphs and cells alike. */
+    private static function shadingXml(mixed $color): string
+    {
+        $hex = self::hex($color);
+
+        return $hex === null ? '' : '<w:shd w:val="clear" w:color="auto" w:fill="' . $hex . '"/>';
+    }
+
+    /**
+     * One border edge.
+     *
+     * `style: none` becomes `w:val="nil"` with no width and no colour, because
+     * nil is the only way to REMOVE a border — a zero width is not it, and a
+     * white one only hides it against a white page.
+     *
+     * @param  array<string, mixed>  $border
+     */
+    private static function borderEdgeXml(string $tag, array $border): string
+    {
+        $style = is_string($border['style'] ?? null) ? $border['style'] : 'single';
+        if ($style === 'none') {
+            return '<w:' . $tag . ' w:val="nil"/>';
+        }
+        $width = is_numeric($border['width'] ?? null) ? (float) $border['width'] : 0.5;
+        $sz = max(2, min(96, (int) round($width * 8)));
+        $color = self::hex($border['color'] ?? null) ?? 'auto';
+
+        return '<w:' . $tag . ' w:val="' . $style . '" w:sz="' . $sz . '" w:space="0" w:color="' . $color . '"/>';
+    }
+
+    /**
+     * A border container (`w:pBdr`, `w:tblBorders`, `w:tcBorders`) in the
+     * edge order its CT_ type declares. Absent edges are omitted, so a
+     * partial `borders` stays partial.
+     *
+     * @param  list<string>  $edges
+     * @param  array<string, mixed>  $borders
+     */
+    private static function bordersXml(string $wrapper, array $borders, array $edges): string
+    {
+        $inner = '';
+        foreach ($edges as $edge) {
+            $spec = $borders[$edge] ?? null;
+            if (is_array($spec)) {
+                $inner .= self::borderEdgeXml($edge, $spec);
+            }
+        }
+
+        return $inner === '' ? '' : '<w:' . $wrapper . '>' . $inner . '</w:' . $wrapper . '>';
+    }
+
+    /**
+     * A margin container (`w:tblCellMar`, `w:tcMar`). Sides are twips and a
+     * side that was not given is not emitted.
+     *
+     * @param  array<string, mixed>  $sides
+     */
+    private static function marginsXml(string $wrapper, array $sides): string
+    {
+        $inner = '';
+        foreach (['top', 'left', 'bottom', 'right'] as $side) {
+            $twips = self::twips($sides[$side] ?? null);
+            if ($twips !== null) {
+                $inner .= '<w:' . $side . ' w:w="' . $twips . '" w:type="dxa"/>';
+            }
+        }
+
+        return $inner === '' ? '' : '<w:' . $wrapper . '>' . $inner . '</w:' . $wrapper . '>';
+    }
+
+    /**
+     * Page size and margins in twips.
+     *
+     * @param  mixed  $page
+     * @return array{w: int, h: int, top: int, right: int, bottom: int, left: int, orientation: string}
+     */
+    private static function pageGeometry(mixed $page): array
+    {
+        $page = is_array($page) ? $page : [];
+        $size = is_string($page['size'] ?? null) ? strtolower($page['size']) : 'letter';
+        [$w, $h] = self::PAGE_SIZES[$size] ?? self::PAGE_SIZES['letter'];
+
+        $orientation = ($page['orientation'] ?? null) === 'landscape' ? 'landscape' : 'portrait';
+        if ($orientation === 'landscape') {
+            // Swapping the axes without w:orient gives a page that is the
+            // right shape and prints portrait. Both are required.
+            [$w, $h] = [$h, $w];
+        }
+
+        $margins = is_array($page['margins'] ?? null) ? $page['margins'] : [];
+        $side = static fn (string $k): int => self::twips($margins[$k] ?? null) ?? 1440;
+
+        return [
+            'w' => $w,
+            'h' => $h,
+            'top' => $side('top'),
+            'right' => $side('right'),
+            'bottom' => $side('bottom'),
+            'left' => $side('left'),
+            'orientation' => $orientation,
+        ];
+    }
+
+    /**
+     * Split a width into `$count` columns by relative weight, giving any
+     * rounding remainder to the LAST column so the grid sums to the content
+     * width exactly. Three engines rounding independently is how one language
+     * ends up with a table a twip narrower than the other two.
+     *
+     * @param  list<float>|null  $weights
+     * @return list<int>
+     */
+    private static function splitColumns(int $total, int $count, ?array $weights = null): array
+    {
+        if ($count < 1) {
+            return [];
+        }
+        $weights = $weights !== null && count($weights) === $count ? $weights : array_fill(0, $count, 1.0);
+        $sum = array_sum($weights);
+        if ($sum <= 0) {
+            $weights = array_fill(0, $count, 1.0);
+            $sum = (float) $count;
+        }
+
+        $out = [];
+        $used = 0;
+        for ($i = 0; $i < $count - 1; $i++) {
+            $w = (int) round($total * ($weights[$i] / $sum));
+            $out[] = $w;
+            $used += $w;
+        }
+        $out[] = $total - $used;
+
+        return $out;
+    }
+
+    /**
+     * The column split for a grid of `$count` equal columns.
+     *
+     * Public so the READER can ask the writer what it would have produced,
+     * rather than carrying a second copy of the rounding rule. Two copies of
+     * a rounding rule is how a reader decides a grid is uneven and hands back
+     * explicit widths for a table that never asked for any.
+     *
+     * @return list<int>
+     */
+    public static function splitColumnsFor(int $total, int $count): array
+    {
+        return self::splitColumns($total, $count);
+    }
+
+    /**
+     * Paragraph properties, in CT_PPr order:
+     * pStyle, keepNext, numPr, pBdr, shd, spacing, ind, jc, outlineLvl.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private static function pPrXml(array $block, ?string $style = null, string $numPr = ''): string
+    {
+        $inner = '';
+        if ($style !== null) {
+            $inner .= '<w:pStyle w:val="' . $style . '"/>';
+        }
+        if (!empty($block['keepNext'])) {
+            $inner .= '<w:keepNext/>';
+        }
+        $inner .= $numPr;
+
+        if (is_array($block['borders'] ?? null)) {
+            $inner .= self::bordersXml('pBdr', $block['borders'], ['top', 'left', 'bottom', 'right']);
+        }
+        $inner .= self::shadingXml($block['shading'] ?? null);
+
+        // before, after, line and lineRule all live on ONE w:spacing element;
+        // emitting two would be invalid.
+        $spacing = '';
+        $before = self::twips($block['spaceBefore'] ?? null);
+        if ($before !== null) {
+            $spacing .= ' w:before="' . $before . '"';
+        }
+        $after = self::twips($block['spaceAfter'] ?? null);
+        if ($after !== null) {
+            $spacing .= ' w:after="' . $after . '"';
+        }
+        if (is_numeric($block['lineHeight'] ?? null) && (float) $block['lineHeight'] > 0) {
+            $spacing .= ' w:line="' . (int) round(((float) $block['lineHeight']) * 240) . '" w:lineRule="auto"';
+        }
+        if ($spacing !== '') {
+            $inner .= '<w:spacing' . $spacing . '/>';
+        }
+
+        $ind = '';
+        $left = self::twips($block['indentLeft'] ?? null);
+        if ($left !== null) {
+            $ind .= ' w:left="' . $left . '"';
+        }
+        $right = self::twips($block['indentRight'] ?? null);
+        if ($right !== null) {
+            $ind .= ' w:right="' . $right . '"';
+        }
+        if ($ind !== '') {
+            $inner .= '<w:ind' . $ind . '/>';
+        }
+
+        $align = $block['align'] ?? null;
+        if (is_string($align) && $align !== 'left') {
+            $jc = match ($align) {
+                'center' => 'center',
+                'right' => 'right',
+                'justify' => 'both',
+                default => null,
+            };
+            if ($jc !== null) {
+                $inner .= '<w:jc w:val="' . $jc . '"/>';
+            }
+        }
+
+        return $inner === '' ? '' : '<w:pPr>' . $inner . '</w:pPr>';
+    }
+
     // ─── Static parts ────────────────────────────────────────────────────
 
-    private function buildStyles(): string
+    /**
+     * @param  array<string, mixed>  $doc
+     */
+    private function buildStyles(array $doc = []): string
     {
         $headingSizes = [1 => 36, 2 => 32, 3 => 28, 4 => 26, 5 => 24, 6 => 22];
+
+        $font = is_string($doc['defaultFont'] ?? null) && $doc['defaultFont'] !== ''
+            ? Xml::attr($doc['defaultFont'])
+            : 'Calibri';
+        $size = self::halfPoints($doc['defaultSize'] ?? null) ?? 22;
 
         $xml = Xml::declaration();
         $xml .= '<w:styles xmlns:w="' . self::NS_W . '">';
         $xml .= '<w:docDefaults>'
-            . '<w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault>'
+            . '<w:rPrDefault><w:rPr><w:rFonts w:ascii="' . $font . '" w:hAnsi="' . $font . '"'
+            . ' w:eastAsia="' . $font . '" w:cs="' . $font . '"/>'
+            . '<w:sz w:val="' . $size . '"/><w:szCs w:val="' . $size . '"/></w:rPr></w:rPrDefault>'
             . '<w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
             . '</w:docDefaults>';
 

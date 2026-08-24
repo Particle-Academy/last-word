@@ -41,6 +41,29 @@ use ZipArchive;
  */
 final class DocxReader
 {
+    /**
+     * Faces that mean `code` rather than a font choice. Word-authored files
+     * mark inline code by picking a monospace family and nothing else, so the
+     * reader has to recognise the family; the writer's own output is
+     * unambiguous (it also carries the InlineCode character style).
+     */
+    private const MONO_FONTS = ['consolas', 'courier new', 'courier', 'menlo', 'monaco', 'source code pro'];
+
+    /** The header-cell grey, shared with the writer and both sibling engines. */
+    private const HEADER_FILL = 'E7E7E7';
+
+    /** Box edges, in the order every CT_ border and margin type declares them. */
+    private const BOX_EDGES = ['top', 'left', 'bottom', 'right'];
+
+    private const TABLE_EDGES = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'];
+
+    /** Page sizes in twips, portrait — mirrors the writer's table. */
+    private const PAGE_SIZES = [
+        'letter' => [12240, 15840],
+        'legal' => [12240, 20160],
+        'a4' => [11906, 16838],
+    ];
+
     /** w:highlight named colors → hex. */
     private const HIGHLIGHT_COLORS = [
         'yellow' => '#FFFF00', 'green' => '#00FF00', 'cyan' => '#00FFFF',
@@ -62,6 +85,8 @@ final class DocxReader
 
     /** docProps/core.xml contents, when the archive has one. */
     private ?string $coreXml = null;
+
+    private ?string $stylesXml = null;
 
     private ?string $title = null;
 
@@ -101,9 +126,101 @@ final class DocxReader
         if ($this->title !== null && $this->title !== '') {
             $doc['title'] = $this->title;
         }
+
+        // Section geometry and document defaults are surfaced ONLY when they
+        // differ from what the writer produces unasked, for the same reason
+        // table options are: a Letter portrait page at one-inch margins is
+        // what every document written before `page` existed contains.
+        $page = $body !== null ? $this->parsePage($this->firstChildByName($body, 'sectPr')) : null;
+        if ($page !== null) {
+            $doc['page'] = $page;
+        }
+        foreach ($this->parseDocDefaults() as $key => $value) {
+            $doc[$key] = $value;
+        }
+
         $doc['blocks'] = $blocks;
 
         return $doc;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function parsePage(?DOMElement $sectPr): ?array
+    {
+        if ($sectPr === null) {
+            return null;
+        }
+        $out = [];
+
+        $pgSz = $this->firstChildByName($sectPr, 'pgSz');
+        $w = $pgSz !== null && is_numeric($this->wAttr($pgSz, 'w')) ? (int) $this->wAttr($pgSz, 'w') : 12240;
+        $h = $pgSz !== null && is_numeric($this->wAttr($pgSz, 'h')) ? (int) $this->wAttr($pgSz, 'h') : 15840;
+        if ($pgSz !== null && $this->wAttr($pgSz, 'orient') === 'landscape') {
+            $out['orientation'] = 'landscape';
+            [$w, $h] = [$h, $w];
+        }
+        foreach (self::PAGE_SIZES as $name => [$pw, $ph]) {
+            if ($pw === $w && $ph === $h && $name !== 'letter') {
+                $out['size'] = $name;
+            }
+        }
+
+        $pgMar = $this->firstChildByName($sectPr, 'pgMar');
+        $margins = [];
+        if ($pgMar !== null) {
+            foreach (self::BOX_EDGES as $side) {
+                $value = $this->wAttr($pgMar, $side);
+                if (is_numeric($value) && (int) $value !== 1440) {
+                    $margins[$side] = self::points((float) $value);
+                }
+            }
+        }
+        if ($margins !== []) {
+            $out['margins'] = $margins;
+        }
+
+        return $out === [] ? null : $out;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function parseDocDefaults(): array
+    {
+        if ($this->stylesXml === null) {
+            return [];
+        }
+        $dom = new DOMDocument();
+        $prev = libxml_use_internal_errors(true);
+        $loaded = $dom->loadXML($this->stylesXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$loaded || $dom->documentElement === null) {
+            return [];
+        }
+
+        $rPr = $this->firstDescendantByName($dom->documentElement, 'rPrDefault');
+        $rPr = $rPr !== null ? $this->firstChildByName($rPr, 'rPr') : null;
+        if ($rPr === null) {
+            return [];
+        }
+
+        $out = [];
+        $rFonts = $this->firstChildByName($rPr, 'rFonts');
+        $ascii = $rFonts !== null ? $this->wAttr($rFonts, 'ascii') : null;
+        if (is_string($ascii) && $ascii !== '' && $ascii !== 'Calibri') {
+            $out['defaultFont'] = $ascii;
+        }
+        $sz = $this->firstChildByName($rPr, 'sz');
+        $val = $sz !== null ? $this->wAttr($sz, 'val') : null;
+        if (is_numeric($val) && (int) $val !== 22) {
+            $size = ((float) $val) / 2;
+            $out['defaultSize'] = $size == (int) $size ? (int) $size : $size;
+        }
+
+        return $out;
     }
 
     /**
@@ -143,6 +260,9 @@ final class DocxReader
 
                 $coreXml = $zip->getFromName('docProps/core.xml');
                 $this->coreXml = is_string($coreXml) ? $coreXml : null;
+
+                $stylesXml = $zip->getFromName('word/styles.xml');
+                $this->stylesXml = is_string($stylesXml) ? $stylesXml : null;
 
                 $this->media = [];
                 for ($i = 0; $i < $zip->numFiles; $i++) {
@@ -418,13 +538,17 @@ final class DocxReader
             }
 
             if ($level !== null && $hasText) {
-                $blocks[] = ['type' => 'heading', 'level' => $level, 'runs' => $p['runs']];
+                $heading = ['type' => 'heading', 'level' => $level, 'runs' => $p['runs']];
+                if ($p['align'] !== null) {
+                    $heading['align'] = $p['align'];
+                }
+                $blocks[] = $heading + $p['props'];
             } elseif ($hasText || ($p['runs'] !== [] && $p['images'] === [])) {
                 $para = ['type' => 'paragraph', 'runs' => $p['runs']];
                 if ($p['align'] !== null) {
                     $para['align'] = $p['align'];
                 }
-                $blocks[] = $para;
+                $blocks[] = $para + $p['props'];
             } elseif (!$hasText && $p['images'] === [] && $p['bottomBorder']) {
                 $blocks[] = ['type' => 'hr'];
             }
@@ -603,6 +727,8 @@ final class DocxReader
             }
         }
 
+        $props = $this->parseParagraphProperties($pPr);
+
         // Pre-0.2.0 code-language bookmark convention (`LastWordCode_{lang}`)
         // — kept for back-compat; the canonical slot is the sdt tag.
         foreach ($p->childNodes as $child) {
@@ -620,6 +746,7 @@ final class DocxReader
         return [
             'style' => $style,
             'align' => $align,
+            'props' => $props,
             'outlineLvl' => $outlineLvl,
             'numPr' => $numPr,
             'bottomBorder' => $bottomBorder,
@@ -628,6 +755,154 @@ final class DocxReader
             'runs' => $this->mergeRuns($runs),
             'images' => $state['images'],
         ];
+    }
+
+    /**
+     * Paragraph properties back into the model — the same set `paragraph`,
+     * `heading` and a list item all accept. `align` is left to the caller,
+     * which already computed it.
+     *
+     * @return array<string, mixed>
+     */
+    private function parseParagraphProperties(?DOMElement $pPr): array
+    {
+        if ($pPr === null) {
+            return [];
+        }
+        $out = [];
+
+        $spacing = $this->firstChildByName($pPr, 'spacing');
+        if ($spacing !== null) {
+            foreach (['before' => 'spaceBefore', 'after' => 'spaceAfter'] as $attr => $key) {
+                $value = $this->wAttr($spacing, $attr);
+                if (is_numeric($value)) {
+                    $out[$key] = self::points((float) $value);
+                }
+            }
+            $line = $this->wAttr($spacing, 'line');
+            if (is_numeric($line) && $this->wAttr($spacing, 'lineRule') === 'auto') {
+                $out['lineHeight'] = round(((float) $line) / 240, 3);
+            }
+        }
+
+        $ind = $this->firstChildByName($pPr, 'ind');
+        if ($ind !== null) {
+            foreach (['left' => 'indentLeft', 'right' => 'indentRight'] as $attr => $key) {
+                $value = $this->wAttr($ind, $attr);
+                if (is_numeric($value)) {
+                    $out[$key] = self::points((float) $value);
+                }
+            }
+        }
+
+        $keepNext = $this->firstChildByName($pPr, 'keepNext');
+        if ($keepNext !== null && $this->toggleOn($this->wAttr($keepNext, 'val'))) {
+            $out['keepNext'] = true;
+        }
+
+        $shd = $this->firstChildByName($pPr, 'shd');
+        if ($shd !== null) {
+            $fill = $this->wAttr($shd, 'fill');
+            if (is_string($fill) && preg_match('/^[0-9A-Fa-f]{6}$/', $fill) === 1) {
+                $out['shading'] = '#' . strtoupper($fill);
+            }
+        }
+
+        $borders = $this->parseBorders($this->firstChildByName($pPr, 'pBdr'), self::BOX_EDGES);
+        if ($borders !== null) {
+            $out['borders'] = $borders;
+        }
+
+        return $out;
+    }
+
+    /** Twips → points, kept exact for the halves the writer can emit. */
+    private static function points(float $twips): float|int
+    {
+        $pt = round($twips / 20, 2);
+
+        return $pt == (int) $pt ? (int) $pt : $pt;
+    }
+
+    /**
+     * One border edge back into the model.
+     *
+     * Defaults are NOT surfaced: `style` only when it is not `single`,
+     * `color` only when it is not `auto`. Otherwise reading a document written
+     * from a model returns a bigger model than went in, and writing that model
+     * back produces a different file.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function parseBorderEdge(?DOMElement $edge): ?array
+    {
+        if ($edge === null) {
+            return null;
+        }
+        $val = $this->wAttr($edge, 'val') ?? 'single';
+        if ($val === 'nil' || $val === 'none') {
+            return ['style' => 'none'];
+        }
+        $out = [];
+        if ($val !== 'single') {
+            $out['style'] = $val;
+        }
+        $sz = $this->wAttr($edge, 'sz');
+        if (is_numeric($sz)) {
+            $width = round(((float) $sz) / 8, 3);
+            $out['width'] = $width == (int) $width ? (int) $width : $width;
+        }
+        $color = $this->wAttr($edge, 'color');
+        if (is_string($color) && preg_match('/^[0-9A-Fa-f]{6}$/', $color) === 1) {
+            $out['color'] = '#' . strtoupper($color);
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  list<string>  $edges
+     * @return array<string, mixed>|null
+     */
+    private function parseBorders(?DOMElement $container, array $edges): ?array
+    {
+        if ($container === null) {
+            return null;
+        }
+        $out = [];
+        foreach ($edges as $edge) {
+            $border = $this->parseBorderEdge($this->firstChildByName($container, $edge));
+            if ($border !== null) {
+                $out[$edge] = $border;
+            }
+        }
+
+        return $out === [] ? null : $out;
+    }
+
+    /**
+     * A margin container (`w:tblCellMar`, `w:tcMar`) back into points.
+     *
+     * @return array<string, float|int>|null
+     */
+    private function parseSides(?DOMElement $container): ?array
+    {
+        if ($container === null) {
+            return null;
+        }
+        $out = [];
+        foreach (self::BOX_EDGES as $side) {
+            $node = $this->firstChildByName($container, $side);
+            if ($node === null) {
+                continue;
+            }
+            $w = $this->wAttr($node, 'w');
+            if (is_numeric($w)) {
+                $out[$side] = self::points((float) $w);
+            }
+        }
+
+        return $out === [] ? null : $out;
     }
 
     // ─── Inline parsing ──────────────────────────────────────────────────
@@ -735,7 +1010,7 @@ final class DocxReader
         }
 
         $run = ['text' => $text];
-        foreach (['bold', 'italic', 'underline', 'strike', 'code'] as $flag) {
+        foreach (['bold', 'italic', 'underline', 'strike', 'code', 'smallCaps'] as $flag) {
             if (!empty($props[$flag])) {
                 $run[$flag] = true;
             }
@@ -743,11 +1018,14 @@ final class DocxReader
         if ($link !== null && $link !== '') {
             $run['link'] = $link;
         }
-        if (isset($props['color'])) {
-            $run['color'] = $props['color'];
-        }
-        if (isset($props['highlight'])) {
-            $run['highlight'] = $props['highlight'];
+        // Every non-boolean run property, listed once. A key missing from
+        // here is read out of the XML and then dropped on the floor — which is
+        // exactly how `size`, `font` and `letterSpacing` were invisible on the
+        // way back before this list grew.
+        foreach (['color', 'highlight', 'size', 'font', 'letterSpacing'] as $key) {
+            if (isset($props[$key])) {
+                $run[$key] = $props[$key];
+            }
         }
 
         return $run;
@@ -806,8 +1084,45 @@ final class DocxReader
                     }
 
                     break;
+                case 'smallCaps':
+                    if ($this->toggleOn($val)) {
+                        $props['smallCaps'] = true;
+                    }
+
+                    break;
+                case 'sz':
+                    if (is_numeric($val)) {
+                        $props['size'] = ((float) $val) / 2;
+                    }
+
+                    break;
+                case 'spacing':
+                    // Tracking of zero is the writer's "absent", so a zero
+                    // here would be a property nobody asked for.
+                    if (is_numeric($val) && (float) $val != 0.0) {
+                        $props['letterSpacing'] = ((float) $val) / 20;
+                    }
+
+                    break;
+                case 'rFonts':
+                    $ascii = $this->wAttr($node, 'ascii');
+                    if (is_string($ascii) && $ascii !== '') {
+                        $props['font'] = $ascii;
+                    }
+
+                    break;
                 default:
                     break;
+            }
+        }
+
+        // A `code` run's Consolas came FROM `code`, so surfacing it as `font`
+        // too would hand back a bigger model than went in — and the next write
+        // would then differ from the one just read.
+        if (isset($props['font'])) {
+            if (in_array(strtolower($props['font']), self::MONO_FONTS, true)) {
+                $props['code'] = true;
+                unset($props['font']);
             }
         }
 
@@ -858,37 +1173,219 @@ final class DocxReader
     /**
      * @return array<string, mixed>
      */
+    /**
+     * A table back into the model.
+     *
+     * Two things make this the hardest read in the package. First, the writer
+     * emits borders, cell margins and a `w:tcW` for every cell whether or not
+     * the model asked — so anything it would have produced anyway is NOT
+     * surfaced, or every document written before these options existed would
+     * come back carrying options nobody set. Second, the file contains the
+     * `w:vMerge` continuation cells the writer synthesised, and they have to
+     * be dropped and turned back into a `rowSpan` on the cell above.
+     *
+     * @return array<string, mixed>
+     */
     private function parseTable(DOMElement $tbl, bool $insideQuote = false): array
     {
-        $rows = [];
+        $tblPr = $this->firstChildByName($tbl, 'tblPr');
+        $table = ['type' => 'table'];
+
+        $grid = [];
+        $tblGrid = $this->firstChildByName($tbl, 'tblGrid');
+        if ($tblGrid !== null) {
+            foreach ($tblGrid->childNodes as $col) {
+                if ($col instanceof DOMElement && $col->localName === 'gridCol') {
+                    $grid[] = (int) ($this->wAttr($col, 'w') ?? 0);
+                }
+            }
+        }
+
+        if ($tblPr !== null) {
+            $tblW = $this->firstChildByName($tblPr, 'tblW');
+            if ($tblW !== null && $this->wAttr($tblW, 'type') === 'pct') {
+                $w = $this->wAttr($tblW, 'w');
+                if (is_numeric($w)) {
+                    $pct = round(((float) $w) / 50, 2);
+                    $table['width'] = $pct == (int) $pct ? (int) $pct : $pct;
+                }
+            }
+            $jc = $this->firstChildByName($tblPr, 'jc');
+            if ($jc !== null && in_array($this->wAttr($jc, 'val'), ['center', 'right'], true)) {
+                $table['align'] = $this->wAttr($jc, 'val');
+            }
+            $borders = $this->parseBorders($this->firstChildByName($tblPr, 'tblBorders'), self::TABLE_EDGES);
+            if ($borders !== null && !$this->isDefaultTableBorders($borders)) {
+                $table['borders'] = $borders;
+            }
+            $padding = $this->parseSides($this->firstChildByName($tblPr, 'tblCellMar'));
+            if ($padding !== null && !$this->isDefaultCellMargins($padding)) {
+                $table['cellPadding'] = $padding;
+            }
+        }
+
+        // Weights are only surfaced when the grid is NOT what an equal split
+        // would have produced — compared against the split the writer
+        // computes, not tested for exact equality, so a three-column table
+        // whose width does not divide by three is still recognised as equal.
+        $total = array_sum($grid);
+        if ($grid !== [] && $total > 0 && $grid !== DocxWriter::splitColumnsFor($total, count($grid))) {
+            $table['widths'] = array_map(
+                static function (int $w) use ($total): float|int {
+                    $pct = round(($w / $total) * 100, 2);
+
+                    return $pct == (int) $pct ? (int) $pct : $pct;
+                },
+                $grid,
+            );
+        }
+
+        // Pass 1: read every emitted cell, keeping its grid column and merge
+        // state.
+        $laid = [];
+        $headers = [];
         foreach ($tbl->childNodes as $node) {
             if (!($node instanceof DOMElement) || $node->localName !== 'tr') {
                 continue;
             }
-            $header = false;
             $trPr = $this->firstChildByName($node, 'trPr');
-            if ($trPr !== null && $this->firstChildByName($trPr, 'tblHeader') !== null) {
-                $header = true;
-            }
-            $cells = [];
+            $header = $trPr !== null && $this->firstChildByName($trPr, 'tblHeader') !== null;
+            $headers[] = $header;
+
+            $slots = [];
+            $col = 0;
             foreach ($node->childNodes as $tc) {
-                if ($tc instanceof DOMElement && $tc->localName === 'tc') {
-                    $cellBlocks = $this->parseBlockContainer($tc, false, $insideQuote);
-                    // The writer pads cells/tables with empty paragraphs to
-                    // satisfy OOXML; parseBlockContainer already drops
-                    // content-free paragraphs, so this is what remains.
-                    $cells[] = ['blocks' => $cellBlocks];
+                if (!($tc instanceof DOMElement) || $tc->localName !== 'tc') {
+                    continue;
+                }
+                $tcPr = $this->firstChildByName($tc, 'tcPr');
+                $span = 1;
+                $vMerge = null;
+                if ($tcPr !== null) {
+                    $gridSpan = $this->firstChildByName($tcPr, 'gridSpan');
+                    if ($gridSpan !== null && is_numeric($this->wAttr($gridSpan, 'val'))) {
+                        $span = max(1, (int) $this->wAttr($gridSpan, 'val'));
+                    }
+                    $vMergeNode = $this->firstChildByName($tcPr, 'vMerge');
+                    if ($vMergeNode !== null) {
+                        $vMerge = $this->wAttr($vMergeNode, 'val') ?? 'continue';
+                    }
+                }
+
+                $cell = null;
+                if ($vMerge !== 'continue') {
+                    $cell = ['blocks' => $this->parseBlockContainer($tc, false, $insideQuote)];
+                    if ($tcPr !== null) {
+                        $shd = $this->firstChildByName($tcPr, 'shd');
+                        $fill = $shd !== null ? $this->wAttr($shd, 'fill') : null;
+                        // A header row's grey came FROM `header`, so it is
+                        // attributable and not surfaced. Any other fill is the
+                        // author's.
+                        if (is_string($fill) && preg_match('/^[0-9A-Fa-f]{6}$/', $fill) === 1
+                            && !($header && strcasecmp($fill, self::HEADER_FILL) === 0)) {
+                            $cell['shading'] = '#' . strtoupper($fill);
+                        }
+                        $cellBorders = $this->parseBorders($this->firstChildByName($tcPr, 'tcBorders'), self::BOX_EDGES);
+                        if ($cellBorders !== null) {
+                            $cell['borders'] = $cellBorders;
+                        }
+                        $cellPadding = $this->parseSides($this->firstChildByName($tcPr, 'tcMar'));
+                        if ($cellPadding !== null) {
+                            $cell['padding'] = $cellPadding;
+                        }
+                        $vAlign = $this->firstChildByName($tcPr, 'vAlign');
+                        if ($vAlign !== null && in_array($this->wAttr($vAlign, 'val'), ['top', 'center', 'bottom'], true)) {
+                            $cell['valign'] = $this->wAttr($vAlign, 'val');
+                        }
+                    }
+                    if ($span > 1) {
+                        $cell['colSpan'] = $span;
+                    }
+                }
+
+                $slots[] = ['col' => $col, 'span' => $span, 'vMerge' => $vMerge, 'cell' => $cell];
+                $col += $span;
+            }
+            $laid[] = $slots;
+        }
+
+        // Pass 2: fold each run of continuations back into the cell that
+        // started it.
+        foreach ($laid as $r => $line) {
+            foreach ($line as $i => $slot) {
+                if ($slot['vMerge'] !== 'restart' || $slot['cell'] === null) {
+                    continue;
+                }
+                $covered = 1;
+                for ($below = $r + 1; $below < count($laid); $below++) {
+                    $found = false;
+                    foreach ($laid[$below] as $candidate) {
+                        if ($candidate['col'] === $slot['col'] && $candidate['vMerge'] === 'continue') {
+                            $found = true;
+
+                            break;
+                        }
+                    }
+                    if (!$found) {
+                        break;
+                    }
+                    $covered++;
+                }
+                if ($covered > 1) {
+                    $laid[$r][$i]['cell']['rowSpan'] = $covered;
+                }
+            }
+        }
+
+        $rows = [];
+        foreach ($laid as $r => $line) {
+            $cells = [];
+            foreach ($line as $slot) {
+                if ($slot['cell'] !== null) {
+                    $cells[] = $slot['cell'];
                 }
             }
             $row = [];
-            if ($header) {
+            if ($headers[$r]) {
                 $row['header'] = true;
             }
             $row['cells'] = $cells;
             $rows[] = $row;
         }
 
-        return ['type' => 'table', 'rows' => $rows];
+        $table['rows'] = $rows;
+
+        return $table;
+    }
+
+    /**
+     * Is this exactly what the writer emits for a table that asked for
+     * nothing? Not a tolerance and not a heuristic: the writer's defaults are
+     * a fixed set, and anything differing by one edge or one twip is the
+     * author's and must survive the read.
+     *
+     * @param  array<string, mixed>  $borders
+     */
+    private function isDefaultTableBorders(array $borders): bool
+    {
+        if (count($borders) !== count(self::TABLE_EDGES)) {
+            return false;
+        }
+        foreach (self::TABLE_EDGES as $edge) {
+            // The default edge is single / 0.5pt / auto, which reads back as
+            // width alone — style and colour are both the omitted default.
+            if (($borders[$edge] ?? null) !== ['width' => 0.5]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @param  array<string, float|int>  $sides */
+    private function isDefaultCellMargins(array $sides): bool
+    {
+        return $sides == ['top' => 3, 'left' => 5.4, 'bottom' => 3, 'right' => 5.4];
     }
 
     // ─── Images ──────────────────────────────────────────────────────────

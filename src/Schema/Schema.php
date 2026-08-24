@@ -32,8 +32,14 @@ final class Schema
     /** @var list<string> */
     public const ALIGNMENTS = ['left', 'center', 'right', 'justify'];
 
+    /** @var list<string> */
+    public const BORDER_STYLES = ['single', 'double', 'dashed', 'dotted', 'none'];
+
+    /** @var list<string> */
+    public const PAGE_SIZES = ['letter', 'legal', 'a4'];
+
     /** Boolean run flags (all optional). */
-    public const RUN_FLAGS = ['bold', 'italic', 'underline', 'strike', 'code'];
+    public const RUN_FLAGS = ['bold', 'italic', 'underline', 'strike', 'code', 'smallCaps'];
 
     /** Max heading level in the model (Word tolerates 9; we clamp on read/repair). */
     public const MAX_HEADING_LEVEL = 6;
@@ -46,6 +52,53 @@ final class Schema
      */
     public static function jsonSchema(): array
     {
+        $hex = ['type' => 'string', 'pattern' => '^#[0-9A-Fa-f]{6}$'];
+        $points = ['type' => 'number', 'description' => 'Points.'];
+
+        $border = [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'description' => 'One border edge. {"style":"none"} REMOVES a border — a zero width is not it.',
+            'properties' => [
+                'style' => ['enum' => self::BORDER_STYLES],
+                'width' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Points. Defaults to 0.5 (a hairline).'],
+                'color' => $hex,
+            ],
+        ];
+        $borderRef = ['$ref' => '#/$defs/border'];
+
+        $boxBorders = [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'description' => 'Box edges. Anything omitted is left alone rather than reset.',
+            'properties' => array_fill_keys(['top', 'right', 'bottom', 'left'], $borderRef),
+        ];
+        $tableBorders = [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'description' => 'Table edges — the box, plus the two inside directions.',
+            'properties' => array_fill_keys(['top', 'right', 'bottom', 'left', 'insideH', 'insideV'], $borderRef),
+        ];
+        $boxSides = [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'description' => 'Box spacing in points. Anything omitted is left alone.',
+            'properties' => array_fill_keys(['top', 'right', 'bottom', 'left'], $points),
+        ];
+
+        /** Properties every paragraph-shaped block accepts — paragraph, heading, list item. */
+        $paragraphProps = [
+            'align' => ['enum' => self::ALIGNMENTS],
+            'spaceBefore' => $points,
+            'spaceAfter' => ['type' => 'number', 'description' => 'Points. Zero is meaningful — the document default puts 8pt under every paragraph.'],
+            'lineHeight' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'A multiple of single spacing.'],
+            'indentLeft' => $points,
+            'indentRight' => $points,
+            'keepNext' => ['type' => 'boolean', 'description' => 'Keep on the same page as the block after it.'],
+            'shading' => $hex,
+            'borders' => ['$ref' => '#/$defs/boxBorders'],
+        ];
+
         $run = [
             'type' => 'object',
             'required' => ['text'],
@@ -57,9 +110,13 @@ final class Schema
                 'underline' => ['type' => 'boolean'],
                 'strike' => ['type' => 'boolean'],
                 'code' => ['type' => 'boolean'],
+                'smallCaps' => ['type' => 'boolean'],
                 'link' => ['type' => 'string', 'description' => 'Hyperlink target URL.'],
-                'color' => ['type' => 'string', 'pattern' => '^#[0-9A-Fa-f]{6}$'],
-                'highlight' => ['type' => 'string', 'pattern' => '^#[0-9A-Fa-f]{6}$'],
+                'color' => $hex,
+                'highlight' => $hex,
+                'size' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Font size in points. Half-points are exactly representable.'],
+                'font' => ['type' => 'string', 'description' => 'Font family name.'],
+                'letterSpacing' => ['type' => 'number', 'description' => 'Tracking in points; may be negative.'],
             ],
         ];
 
@@ -72,7 +129,7 @@ final class Schema
             'properties' => [
                 'runs' => $runs,
                 'children' => ['type' => 'array', 'items' => ['$ref' => '#/$defs/listItem']],
-            ],
+            ] + $paragraphProps,
         ];
 
         $blockRef = ['$ref' => '#/$defs/block'];
@@ -81,11 +138,12 @@ final class Schema
             'heading' => [
                 'type' => 'object',
                 'required' => ['type', 'level', 'runs'],
+                'description' => 'A heading is a paragraph and takes the same properties, so a section label can be spaced and aligned without being demoted to a bold paragraph.',
                 'properties' => [
                     'type' => ['const' => 'heading'],
                     'level' => ['type' => 'integer', 'minimum' => 1, 'maximum' => self::MAX_HEADING_LEVEL],
                     'runs' => $runs,
-                ],
+                ] + $paragraphProps,
             ],
             'paragraph' => [
                 'type' => 'object',
@@ -93,8 +151,7 @@ final class Schema
                 'properties' => [
                     'type' => ['const' => 'paragraph'],
                     'runs' => $runs,
-                    'align' => ['enum' => self::ALIGNMENTS],
-                ],
+                ] + $paragraphProps,
             ],
             'list' => [
                 'type' => 'object',
@@ -110,6 +167,15 @@ final class Schema
                 'required' => ['type', 'rows'],
                 'properties' => [
                     'type' => ['const' => 'table'],
+                    'widths' => [
+                        'type' => 'array',
+                        'items' => ['type' => 'number', 'minimum' => 0],
+                        'description' => 'Relative column weights — [30,40,30] and [3,4,3] are the same table. Also fixes the layout so Word honours them.',
+                    ],
+                    'width' => ['type' => 'number', 'exclusiveMinimum' => 0, 'maximum' => 100, 'description' => 'Table width as a percentage of the text column.'],
+                    'align' => ['enum' => ['left', 'center', 'right']],
+                    'borders' => ['$ref' => '#/$defs/tableBorders'],
+                    'cellPadding' => ['$ref' => '#/$defs/boxSides'],
                     'rows' => [
                         'type' => 'array',
                         'items' => [
@@ -124,6 +190,16 @@ final class Schema
                                         'required' => ['blocks'],
                                         'properties' => [
                                             'blocks' => ['type' => 'array', 'items' => $blockRef],
+                                            'shading' => $hex,
+                                            'borders' => ['$ref' => '#/$defs/boxBorders'],
+                                            'padding' => ['$ref' => '#/$defs/boxSides'],
+                                            'valign' => ['enum' => ['top', 'center', 'bottom']],
+                                            'colSpan' => ['type' => 'integer', 'minimum' => 1],
+                                            'rowSpan' => [
+                                                'type' => 'integer',
+                                                'minimum' => 1,
+                                                'description' => 'Written HTML-style: the cell appears ONCE, and the rows it covers list only their own remaining cells.',
+                                            ],
                                         ],
                                     ],
                                 ],
@@ -185,10 +261,26 @@ final class Schema
             'properties' => [
                 'title' => ['type' => 'string'],
                 'blocks' => ['type' => 'array', 'items' => $blockRef],
+                'page' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'description' => 'Section geometry. A one-page business document does not fit inside the default one-inch margins.',
+                    'properties' => [
+                        'size' => ['enum' => self::PAGE_SIZES],
+                        'orientation' => ['enum' => ['portrait', 'landscape']],
+                        'margins' => ['$ref' => '#/$defs/boxSides'],
+                    ],
+                ],
+                'defaultFont' => ['type' => 'string', 'description' => 'Font every run inherits unless it names its own.'],
+                'defaultSize' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Size in points every run inherits unless it names its own.'],
             ],
             '$defs' => [
                 'run' => $run,
                 'listItem' => $listItem,
+                'border' => $border,
+                'boxBorders' => $boxBorders,
+                'tableBorders' => $tableBorders,
+                'boxSides' => $boxSides,
                 'block' => ['oneOf' => array_values($blocks)],
             ],
         ];
