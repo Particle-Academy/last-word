@@ -34,6 +34,15 @@ use LastWord\Writer\DocxWriter;
 final class Agent
 {
     /**
+     * This package's own version, kept in ONE place and pinned to the changelog
+     * by `VersionIsSingleSourcedTest`.
+     *
+     * A number living in two files with nothing comparing them drifts; that is
+     * the same failure the envelope's `kit.json` rule exists to stop.
+     */
+    public const VERSION = '0.4.1';
+
+    /**
      * Validate a document without writing anything. Returns a structured
      * error list — empty when the document is valid. Pass the JSON Schema
      * from {@see jsonSchema()} to your LLM tool registration to give the
@@ -275,9 +284,21 @@ final class Agent
     }
 
     /** Package version. */
+    /**
+     * The version of THIS PACKAGE.
+     *
+     * It used to return `Schema::VERSION`, which is the version of the document
+     * MODEL — a genuinely separate number that moves when the shape of a `Doc`
+     * changes, not when the package ships. Returning it here meant `version()`
+     * reported `0.2.0` from a 0.4.x release, and the two numbers had no reason
+     * to ever converge.
+     *
+     * `Schema::VERSION` is still there and still means what it always did; ask
+     * for it by name when you want the model version.
+     */
     public static function version(): string
     {
-        return Schema::VERSION;
+        return self::VERSION;
     }
 
     /**
