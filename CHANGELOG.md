@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.4.0 — 2026-09-10
+
 ### Added
 
 - **`Agent::read()` now reads ODT and RTF, and NAMES a legacy `.doc` instead of
