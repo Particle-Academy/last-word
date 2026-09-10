@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- **A premium-document composition suite.** `PremiumDocumentTest` /
+  `premium-document.test.ts` writes one document using every formatting feature
+  at once — all eight run properties in a single paragraph, styled headings, a
+  repeating table header, resolved list numbering, A4 landscape geometry, a
+  document default font — and asserts the unzipped OOXML rather than that a file
+  appeared.
+
+  The suites beside it prove each feature works ON ITS OWN. That is a different
+  question from whether they compose, and a dropped feature is invisible: Word
+  shows no error and the document is merely plain. Nobody files a bug against a
+  report that looks boring; they conclude the library is boring.
+
+  It found no defects here, which is the result worth recording. It includes a
+  control that fails if the assertions could pass on an unformatted document,
+  and it pins two decisions that read like gaps: `highlight` renders as `<w:shd>`
+  rather than `<w:highlight>` (which takes sixteen named colours and could not
+  carry a `#RRGGBB` schema), and `page.margins` are in POINTS.
+
 ## 0.4.0 — 2026-09-10
 
 ### Added
