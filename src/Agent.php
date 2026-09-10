@@ -8,7 +8,11 @@ use InvalidArgumentException;
 use LastWord\Exceptions\SchemaException;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
+use LastWord\Exceptions\UnsupportedFormatException;
 use LastWord\Reader\DocxReader;
+use LastWord\Reader\Format;
+use LastWord\Reader\OdtReader;
+use LastWord\Reader\RtfReader;
 use LastWord\Schema\Repairer;
 use LastWord\Schema\Schema;
 use LastWord\Schema\Validator;
@@ -141,19 +145,52 @@ final class Agent
      */
     public static function read(string $bytesOrPath): array
     {
-        if (str_starts_with($bytesOrPath, "PK\x03\x04")) {
-            return (new DocxReader())->read($bytesOrPath);
+        $bytes = self::bytesFrom($bytesOrPath);
+
+        return match (Format::detect($bytes)) {
+            Format::DOCX => (new DocxReader())->read($bytes),
+            Format::ODT => (new OdtReader())->read($bytes),
+            Format::RTF => (new RtfReader())->read($bytes),
+            Format::DOC => throw new UnsupportedFormatException(
+                'doc',
+                'This is a legacy Word .doc (Word 97-2003). last-word reads .docx, .odt and .rtf. '
+                .'Re-save it as .docx and read it again.',
+            ),
+            default => throw new InvalidArgumentException(
+                'Agent::read() could not recognise these bytes as a document. '
+                .'It reads .docx, .odt and .rtf, and names a legacy .doc rather than guessing.',
+            ),
+        };
+    }
+
+    /**
+     * Bytes, whether we were handed bytes or a path.
+     *
+     * A path used to be read and passed straight to the docx reader without
+     * looking at what it contained, so a legacy .doc on disk failed INSIDE the
+     * zip reader and the error named a broken archive rather than the real
+     * problem. Sniffing happens after this, on CONTENT, never on the extension
+     * — an extension is a claim by whoever named the file.
+     */
+    private static function bytesFrom(string $bytesOrPath): string
+    {
+        // A NUL byte means this is already binary content, not a path. Checked
+        // first because is_file() on a multi-megabyte string is wasteful and on
+        // some platforms errors on a path that long.
+        if (str_contains($bytesOrPath, "\0")) {
+            return $bytesOrPath;
         }
-        if (!str_contains($bytesOrPath, "\0") && is_file($bytesOrPath)) {
+
+        if (strlen($bytesOrPath) <= 4096 && is_file($bytesOrPath)) {
             $bytes = file_get_contents($bytesOrPath);
             if ($bytes === false) {
                 throw new InvalidArgumentException("Could not read file: {$bytesOrPath}");
             }
 
-            return (new DocxReader())->read($bytes);
+            return $bytes;
         }
 
-        throw new InvalidArgumentException('Agent::read() expects DOCX bytes or a path to a .docx file.');
+        return $bytesOrPath;
     }
 
     /**

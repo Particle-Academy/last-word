@@ -4,6 +4,52 @@
 
 ### Added
 
+- **`Agent::read()` now reads ODT and RTF, and NAMES a legacy `.doc` instead of
+  failing obscurely** (last-word#1).
+
+  A consumer removed `phpoffice/phpword` and made this package the only docx
+  path in their app. PhpWord's `IOFactory` sniffed `.doc`, `.odt` and `.rtf`
+  alongside `.docx`; dropping it dropped those three.
+
+  **The failure was silent, which is the part that mattered.** Those arrive as
+  user uploads that an agent then analyses: the file stored fine and contributed
+  no text. Nothing raised, nothing logged, and an agent answered questions about
+  a document nobody had read.
+
+- **`UnsupportedFormatException`**, distinct from `InvalidArgumentException`.
+  "This file is damaged" and "this is a format we do not read, save it as
+  .docx" lead a person to different actions, so they cannot share a class. It
+  carries `format()` so a host can branch without grepping a message — messages
+  are for people, and a host that parses one breaks when the wording improves.
+
+  A legacy `.doc` is detected and refused by name. Binary Word 97-2003 parsing
+  is a separate and much larger job; refusing it clearly is the honest answer
+  today, and it is what lets a host say "re-save it as .docx".
+
+### Fixed
+
+- **A path is now sniffed, not assumed to be docx.** `read()` used to treat any
+  existing path as docx bytes — reading the file and handing it to `DocxReader`
+  without checking the signature — so a `.doc` on disk failed *inside the zip
+  reader* and the error named a broken archive rather than the real problem.
+
+### Reading, honestly scoped
+
+  ODT keeps structure: `text:h` becomes a heading with its level, not a
+  paragraph. The consumer left another library precisely because it flattened
+  nested lists and stripped emphasis, and text that survives with its shape lost
+  is a worse input for a model than text that fails loudly.
+
+  RTF extraction takes paragraphs and bold-led headings. RTF carries much more —
+  tables, embedded objects, styles — and this does not claim them. Stated here
+  rather than discovered.
+
+  Both return **the same document shape as `DocxReader`**, so a caller that
+  already handles our documents needs no second code path per input format. The
+  moment it does, the two paths drift and only one gets the next fix.
+
+### Added
+
 - **A rich-layout surface, so a business one-pager is expressible.** The model
   was far narrower than the XML this engine already emitted: font size, font
   family, small caps, letter spacing, per-cell shading, borders, padding,
