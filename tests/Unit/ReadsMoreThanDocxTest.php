@@ -71,10 +71,19 @@ function lwMinimalRtf(string $text = 'Hello from RTF'): string
         ."\n".'}';
 }
 
-/** The OLE2 compound-file signature every Word 97-2003 .doc starts with. */
+/**
+ * The OLE2 compound-file signature every Word 97-2003 .doc starts with, and
+ * nothing after it: a DAMAGED file since 0.5, when .doc became readable.
+ */
 function lwLegacyDocBytes(): string
 {
     return "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1".str_repeat("\x00", 200);
+}
+
+/** A real Word 97-2003 .doc, converted by LibreOffice (see tests/fixtures/formats/README.md). */
+function lwRealDocBytes(): string
+{
+    return (string) file_get_contents(__DIR__.'/../fixtures/formats/report.doc');
 }
 
 describe('Agent::read dispatches on what the bytes ARE', function () {
@@ -129,19 +138,22 @@ describe('Agent::read dispatches on what the bytes ARE', function () {
 });
 
 describe('what it cannot read, it refuses BY NAME', function () {
-    it('names legacy .doc rather than failing inside the zip reader', function () {
-        // The actionable part: a host can say "save it as .docx". Before this,
-        // OLE2 bytes reached DocxReader and failed as a broken archive, which
-        // sends the reader to debug the wrong thing.
-        expect(fn () => Agent::read(lwLegacyDocBytes()))
-            ->toThrow(UnsupportedFormatException::class);
+    it('reads a legacy .doc, which 0.4 could only name', function () {
+        // 0.4 refused every .doc with "save it as .docx". Honest, and it left a
+        // host with nothing to give a model. 0.5 reads the Word 97-2003 format.
+        expect(json_encode(Agent::read(lwRealDocBytes()), JSON_UNESCAPED_UNICODE))->toContain('Quarterly Field Report');
+    });
+
+    it('calls a broken compound file broken, not an unsupported format', function () {
+        // The signature with nothing behind it is a damaged file. Telling a person
+        // to "save it as .docx" would send them to re-save a file that cannot open.
+        expect(fn () => Agent::read(lwLegacyDocBytes()))->toThrow(RuntimeException::class);
 
         try {
             Agent::read(lwLegacyDocBytes());
-        } catch (UnsupportedFormatException $e) {
-            expect($e->getMessage())->toContain('.doc');
-            expect($e->getMessage())->toContain('.docx');
-            expect($e->format())->toBe('doc');
+        } catch (Throwable $e) {
+            expect($e)->not->toBeInstanceOf(UnsupportedFormatException::class);
+            expect($e->getMessage())->toContain('Compound File Binary');
         }
     });
 
@@ -171,15 +183,15 @@ describe('a PATH is sniffed too, not assumed to be docx', function () {
         }
     });
 
-    it('names the format of a legacy .doc ON DISK', function () {
-        // The latent bug: any existing path was read and handed to DocxReader
-        // without checking the signature, so this failed as a corrupt archive
-        // and the message named the wrong problem.
+    it('reads a legacy .doc ON DISK by its content', function () {
+        // The latent bug 0.4 closed: any existing path was read and handed to
+        // DocxReader without checking the signature, so this failed as a corrupt
+        // archive and the message named the wrong problem.
         $path = tempnam(sys_get_temp_dir(), 'lw_').'.doc';
-        file_put_contents($path, lwLegacyDocBytes());
+        file_put_contents($path, lwRealDocBytes());
 
         try {
-            expect(fn () => Agent::read($path))->toThrow(UnsupportedFormatException::class);
+            expect(json_encode(Agent::read($path), JSON_UNESCAPED_UNICODE))->toContain('São Paulo');
         } finally {
             @unlink($path);
         }

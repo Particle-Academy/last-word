@@ -9,6 +9,7 @@ use LastWord\Exceptions\SchemaException;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
 use LastWord\Exceptions\UnsupportedFormatException;
+use LastWord\Reader\DocReader;
 use LastWord\Reader\DocxReader;
 use LastWord\Reader\Format;
 use LastWord\Reader\OdtReader;
@@ -40,7 +41,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.4.1';
+    public const VERSION = '0.5.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
@@ -144,11 +145,17 @@ final class Agent
     }
 
     /**
-     * Parse a real .docx back into the Doc model. Takes the raw bytes (a
-     * string starting with the zip signature) or, as a convenience, a
-     * filesystem path. Best-effort on Word-authored files: headings, runs
-     * with formatting, hyperlinks, nested lists, tables, images and page
-     * breaks come through; unknown constructs degrade to plain paragraphs.
+     * Parse a document back into the Doc model. Takes the raw bytes or, as a
+     * convenience, a filesystem path, and decides the format from the CONTENT:
+     * .docx, legacy .doc (Word 97-2003), .odt and .rtf all return the same shape.
+     * Best-effort on Word-authored files: headings, runs with formatting,
+     * hyperlinks, nested lists, tables, images and page breaks come through;
+     * unknown constructs degrade to plain paragraphs. What each non-docx reader
+     * recovers is listed on DocReader, OdtReader and RtfReader.
+     *
+     * @throws UnsupportedFormatException for bytes that are not one of those
+     *   formats, naming what they are when that is knowable (`xls`, `pptx`, …)
+     * @throws \RuntimeException for a file in a supported format that is damaged
      *
      * @return array<string, mixed>
      */
@@ -156,18 +163,22 @@ final class Agent
     {
         $bytes = self::bytesFrom($bytesOrPath);
 
-        return match (Format::detect($bytes)) {
+        return match ($format = Format::detect($bytes)) {
             Format::DOCX => (new DocxReader())->read($bytes),
             Format::ODT => (new OdtReader())->read($bytes),
             Format::RTF => (new RtfReader())->read($bytes),
-            Format::DOC => throw new UnsupportedFormatException(
-                'doc',
-                'This is a legacy Word .doc (Word 97-2003). last-word reads .docx, .odt and .rtf. '
-                .'Re-save it as .docx and read it again.',
-            ),
-            default => throw new InvalidArgumentException(
+            // A compound file: DocReader reads a Word document and names anything
+            // else (.xls, .ppt, .msg) itself, because only the container knows.
+            Format::DOC => (new DocReader())->read($bytes),
+            Format::UNKNOWN => throw new UnsupportedFormatException(
+                Format::UNKNOWN,
                 'Agent::read() could not recognise these bytes as a document. '
-                .'It reads .docx, .odt and .rtf, and names a legacy .doc rather than guessing.',
+                .'It reads .docx, .doc (Word 97-2003), .odt and .rtf.',
+            ),
+            default => throw new UnsupportedFormatException(
+                $format,
+                "This is a .{$format} file, not a word-processing document. "
+                .'Agent::read() reads .docx, .doc (Word 97-2003), .odt and .rtf.',
             ),
         };
     }

@@ -138,7 +138,7 @@ Static façade, mirrored exactly in the Node package:
 | `Agent::validateAndRepair($doc)` | `{ok, schema, errors}` — heuristic repair of near-miss agent output |
 | `Agent::toBytes($doc)` | DOCX bytes; throws `SchemaException` when invalid |
 | `Agent::write($doc, $path)` | write to disk → `{path, bytes, blocks}` |
-| `Agent::read($bytesOrPath)` / `Agent::fromBytes($bytes)` | parse a real .docx back into the model |
+| `Agent::read($bytesOrPath)` / `Agent::fromBytes($bytes)` | parse a .docx, .doc, .odt or .rtf back into the model |
 | `Agent::toMarkdown($doc)` / `Agent::fromMarkdown($md)` | the Editor bridge |
 | `Agent::describe($doc)` | plain-text summary (title, block counts, word count) |
 | `Agent::jsonSchema()` | JSON Schema for LLM tool registration |
@@ -158,6 +158,30 @@ highlight colors, hyperlinks through the rels part, `numPr` lists with
 images (returned as data URLs), page breaks and border-only paragraphs.
 Unknown constructs degrade to plain paragraphs — the reader never throws
 on strange XML.
+
+## Reading .doc, .odt and .rtf
+
+`Agent::read()` decides the format from the bytes, never the file name, and
+returns the same document shape for all four:
+
+| Format | Comes through | Does not |
+|---|---|---|
+| `.docx` | everything above | — |
+| `.doc` (Word 97-2003) | paragraphs, headings (by built-in style, so localised names work), direct bold / italic / underline / strike, hyperlinks, nested bulleted and numbered lists, tables with header rows, page breaks | style-inherited formatting, fonts / sizes / colours, images, text boxes, headers / footers / footnotes / comments, merged cells, title |
+| `.odt` | headings, paragraphs, bold / italic / underline / strike, hyperlinks, nested lists, tables with header rows and merged cells, spaces / tabs / line breaks, page breaks, title | images and frames, footnotes, comments, tracked deletions, fonts / sizes / colours |
+| `.rtf` | headings (style name or outline level), direct bold / italic / underline / strike, hyperlinks, nested lists, tables (header rows where `\trhdr` marks them), Unicode, `\ansicpg` code pages, title | images and objects, footnotes, headers / footers, fonts / sizes / colours, merged cells, double-byte code pages written as raw bytes |
+
+The `.doc` reader is this package's own MS-CFB and MS-DOC code, with no
+dependency. A document converted from `.docx` to `.doc` and `.odt` by
+LibreOffice reads back identical to the `.docx`; the `.rtf` differs only in a
+header-row flag LibreOffice does not write (`tests/fixtures/formats/`).
+
+What it cannot read it refuses with `UnsupportedFormatException`, whose
+`format()` names what the bytes are: `doc` for a Word 6/95 or encrypted file,
+`xls`, `ppt`, `msg` or `cfb` for another compound file, `xlsx`, `pptx`, `ods`,
+`odp`, or `unknown`. A damaged file in a supported format raises
+`RuntimeException` instead — "this file is broken" and "save it as .docx" send a
+person to do different things.
 
 ## Determinism
 

@@ -2,6 +2,93 @@
 
 ## [Unreleased]
 
+## 0.5.0 — 2026-09-13
+
+### Added
+
+- **`Agent::read()` reads legacy Word `.doc` (Word 97-2003)** (last-word#1).
+  0.4 refused it by name, which was honest and left a host with nothing to give
+  a model. The compound-file container (MS-CFB) and the Word binary format
+  (MS-DOC) are read by code in this package; there is no new dependency.
+
+  What comes through: paragraph text from every piece of the piece table
+  (fast-saved files included, 8-bit and UTF-16 pieces), headings by the style's
+  built-in identifier (so "Überschrift 1" is still a heading), directly applied
+  bold / italic / underline / strike, hyperlinks from `HYPERLINK` fields (other
+  fields keep their displayed result), bulleted and numbered lists with nesting,
+  tables with header rows, and page breaks.
+
+  What does not: formatting inherited from a style, fonts, sizes and colours,
+  images and embedded objects, text boxes, headers, footers, footnotes and
+  comments, merged cells, and the document title.
+
+  Word 6/95 files and encrypted files are refused by name
+  (`UnsupportedFormatException`, `format()` `doc`). A compound file that is not
+  a Word document is named too: `xls`, `ppt`, `msg`, or `cfb`.
+
+- **The same document now reads the same in all four formats.** A document
+  written by this package and converted by LibreOffice to `.doc`, `.odt` and
+  `.rtf` reads back **identically** to the `.docx` from the `.doc` and the
+  `.odt`, and identically from the `.rtf` except for a header-row flag that
+  file does not carry. `LegacyFormatsTest` asserts exactly that on committed
+  fixtures (`tests/fixtures/formats/`, with a README saying how they were made).
+
+- **Office files that are not word-processing documents are named.** An
+  `.xlsx`, `.pptx`, `.ods` or `.odp` raises `UnsupportedFormatException` with
+  that format, rather than "not a document".
+
+### Changed
+
+- **The ODT reader keeps far more of the document.** Bold, italic, underline
+  and strike from automatic styles (where ODF keeps direct formatting),
+  hyperlinks, lists with nesting and numbered/bulleted from their list style,
+  tables with header rows and merged cells, `text:s` / `text:tab` /
+  `text:line-break`, page breaks, and the title from `meta.xml`. 0.4 returned
+  headings and paragraphs as plain text.
+
+  The shape changes with it: a list item that 0.4 returned as a top-level
+  paragraph is now an item of a `list` block, and a table cell's paragraph is
+  inside a `table` block. A caller that walks blocks by `type`, as it already
+  must for a `.docx`, needs no change; one that only read top-level paragraphs
+  of an `.odt` will now find that text inside lists and tables.
+
+- **The RTF reader is a real tokenizer with group-scoped state.** It reads
+  headings by style name or outline level, direct bold / italic / underline /
+  strike, `HYPERLINK` fields, lists from the list table, tables (header rows
+  where `\trhdr` marks them), `\uN` with `\ucN` fallback skipping and surrogate
+  pairs, `\'hh` in the document's code page (`\ansicpg`: 874 and 1250-1258
+  decoded; 932/936/949/950 double-byte characters become one U+FFFD each), line
+  breaks, tabs, page breaks and the title.
+
+  **BREAKING, for RTF only:** 0.4 turned any bold-led paragraph into a level-1
+  heading. That was a guess, and it made emphasis into structure. A bold
+  paragraph is now a paragraph with a bold run; a heading is a paragraph whose
+  style or outline level says so. If you relied on the guess, look for a
+  paragraph whose runs are all bold.
+
+- **Bytes that are no document raise `UnsupportedFormatException`** (format
+  `unknown`) instead of a bare `InvalidArgumentException`. It extends
+  `InvalidArgumentException`, so a `catch` for that still catches it; do
+  nothing unless you compared the class exactly.
+
+- **A damaged file raises `RuntimeException`, and an unsupported format raises
+  `UnsupportedFormatException`.** "This file is broken" and "save it as .docx"
+  send a person to do different things. A `.doc` signature with nothing valid
+  behind it was an unsupported format in 0.4 and is a damaged file now.
+
+### Security
+
+- **Legacy readers treat an upload as hostile.** Every compound-file offset is
+  bounds-checked; sector chains, the DIFAT chain and the directory tree are
+  followed at most once per node, so a loop fails instead of spinning; a stream
+  over 256 MB, or an allocation table naming more sectors than the file holds,
+  is refused; the Word piece table must run forwards, so no byte range is read
+  twice; an ODT part carrying a DOCTYPE is refused before parsing, parts over
+  64 MB are refused, and repeated rows and columns are capped (1,000 per repeat,
+  100,000 cells in total); RTF group nesting is capped at 10,000 and `\bin` data
+  is skipped by its length. Each guard has a test on a hand-built file
+  (`tests/Support/LegacyFiles.php`).
+
 ## 0.4.1 — 2026-09-10
 
 ### Fixed

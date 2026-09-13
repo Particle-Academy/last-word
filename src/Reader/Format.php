@@ -18,9 +18,17 @@ final class Format
     public const ODT = 'odt';
     public const DOC = 'doc';
     public const RTF = 'rtf';
+    public const XLSX = 'xlsx';
+    public const PPTX = 'pptx';
+    public const ODS = 'ods';
+    public const ODP = 'odp';
     public const UNKNOWN = 'unknown';
 
-    /** OLE2 / Compound File Binary — Word 97-2003 `.doc`, and much else. */
+    /**
+     * OLE2 / Compound File Binary — Word 97-2003 `.doc`, and much else (`.xls`,
+     * `.ppt`, `.msg`). Detected as DOC; `DocReader` looks inside the container and
+     * names anything that is not a Word document.
+     */
     private const OLE2 = "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1";
 
     public static function detect(string $bytes): string
@@ -77,8 +85,17 @@ final class Format
         // ODF stores an uncompressed `mimetype` entry FIRST, so its value sits
         // in plain sight near the head of the file. Checked before the entry
         // names because it is the format's own declaration of what it is.
-        if (str_contains(substr($bytes, 0, 256), 'application/vnd.oasis.opendocument.text')) {
+        $head = substr($bytes, 0, 256);
+        if (str_contains($head, 'application/vnd.oasis.opendocument.text')) {
             return self::ODT;
+        }
+        // Other ODF documents declare themselves the same way. Checked before the
+        // entry names below, which an ODS shares with an ODT (`content.xml`).
+        if (str_contains($head, 'application/vnd.oasis.opendocument.spreadsheet')) {
+            return self::ODS;
+        }
+        if (str_contains($head, 'application/vnd.oasis.opendocument.presentation')) {
+            return self::ODP;
         }
 
         if (str_contains($bytes, 'word/document.xml')) {
@@ -89,8 +106,15 @@ final class Format
             return self::ODT;
         }
 
-        // A zip, and not one of ours. The caller still gets a refusal — it just
-        // will not be told this is a document we could have read.
+        // Office documents we do not read, named so a person is told what they
+        // uploaded rather than that it is "not a document".
+        if (str_contains($bytes, 'xl/workbook.xml')) {
+            return self::XLSX;
+        }
+        if (str_contains($bytes, 'ppt/presentation.xml')) {
+            return self::PPTX;
+        }
+
         return self::UNKNOWN;
     }
 }
