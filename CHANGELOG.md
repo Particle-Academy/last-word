@@ -84,8 +84,10 @@
   over 256 MB, or an allocation table naming more sectors than the file holds,
   is refused; the Word piece table must run forwards, so no byte range is read
   twice; an ODT part carrying a DOCTYPE is refused before parsing, parts over
-  64 MB are refused, and repeated rows and columns are capped (1,000 per repeat,
-  100,000 cells in total); RTF group nesting is capped at 10,000 and `\bin` data
+  64 MB are refused, element nesting past 257 is refused (libxml's own limit,
+  now pinned by a test so the Node and Python parsers refuse at the same depth),
+  and repeated rows and columns are capped (1,000 per repeat, 100,000 cells in
+  total); RTF group nesting is capped at 10,000 and `\bin` data
   is skipped by its length. Each guard has a test on a hand-built file
   (`tests/Support/LegacyFiles.php`).
 

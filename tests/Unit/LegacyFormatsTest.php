@@ -307,6 +307,18 @@ describe('damaged and hostile files fail fast, and say what is wrong', function 
         $damaged(LegacyFiles::odt('', $xml), 'DOCTYPE');
     });
 
+    it('parses an ODT part nested 257 elements deep and refuses one nested 258', function () use ($damaged) {
+        // libxml's limit without XML_PARSE_HUGE, which the Node and Python
+        // engines reproduce. The part's own wrappers are four deep
+        // (document-content, body, text, p).
+        $nested = fn (int $spans): string => LegacyFiles::odt(
+            '<text:p>'.str_repeat('<text:span>', $spans).'deep'.str_repeat('</text:span>', $spans).'</text:p>'
+        );
+
+        expect(lfTexts(Agent::read($nested(253))['blocks']))->toBe(['deep']);
+        $damaged($nested(254), 'Could not parse content.xml');
+    });
+
     it('caps an ODT space run of two billion', function () {
         $doc = Agent::read(LegacyFiles::odt('<text:p>a<text:s text:c="2000000000"/>b</text:p>'));
 
