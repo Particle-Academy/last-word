@@ -14,7 +14,7 @@
   **What you must do:** nothing. Only a script that looks runs up by the old
   file (`gh run list --workflow=release-gate.yml`) needs `publish.yml` instead.
 
-## 0.6.3 — 2026-09-15
+## 0.6.3 — 2026-09-14
 
 ### Fixed
 
@@ -34,7 +34,7 @@ fails against 0.6.2:
 
   **What you must do:** nothing.
 
-## 0.6.2 — 2026-09-15
+## 0.6.2 — 2026-09-14
 
 ### Fixed
 
@@ -49,7 +49,7 @@ fails against 0.6.2:
   **What you must do:** nothing. Ops from `diff()` always carry int positions
   and string keys.
 
-## 0.6.1 — 2026-09-15
+## 0.6.1 — 2026-09-14
 
 ### Fixed
 
@@ -61,7 +61,7 @@ fails against 0.6.2:
 
   **What you must do:** nothing.
 
-## 0.6.0 — 2026-09-15
+## 0.6.0 — 2026-09-14
 
 ### Added
 
