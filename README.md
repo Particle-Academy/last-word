@@ -1,6 +1,6 @@
 # LastWord
 
-[![Fancy UI suite](art/fancy-ui.svg)](https://particle.academy)
+[![Fancified](art/fancified.svg)](https://particle.academy)
 
 PHP package for reading and writing word-processing documents (`.docx`)
 from a JSON-friendly document model, with markdown bridges. Framework-
