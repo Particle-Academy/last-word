@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## 0.6.2 — 2026-09-15
+
+### Fixed
+
+- **An op with a position that is not a number edited the first item.**
+  `blocks.remove` with `index: "abc"` removed block 0, because `(int) "abc"` is 0;
+  so did `replace`, `move` and `insert` with a non-numeric `index`, `from` or
+  `to`. Such ops are now skipped. Ints and digit strings still work.
+- **`doc.set` with a non-string `key` set a key `"1"`** (`(string) true`). It is
+  skipped. So is an op whose `op` or `path` is not a string, which previously
+  cast an array to `"Array"` with a warning.
+
+  **What you must do:** nothing. Ops from `diff()` always carry int positions
+  and string keys.
+
 ## 0.6.1 — 2026-09-15
 
 ### Fixed

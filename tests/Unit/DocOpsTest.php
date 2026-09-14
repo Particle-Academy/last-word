@@ -224,3 +224,24 @@ it('refuses to compare values JSON cannot hold, instead of calling them the same
     // encoded to "" and compared equal.
     expect(fn () => DocDiff::same(chr(0xB1), chr(0xB2)))->toThrow(JsonException::class);
 });
+
+it('skips an op whose position or key is not one, instead of casting it to 0 or "1"', function () {
+    $d = lwOpsDoc();
+
+    // `(int) "abc"` is 0: these edited the FIRST block.
+    expect(Agent::reduce($d, ['op' => 'blocks.remove', 'path' => '/blocks', 'index' => 'abc']))->toBe($d);
+    expect(Agent::reduce($d, ['op' => 'blocks.replace', 'path' => '/blocks', 'index' => 'x', 'block' => lwP('x')]))->toBe($d);
+    expect(Agent::reduce($d, ['op' => 'blocks.move', 'path' => '/blocks', 'from' => 'first', 'to' => 3]))->toBe($d);
+    expect(Agent::reduce($d, ['op' => 'blocks.insert', 'path' => '/blocks', 'index' => true, 'block' => lwP('x')]))->toBe($d);
+
+    // `(string) true` is "1": this set a top-level key "1".
+    expect(Agent::reduce($d, ['op' => 'doc.set', 'key' => true, 'value' => 'x']))->toBe($d);
+
+    // An op name or path that is not a string is no op, not "Array".
+    expect(Agent::reduce($d, ['op' => ['blocks.remove'], 'path' => '/blocks', 'index' => 0]))->toBe($d);
+    expect(Agent::reduce($d, ['op' => 'blocks.remove', 'path' => ['/blocks'], 'index' => 0]))->toBe($d);
+
+    // Digit strings and ints still work.
+    expect(count(Agent::reduce($d, ['op' => 'blocks.remove', 'path' => '/blocks', 'index' => '1'])['blocks']))->toBe(count($d['blocks']) - 1);
+});
+

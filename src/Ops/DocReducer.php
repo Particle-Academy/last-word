@@ -59,14 +59,16 @@ final class DocReducer
      */
     public static function apply(array $doc, array $op): array
     {
-        $name = (string) ($op['op'] ?? '');
+        // Strings only: an array cast to string is "Array" and a warning.
+        $name = is_string($op['op'] ?? null) ? $op['op'] : '';
 
         if ($name === 'doc.replace') {
             return is_array($op['doc'] ?? null) ? $op['doc'] : $doc;
         }
 
         if ($name === 'doc.set') {
-            $key = (string) ($op['key'] ?? '');
+            // A string key only: `(string) true` is "1", which set a key "1".
+            $key = is_string($op['key'] ?? null) ? $op['key'] : '';
 
             if ($key === '' || $key === 'blocks') {
                 return $doc;
@@ -87,7 +89,7 @@ final class DocReducer
             return $doc;
         }
 
-        $tokens = self::tokens((string) ($op['path'] ?? ''));
+        $tokens = is_string($op['path'] ?? null) ? self::tokens($op['path']) : null;
 
         if ($tokens === null || $tokens === [] || ! in_array(end($tokens), self::KINDS[$kind][1], true)) {
             return $doc;
@@ -154,13 +156,17 @@ final class DocReducer
                 if (! array_key_exists($valueKey, $op)) {
                     return null;
                 }
-                $index = max(0, min($count, (int) ($op['index'] ?? $count)));
+                $index = array_key_exists('index', $op) ? self::position($op['index']) : $count;
+                if ($index === null) {
+                    return null;
+                }
+                $index = max(0, min($count, $index));
                 array_splice($list, $index, 0, [$op[$valueKey]]);
 
                 return $list;
 
             case 'remove':
-                $index = (int) ($op['index'] ?? -1);
+                $index = self::position($op['index'] ?? null) ?? -1;
                 if ($index < 0 || $index >= $count) {
                     return null;
                 }
@@ -169,7 +175,7 @@ final class DocReducer
                 return $list;
 
             case 'replace':
-                $index = (int) ($op['index'] ?? -1);
+                $index = self::position($op['index'] ?? null) ?? -1;
                 if ($index < 0 || $index >= $count || ! array_key_exists($valueKey, $op)) {
                     return null;
                 }
@@ -178,18 +184,33 @@ final class DocReducer
                 return $list;
 
             case 'move':
-                $from = (int) ($op['from'] ?? -1);
-                if ($from < 0 || $from >= $count) {
+                $from = self::position($op['from'] ?? null) ?? -1;
+                $to = array_key_exists('to', $op) ? self::position($op['to']) : $from;
+                if ($from < 0 || $from >= $count || $to === null) {
                     return null;
                 }
                 [$moved] = array_splice($list, $from, 1);
-                $to = max(0, min(count($list), (int) ($op['to'] ?? $from)));
+                $to = max(0, min(count($list), $to));
                 array_splice($list, $to, 0, [$moved]);
 
                 return $list;
         }
 
         return null;
+    }
+
+    /**
+     * A list position: an int, or a string of digits. Anything else is null, so
+     * an op carrying one is skipped — `(int) "abc"` is 0, which edited the
+     * first item.
+     */
+    private static function position(mixed $value): ?int
+    {
+        if (is_int($value)) {
+            return $value;
+        }
+
+        return is_string($value) && ctype_digit($value) ? (int) $value : null;
     }
 
     /**
