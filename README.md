@@ -142,12 +142,41 @@ Static façade, mirrored exactly in the Node package:
 | `Agent::toMarkdown($doc)` / `Agent::fromMarkdown($md)` | the Editor bridge |
 | `Agent::describe($doc)` | plain-text summary (title, block counts, word count) |
 | `Agent::jsonSchema()` | JSON Schema for LLM tool registration |
+| `Agent::diff($a, $b)` / `Agent::reduce($doc, $ops)` | versions as ops: `reduce($a, diff($a, $b))` equals `$b` |
+| `Agent::opSchema()` / `Agent::equivalent($a, $b)` | JSON Schema for one op; whether two documents write the same file |
 | `Agent::version()` | package version |
 
 `validateAndRepair()` is built for agentic feedback loops: bare strings
 become runs, `"text"` shorthand becomes runs, heading levels clamp to 1-6,
 unknown block types drop with the error retained, missing `blocks`
 defaults to `[]` — hand the errors back to the model if `ok` is false.
+
+## Versions as diffs
+
+Keep the current document as a real .docx and each older version as the ops
+that restore it:
+
+```php
+$old = Agent::read($currentBytes);
+$ops = Agent::diff($edited, $old);   // store these with the version
+
+Agent::reduce($edited, $ops);        // equals $old
+```
+
+- **Exact:** `reduce($a, diff($a, $b))` equals `$b`, key order aside.
+- **Small:** every list (blocks, a quote's blocks, list items and children,
+  table rows, cells, a cell's blocks) is aligned by content. Rewording one
+  paragraph is one `blocks.replace`, wherever it sits; moving one is one
+  `blocks.move`.
+- **Nothing for no change:** documents that write the same file diff to `[]`,
+  so `diff($d, read(toBytes($d)))` is `[]` even when the reader merges runs or
+  reads a header row back bold.
+
+The document model has no ids, so an op names the list it edits by JSON Pointer
+and the item by index: `{"op": "blocks.replace", "path": "/blocks/4/rows/1/cells/0/blocks", "index": 0, "block": {…}}`.
+The kinds are `blocks`, `items`, `rows` and `cells`, each with `insert`,
+`remove`, `move` and `replace`, plus `doc.set` for top-level properties and
+`doc.replace`. `Agent::opSchema()` has them all.
 
 ## Reading Word-authored files
 

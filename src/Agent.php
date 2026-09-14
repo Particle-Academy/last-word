@@ -8,6 +8,9 @@ use InvalidArgumentException;
 use LastWord\Exceptions\SchemaException;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
+use LastWord\Ops\DocDiff;
+use LastWord\Ops\DocOpSchema;
+use LastWord\Ops\DocReducer;
 use LastWord\Exceptions\UnsupportedFormatException;
 use LastWord\Reader\DocReader;
 use LastWord\Reader\DocxReader;
@@ -41,7 +44,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.5.0';
+    public const VERSION = '0.6.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
@@ -379,6 +382,66 @@ final class Agent
                 self::collectItems($item['children'] ?? null, $text);
             }
         }
+    }
+
+    /**
+     * The ops that turn document `$a` into document `$b`.
+     *
+     * - `reduce($a, diff($a, $b))` equals `$b` (key order aside).
+     * - Documents that write the same file diff to `[]`, so
+     *   `diff($d, read(toBytes($d))) === []`: a save without a change records
+     *   nothing.
+     * - Rewording one paragraph is one `blocks.replace`, including a paragraph
+     *   inside a table cell, a quote or a list; moving one is one `blocks.move`.
+     *
+     * Store `diff($new, $old)` to keep a version as the ops that restore it.
+     * Both documents must be valid: the "same file" check writes them.
+     *
+     * @param  array<string, mixed>  $a
+     * @param  array<string, mixed>  $b
+     * @return list<array<string, mixed>>
+     */
+    public static function diff(array $a, array $b): array
+    {
+        return DocDiff::diff($a, $b);
+    }
+
+    /**
+     * Apply one op, or a list of them, to a document; returns a new document. An
+     * op whose path or index does not resolve is skipped.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>|list<array<string, mixed>>  $opOrOps
+     * @return array<string, mixed>
+     */
+    public static function reduce(array $doc, array $opOrOps): array
+    {
+        $ops = $opOrOps === [] || array_is_list($opOrOps) ? $opOrOps : [$opOrOps];
+
+        return DocReducer::applyAll($doc, $ops);
+    }
+
+    /**
+     * JSON Schema for one document op.
+     *
+     * @return array<string, mixed>
+     */
+    public static function opSchema(): array
+    {
+        return DocOpSchema::jsonSchema();
+    }
+
+    /**
+     * Whether two documents write the same file: runs the reader merges, a
+     * header row's bold and an empty paragraph the writer drops do not make them
+     * different.
+     *
+     * @param  array<string, mixed>  $a
+     * @param  array<string, mixed>  $b
+     */
+    public static function equivalent(array $a, array $b): bool
+    {
+        return DocDiff::equivalent($a, $b);
     }
 
     /**

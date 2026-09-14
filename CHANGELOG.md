@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## 0.6.0 — 2026-09-15
+
+### Added
+
+- **`Agent::diff()`, `Agent::reduce()`, `Agent::opSchema()` and `Agent::equivalent()`:
+  a document's versions stored as ops** (last-word#2). A version history cannot
+  keep a .docx per edit, hashing the bytes cannot keep a one-word edit small
+  (it is a zip), and diffing `toMarkdown()` output would lose run formatting,
+  tables and page breaks on restore. The diff is over Last Word's own model.
+  - `reduce($a, diff($a, $b))` equals `$b`, key order aside. The ops are verified
+    by replaying them; ops that do not reproduce `$b` become one `doc.replace`.
+  - Every list is aligned by content: the top-level blocks, a quote's blocks, a
+    list's items and their children, a table's rows, a row's cells and a cell's
+    blocks. Rewording one paragraph is one `blocks.replace` at its own path, even
+    inside a table cell; moving one is one `blocks.move`. A container whose own
+    properties changed is replaced whole.
+  - Documents that write the same file diff to `[]`, so a save without a change
+    records nothing, even where the reader normalises (merged runs, a header
+    row's bold, a dropped empty paragraph).
+  - Blocks have no ids, so ops address a list by JSON Pointer and an item by
+    index: `blocks.*`, `items.*`, `rows.*` and `cells.*`, each with
+    `insert`/`remove`/`move`/`replace`, plus `doc.set` and `doc.replace`.
+
+  **What you must do:** nothing. This only adds methods.
+
 ## 0.5.0 — 2026-09-13
 
 ### Added
