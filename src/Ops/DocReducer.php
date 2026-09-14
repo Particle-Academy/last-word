@@ -110,6 +110,14 @@ final class DocReducer
     private static function edit(array $node, array $tokens, callable $change): array
     {
         $token = array_shift($tokens);
+
+        // A list is reached by position only. A name on a non-empty list (the
+        // `blocks` in `/blocks/blocks`) is a path that does not resolve; setting
+        // it turned the list into a map (found by the Node port).
+        if ($node !== [] && array_is_list($node) && ! ctype_digit($token)) {
+            return $node;
+        }
+
         $key = array_is_list($node) && ctype_digit($token) ? (int) $token : $token;
 
         if ($tokens === []) {

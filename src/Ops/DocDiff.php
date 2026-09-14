@@ -69,7 +69,10 @@ final class DocDiff
                 continue;
             }
             if (! self::same($a[$key] ?? null, $b[$key] ?? null)) {
-                $ops[] = ['op' => 'doc.set', 'key' => $key, 'value' => $b[$key] ?? null];
+                // (string): PHP turns a key "5" into the int 5, and the reducer
+                // takes string keys only — an int key failed the replay check and
+                // the whole diff fell back to doc.replace (found by the Node port).
+                $ops[] = ['op' => 'doc.set', 'key' => (string) $key, 'value' => $b[$key] ?? null];
             }
         }
 

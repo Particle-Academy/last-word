@@ -29,7 +29,7 @@ final class DocOpSchema
         $index = ['type' => 'integer', 'minimum' => 0];
         $variants = [
             self::variant('doc.replace', ['doc' => ['type' => 'object']], ['doc'], 'Replace the whole document.'),
-            self::variant('doc.set', ['key' => ['type' => 'string', 'not' => ['const' => 'blocks']], 'value' => ['description' => 'Any JSON value; null removes the key.']], ['key', 'value'], 'Set a top-level property (title, page, defaultFont, defaultSize); null removes it.'),
+            self::variant('doc.set', ['key' => ['type' => 'string', 'minLength' => 1, 'not' => ['const' => 'blocks']], 'value' => ['description' => 'Any JSON value; null removes the key.']], ['key', 'value'], 'Set a top-level property (title, page, defaultFont, defaultSize); null removes it.'),
         ];
 
         foreach (DocReducer::KINDS as $kind => [$valueKey, $ends]) {

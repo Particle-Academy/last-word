@@ -138,7 +138,9 @@ it('records nothing for a save without a change', function () {
     $doc = lwOpsDoc();
     expect(Agent::diff($doc, Agent::read(Agent::toBytes($doc))))->toBe([]);
 
-    // The canonical fixture has constructs the reader normalises.
+    // The canonical fixture reads back as identical JSON, so it only covers the
+    // literal shortcut; the document below is the one that really normalises.
+    // (This comment claimed otherwise until the Node port checked.)
     $canonical = lwCanonical();
     expect(Agent::diff($canonical, Agent::read(Agent::toBytes($canonical))))->toBe([]);
 
@@ -243,5 +245,32 @@ it('skips an op whose position or key is not one, instead of casting it to 0 or 
 
     // Digit strings and ints still work.
     expect(count(Agent::reduce($d, ['op' => 'blocks.remove', 'path' => '/blocks', 'index' => '1'])['blocks']))->toBe(count($d['blocks']) - 1);
+});
+
+it('keeps a small diff for a numeric top-level key, which PHP stores as an int', function () {
+    // Unknown top-level keys are not written, so another difference (the title)
+    // is what keeps these two documents from being the same file.
+    $a = ['title' => 'A', 'blocks' => [lwP('x')], '5' => 'five'];
+    $b = ['title' => 'B', 'blocks' => [lwP('x')], '5' => 'FIVE'];
+
+    $ops = Agent::diff($a, $b);
+
+    expect($ops)->toBe([
+        ['op' => 'doc.set', 'key' => '5', 'value' => 'FIVE'],
+        ['op' => 'doc.set', 'key' => 'title', 'value' => 'B'],
+    ]);
+    expect(DocDiff::same(Agent::reduce($a, $ops), $b))->toBeTrue();
+});
+
+it('skips an op whose path names a list by a key instead of a position', function () {
+    $d = lwOpsDoc();
+
+    expect(Agent::reduce($d, ['op' => 'blocks.insert', 'path' => '/blocks/blocks', 'index' => 0, 'block' => lwP('x')]))->toBe($d);
+});
+
+it('refuses an empty doc.set key in the op schema, as the reducer does', function () {
+    $variant = array_values(array_filter(Agent::opSchema()['oneOf'], fn (array $v) => $v['properties']['op']['const'] === 'doc.set'))[0];
+
+    expect($variant['properties']['key']['minLength'])->toBe(1);
 });
 

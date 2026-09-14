@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## 0.6.3 — 2026-09-15
+
+### Fixed
+
+Found by porting the ops to Node (last-word-js 0.6.0), each with a test that
+fails against 0.6.2:
+
+- **A document with a numeric top-level key lost its small diff (a 0.6.2
+  regression).** PHP stores the key `"5"` as the int 5, `diff()` emitted
+  `doc.set` with `key: 5`, and 0.6.2's reducer skips non-string keys, so the
+  replay check failed and the whole diff became `doc.replace`. The key is now
+  emitted as a string. 0.6.2's changelog said diff keys were always strings;
+  they were not until now.
+- **An insert whose path named a list by a key turned the list into a map.**
+  `/blocks/blocks` set a key `blocks` on the top-level block list. A list is
+  reached by position only; such a path is skipped.
+- **`opSchema()` accepted an empty `doc.set` key**, which the reducer refuses.
+
+  **What you must do:** nothing.
+
 ## 0.6.2 — 2026-09-15
 
 ### Fixed
