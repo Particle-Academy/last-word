@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## 0.6.1 — 2026-09-15
+
+### Fixed
+
+- **`diff()` could call two different values the same.** Its equality check
+  encoded values to JSON and returned `""` for anything JSON cannot hold (invalid
+  UTF-8, NAN, INF), so two different such values compared as equal and a change
+  could go unrecorded. It now throws `JsonException`. Found in holy-sheet's
+  identical helper by its Python port.
+
+  **What you must do:** nothing.
+
 ## 0.6.0 — 2026-09-15
 
 ### Added

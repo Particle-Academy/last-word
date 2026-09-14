@@ -218,3 +218,9 @@ it('aligns lists by content, breaking ties toward deleting first', function () {
     expect(DocDiff::hunks(['a', 'b', 'c'], ['a', 'c']))->toBe([[1, 1, 0, 1]]);
     expect(DocDiff::hunks(['a', 'b'], ['a', 'z']))->toBe([[1, 1, 1, 1]]);
 });
+
+it('refuses to compare values JSON cannot hold, instead of calling them the same', function () {
+    // Found in holy-sheet's identical helper by its Python port: both values
+    // encoded to "" and compared equal.
+    expect(fn () => DocDiff::same(chr(0xB1), chr(0xB2)))->toThrow(JsonException::class);
+});

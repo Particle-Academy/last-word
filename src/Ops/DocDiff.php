@@ -355,9 +355,14 @@ final class DocDiff
         return is_array($node[$key] ?? null) ? array_values($node[$key]) : [];
     }
 
+    /**
+     * JSON with map keys sorted and list order kept. Throws on a value JSON cannot
+     * hold (invalid UTF-8, NAN, INF) rather than encoding it as "", which made two
+     * different unencodable values compare as the same.
+     */
     private static function canon(mixed $value): string
     {
-        return (string) json_encode(self::sortKeys($value), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+        return json_encode(self::sortKeys($value), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR, 4096);
     }
 
     private static function sortKeys(mixed $value): mixed
