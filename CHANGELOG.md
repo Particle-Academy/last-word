@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-07
+
+### Added
+
+- **`['template' => $dotxBytesOrPath]` on `Agent::toBytes()` and
+  `Agent::write()` — render onto a house template** (last-word#3). Reported by a
+  consumer generating customer-facing sales collateral: the writer produced a
+  structurally correct `.docx` and a human still had to re-apply the house style,
+  which they described as most of its value gone.
+
+  **Binds by style name, with nothing to configure.** The document model already
+  uses Word's own style ids, so a template defining `Normal`, `Title`,
+  `Heading1..n`, `Quote`, `ListParagraph` and `Hyperlink` binds on its own. The
+  template's `word/styles.xml` and `word/theme/theme1.xml` are carried verbatim;
+  definitions the template lacks — `CodeBlock`, `InlineCode`, heading levels it
+  omits — are supplied from the built-in set, because a `w:pStyle` naming an
+  undefined style renders UNSTYLED in Word rather than erroring.
+
+  The theme travels with the styles deliberately: a style naming a theme colour or
+  font resolves against whatever theme is in the package, so styles-without-theme
+  would give the template's structure in the default's colours.
+
+  **Not taken from the template**, and each for a reason rather than an oversight:
+  `w:sectPr` (page size, margins, headers, footers) lives in `document.xml`, which
+  the writer owns; `word/numbering.xml` would repoint every list, since
+  `document.xml` references numbering ids this package defines; `word/settings.xml`
+  is mostly `w:rsid` revision history and would make output depend on a template's
+  editing past. So list markers and page setup are still ours and the typography,
+  colours and theme are the template's. **A cover page is not in this release.**
+
+  **Nothing changes for callers who do not pass it** — the built-in look is
+  byte-for-byte what it was, which the determinism and parity suites check.
+
+- **`TemplateException`**, thrown when a template is not a readable package or has
+  no `word/styles.xml`. It REFUSES rather than falling back, because a document
+  that silently comes out in the built-in style is the exact failure the option
+  exists to end. It also gives a host a way to validate a customer-supplied
+  template at upload rather than at render.
+
 ### Changed
 
 - **The tag workflow is now `.github/workflows/publish.yml`, named `Publish`**

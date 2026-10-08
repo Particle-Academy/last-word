@@ -135,6 +135,11 @@ final class DocxWriter
      */
     public function __construct(
         private ?string $tempDir = null,
+        /**
+         * A house template whose styles + theme this document is rendered onto
+         * (last-word#3). Null is the built-in look, byte-for-byte as before.
+         */
+        private ?DocxTemplate $template = null,
     ) {
     }
 
@@ -172,7 +177,11 @@ final class DocxWriter
     {
         $this->rels = [];
         $this->mediaFiles = [];
-        $this->relCounter = 2;
+        // rId1 = styles, rId2 = numbering, and rId3 = the template's theme when
+        // there is one -- so image and hyperlink rels start at rId4 in that case.
+        // Reserving it here rather than appending later is what keeps a theme
+        // from colliding with the first image in a templated document.
+        $this->relCounter = $this->template !== null && $this->template->hasTheme() ? 3 : 2;
         $this->imageCounter = 0;
         $this->orderedListCount = 0;
 
@@ -208,6 +217,13 @@ final class DocxWriter
             $zip->addFromString('word/document.xml', $documentXml);
             $zip->addFromString('word/styles.xml', $this->buildStyles($doc));
             $zip->addFromString('word/numbering.xml', $this->buildNumbering());
+            if ($this->template !== null && $this->template->hasTheme()) {
+                // The theme travels WITH the styles. A style that names a theme
+                // colour or font ("accent1", "majorHAnsi") resolves against
+                // whatever theme is in the package, so styles without their theme
+                // give the template's structure in the default's colours.
+                $zip->addFromString('word/theme/theme1.xml', (string) $this->template->theme());
+            }
             $zip->addFromString('word/_rels/document.xml.rels', $this->buildDocumentRels());
             foreach ($this->mediaFiles as $archivePath => $bytes) {
                 $zip->addFromString($archivePath, $bytes);
@@ -245,6 +261,11 @@ final class DocxWriter
         $xml .= '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>';
         $xml .= '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
         $xml .= '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>';
+        if ($this->template !== null && $this->template->hasTheme()) {
+            // A part present but undeclared makes the package invalid, and Word
+            // reports it as "unreadable content" without naming the part.
+            $xml .= '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>';
+        }
         if ($hasTitle) {
             $xml .= '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>';
         }
@@ -288,6 +309,9 @@ final class DocxWriter
         $xml .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
         $xml .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
         $xml .= '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>';
+        if ($this->template !== null && $this->template->hasTheme()) {
+            $xml .= '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>';
+        }
         foreach ($this->rels as $rId => $rel) {
             if ($rel['type'] === 'hyperlink') {
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' . Xml::attr($rel['target']) . '" TargetMode="External"/>';
@@ -1161,70 +1185,123 @@ final class DocxWriter
     /**
      * @param  array<string, mixed>  $doc
      */
+    /**
+     * `word/styles.xml`.
+     *
+     * With a template (last-word#3) the template's OWN part is emitted, and only
+     * the definitions this writer emits that the template does not declare are
+     * appended. Two failure modes that shape this:
+     *
+     *  - **A missing definition is not an error in Word.** A `w:pStyle` naming a
+     *    style nobody defined renders unstyled, silently -- so a template with no
+     *    `CodeBlock` would quietly produce unformatted code blocks, which is the
+     *    same class of wrong-looking-but-valid output the template option exists
+     *    to end.
+     *  - **A duplicate definition is not an error either**, and the LATER one
+     *    wins. Appending a style the template already defines would therefore
+     *    override the house style with ours -- silently, and only for the styles
+     *    we happen to share, which is the worst possible subset.
+     */
     private function buildStyles(array $doc = []): string
     {
-        $headingSizes = [1 => 36, 2 => 32, 3 => 28, 4 => 26, 5 => 24, 6 => 22];
+        $definitions = $this->styleDefinitions($doc);
 
+        if ($this->template !== null) {
+            $missing = '';
+            foreach ($definitions as $styleId => $xml) {
+                if (! $this->template->defines($styleId)) {
+                    $missing .= $xml;
+                }
+            }
+
+            return $this->template->stylesWith($missing);
+        }
+
+        $xml = Xml::declaration();
+        $xml .= '<w:styles xmlns:w="' . self::NS_W . '">';
+        $xml .= $this->docDefaults($doc);
+        $xml .= implode('', $definitions);
+        $xml .= '</w:styles>';
+
+        return $xml;
+    }
+
+    /** @param array<string, mixed> $doc */
+    private function docDefaults(array $doc): string
+    {
         $font = is_string($doc['defaultFont'] ?? null) && $doc['defaultFont'] !== ''
             ? Xml::attr($doc['defaultFont'])
             : 'Calibri';
         $size = self::halfPoints($doc['defaultSize'] ?? null) ?? 22;
 
-        $xml = Xml::declaration();
-        $xml .= '<w:styles xmlns:w="' . self::NS_W . '">';
-        $xml .= '<w:docDefaults>'
+        return '<w:docDefaults>'
             . '<w:rPrDefault><w:rPr><w:rFonts w:ascii="' . $font . '" w:hAnsi="' . $font . '"'
             . ' w:eastAsia="' . $font . '" w:cs="' . $font . '"/>'
             . '<w:sz w:val="' . $size . '"/><w:szCs w:val="' . $size . '"/></w:rPr></w:rPrDefault>'
             . '<w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
             . '</w:docDefaults>';
+    }
 
-        $xml .= '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>';
+    /**
+     * Every style this writer can emit, keyed by `w:styleId`.
+     *
+     * Insertion order is the emission order, and it is unchanged from when this
+     * was one concatenation -- the no-template output is byte-identical, which
+     * the parity and determinism suites both check.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, string>
+     */
+    private function styleDefinitions(array $doc = []): array
+    {
+        $headingSizes = [1 => 36, 2 => 32, 3 => 28, 4 => 26, 5 => 24, 6 => 22];
 
-        $xml .= '<w:style w:type="paragraph" w:styleId="Title">'
+        $styles = [];
+
+        $styles['Normal'] = '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>';
+
+        $styles['Title'] = '<w:style w:type="paragraph" w:styleId="Title">'
             . '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>'
             . '<w:pPr><w:spacing w:after="240"/></w:pPr>'
             . '<w:rPr><w:b/><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>'
             . '</w:style>';
 
         foreach ($headingSizes as $level => $sz) {
-            $xml .= '<w:style w:type="paragraph" w:styleId="Heading' . $level . '">'
+            $styles['Heading' . $level] = '<w:style w:type="paragraph" w:styleId="Heading' . $level . '">'
                 . '<w:name w:val="heading ' . $level . '"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>'
                 . '<w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="' . ($level - 1) . '"/></w:pPr>'
                 . '<w:rPr><w:b/><w:sz w:val="' . $sz . '"/><w:szCs w:val="' . $sz . '"/></w:rPr>'
                 . '</w:style>';
         }
 
-        $xml .= '<w:style w:type="paragraph" w:styleId="Quote">'
+        $styles['Quote'] = '<w:style w:type="paragraph" w:styleId="Quote">'
             . '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>'
             . '<w:pPr><w:ind w:left="720"/></w:pPr>'
             . '<w:rPr><w:i/><w:color w:val="595959"/></w:rPr>'
             . '</w:style>';
 
-        $xml .= '<w:style w:type="paragraph" w:styleId="CodeBlock">'
+        $styles['CodeBlock'] = '<w:style w:type="paragraph" w:styleId="CodeBlock">'
             . '<w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:qFormat/>'
             . '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:pPr>'
             . '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>'
             . '</w:style>';
 
-        $xml .= '<w:style w:type="paragraph" w:styleId="ListParagraph">'
+        $styles['ListParagraph'] = '<w:style w:type="paragraph" w:styleId="ListParagraph">'
             . '<w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:qFormat/>'
             . '<w:pPr><w:contextualSpacing/></w:pPr>'
             . '</w:style>';
 
-        $xml .= '<w:style w:type="character" w:styleId="InlineCode">'
+        $styles['InlineCode'] = '<w:style w:type="character" w:styleId="InlineCode">'
             . '<w:name w:val="Inline Code"/><w:qFormat/>'
             . '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/><w:sz w:val="20"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:rPr>'
             . '</w:style>';
 
-        $xml .= '<w:style w:type="character" w:styleId="Hyperlink">'
+        $styles['Hyperlink'] = '<w:style w:type="character" w:styleId="Hyperlink">'
             . '<w:name w:val="Hyperlink"/><w:qFormat/>'
             . '<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr>'
             . '</w:style>';
 
-        $xml .= '</w:styles>';
-
-        return $xml;
+        return $styles;
     }
 
     private function buildNumbering(): string

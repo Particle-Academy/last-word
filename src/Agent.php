@@ -6,6 +6,7 @@ namespace LastWord;
 
 use InvalidArgumentException;
 use LastWord\Exceptions\SchemaException;
+use LastWord\Exceptions\TemplateException;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
 use LastWord\Ops\DocDiff;
@@ -20,6 +21,7 @@ use LastWord\Reader\RtfReader;
 use LastWord\Schema\Repairer;
 use LastWord\Schema\Schema;
 use LastWord\Schema\Validator;
+use LastWord\Writer\DocxTemplate;
 use LastWord\Writer\DocxWriter;
 
 /**
@@ -44,7 +46,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.6.3';
+    public const VERSION = '0.7.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
@@ -105,11 +107,33 @@ final class Agent
      * Options:
      *   - `tempDir` (string): override the temp dir ZipArchive assembles the
      *     archive in (for hosts where the system temp isn't writable).
+     *   - `template` (string): a `.dotx`/`.docx` -- raw bytes or a filesystem
+     *     path -- whose `word/styles.xml` and `word/theme/theme1.xml` the
+     *     document is rendered onto, so it comes out in a house look rather than
+     *     the built-in one (last-word#3).
+     *
+     *     Binds BY STYLE NAME: headings, paragraphs, quotes and lists already use
+     *     Word's own style ids, so a template defining `Normal`, `Title`,
+     *     `Heading1..n`, `Quote`, `ListParagraph` and `Hyperlink` binds with no
+     *     mapping to configure. Definitions the template lacks are supplied from
+     *     the built-in set, because a `w:pStyle` naming an undefined style renders
+     *     unstyled in Word rather than erroring.
+     *
+     *     NOT taken from the template: `w:sectPr` (page size, margins, headers,
+     *     footers), `word/numbering.xml` (this document's lists reference numbering
+     *     ids defined here) and `word/settings.xml`. So list markers and page setup
+     *     are still ours; the typography, colours and theme are the template's.
+     *
+     *     An unusable template THROWS {@see TemplateException} rather than falling
+     *     back -- a document that silently comes out in the wrong style is the
+     *     failure this option exists to end. A host can validate a
+     *     customer-supplied template at upload by calling this and catching it.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string}  $options
+     * @param  array{tempDir?: ?string, template?: ?string}  $options
      *
      * @throws SchemaException
+     * @throws TemplateException
      */
     public static function toBytes(array $doc, array $options = []): string
     {
@@ -121,7 +145,7 @@ final class Agent
             );
         }
 
-        return (new DocxWriter($options['tempDir'] ?? null))->toBytes($doc);
+        return (new DocxWriter($options['tempDir'] ?? null, self::templateFrom($options)))->toBytes($doc);
     }
 
     /**
@@ -129,10 +153,11 @@ final class Agent
      * SchemaException on validation errors. Same options as {@see toBytes()}.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string}  $options
+     * @param  array{tempDir?: ?string, template?: ?string}  $options
      * @return array{path: string, bytes: int, blocks: int}
      *
      * @throws SchemaException
+     * @throws TemplateException
      */
     public static function write(array $doc, string $path, array $options = []): array
     {
@@ -144,7 +169,34 @@ final class Agent
             );
         }
 
-        return (new DocxWriter($options['tempDir'] ?? null))->write($doc, $path);
+        return (new DocxWriter($options['tempDir'] ?? null, self::templateFrom($options)))->write($doc, $path);
+    }
+
+    /**
+     * The `template` option as an opened template, or null when absent.
+     *
+     * An empty string counts as absent, so a host passing through a blank form
+     * field gets the built-in look rather than an exception.
+     *
+     * @param  array<string, mixed>  $options
+     *
+     * @throws TemplateException
+     */
+    private static function templateFrom(array $options): ?DocxTemplate
+    {
+        $template = $options['template'] ?? null;
+
+        if ($template === null || $template === '') {
+            return null;
+        }
+
+        if (! is_string($template)) {
+            throw new TemplateException(
+                'The template option must be a .dotx/.docx as raw bytes or a filesystem path.',
+            );
+        }
+
+        return DocxTemplate::open($template);
     }
 
     /**

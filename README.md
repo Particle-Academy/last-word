@@ -138,6 +138,7 @@ Static façade, mirrored exactly in the Node package:
 | `Agent::validateAndRepair($doc)` | `{ok, schema, errors}` — heuristic repair of near-miss agent output |
 | `Agent::toBytes($doc)` | DOCX bytes; throws `SchemaException` when invalid |
 | `Agent::write($doc, $path)` | write to disk → `{path, bytes, blocks}` |
+| `Agent::toBytes($doc, ['template' => $dotx])` | render onto a house template's styles + theme |
 | `Agent::read($bytesOrPath)` / `Agent::fromBytes($bytes)` | parse a .docx, .doc, .odt or .rtf back into the model |
 | `Agent::toMarkdown($doc)` / `Agent::fromMarkdown($md)` | the Editor bridge |
 | `Agent::describe($doc)` | plain-text summary (title, block counts, word count) |
@@ -150,6 +151,57 @@ Static façade, mirrored exactly in the Node package:
 become runs, `"text"` shorthand becomes runs, heading levels clamp to 1-6,
 unknown block types drop with the error retained, missing `blocks`
 defaults to `[]` — hand the errors back to the model if `ok` is false.
+
+## Rendering onto a house template
+
+Every document used to come out in the built-in look, so an automation that
+produced a structurally correct `.docx` still needed a human to re-apply the
+house style. Pass a `.dotx` (or `.docx`) and it renders onto that template's
+typography instead:
+
+```php
+Agent::toBytes($doc, ['template' => $dotxBytesOrPath]);
+Agent::write($doc, $path, ['template' => '/templates/house.dotx']);
+```
+
+It **binds by style name**, with nothing to configure. The document model already
+uses Word's own style ids, so a template that defines `Normal`, `Title`,
+`Heading1..n`, `Quote`, `ListParagraph` and `Hyperlink` binds on its own. The
+template's `word/styles.xml` and `word/theme/theme1.xml` are carried through
+verbatim; definitions it does not have (`CodeBlock` and `InlineCode`, or heading
+levels it omits) are supplied from the built-in set.
+
+The theme travels **with** the styles deliberately. A style that names a theme
+colour or font resolves against whatever theme is in the package, so taking
+styles alone would give you the template's structure in the default's colours — a
+wrong answer that looks deliberate.
+
+**What the template does NOT bring, yet:**
+
+| | |
+|---|---|
+| `w:sectPr` | page size, margins, headers, footers — these live in `document.xml`, which the writer owns |
+| `word/numbering.xml` | your lists reference numbering ids defined by this package; a template's would repoint them |
+| `word/settings.xml` | mostly `w:rsid` revision history, which would make output depend on a template's editing past |
+
+So list markers and page setup are still ours; the typography, colours and theme
+are the template's. A cover page is a `sectPr`-and-headers job and is not here.
+
+**An unusable template throws `TemplateException` rather than falling back.** A
+document that silently comes out in the wrong style is the failure this option
+exists to end — and it gives a host a way to validate a customer-supplied
+template at upload time rather than at render time:
+
+```php
+try {
+    Agent::toBytes($probeDoc, ['template' => $uploaded]);
+} catch (TemplateException $e) {
+    // reject the upload, with $e->getMessage() explaining why
+}
+```
+
+Output stays deterministic: the same document and the same template always
+produce the same bytes.
 
 ## Versions as diffs
 
