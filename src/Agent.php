@@ -46,7 +46,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.8.0';
+    public const VERSION = '0.9.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
@@ -510,5 +510,22 @@ final class Agent
                 $text[] = $run['text'];
             }
         }
+    }
+
+    /**
+     * The agent guide: what makes this kind of file professional, and the schema
+     * idioms that produce it, distilled from rubric-judged builds. Give it to a
+     * model with the schema; it works with any agent loop. The same bytes ship in
+     * the Node and Python packages (each pins the hash).
+     */
+    public static function guide(): string
+    {
+        $path = dirname(__DIR__).'/agent-guide/professional-documents.md';
+        $text = is_file($path) ? file_get_contents($path) : false;
+        if ($text === false) {
+            throw new \RuntimeException('[last-word] agent-guide/professional-documents.md is missing from this install.');
+        }
+
+        return $text;
     }
 }
