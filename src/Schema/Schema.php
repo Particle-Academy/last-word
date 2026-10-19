@@ -85,6 +85,19 @@ final class Schema
             'description' => 'Box spacing in points. Anything omitted is left alone.',
             'properties' => array_fill_keys(['top', 'right', 'bottom', 'left'], $points),
         ];
+        $bandSlot = ['type' => 'string', 'description' => 'Text. `{page}` is the current page number and `{pages}` the page count, both live fields: "Page {page} of {pages}".'];
+        $band = [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'description' => 'A running header or footer: one line with a left, a centre and a right slot, e.g. {"left": "Q3 Board Memo | Confidential", "right": "Page {page} of {pages}"}. 9pt grey unless size/color say otherwise.',
+            'properties' => [
+                'left' => $bandSlot,
+                'center' => $bandSlot,
+                'right' => $bandSlot,
+                'size' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Points; 9 by default.'],
+                'color' => ['type' => 'string', 'pattern' => '^#[0-9A-Fa-f]{6}$', 'description' => 'Text colour; #6B7280 by default.'],
+            ],
+        ];
 
         /** Properties every paragraph-shaped block accepts — paragraph, heading, list item. */
         $paragraphProps = [
@@ -269,6 +282,8 @@ final class Schema
                         'size' => ['enum' => self::PAGE_SIZES],
                         'orientation' => ['enum' => ['portrait', 'landscape']],
                         'margins' => ['$ref' => '#/$defs/boxSides'],
+                        'header' => ['$ref' => '#/$defs/band', 'description' => 'A running header on every page.'],
+                        'footer' => ['$ref' => '#/$defs/band', 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers.'],
                     ],
                 ],
                 'defaultFont' => ['type' => 'string', 'description' => 'Font every run inherits unless it names its own.'],
@@ -281,6 +296,7 @@ final class Schema
                 'boxBorders' => $boxBorders,
                 'tableBorders' => $tableBorders,
                 'boxSides' => $boxSides,
+                'band' => $band,
                 'block' => ['oneOf' => array_values($blocks)],
             ],
         ];

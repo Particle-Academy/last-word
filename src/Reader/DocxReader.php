@@ -83,6 +83,9 @@ final class DocxReader
     /** zip entry name (without leading word/) → bytes, for media resolution. */
     private array $media = [];
 
+    /** header/footer part name (without leading word/) → XML. */
+    private array $bandParts = [];
+
     /** docProps/core.xml contents, when the archive has one. */
     private ?string $coreXml = null;
 
@@ -181,7 +184,151 @@ final class DocxReader
             $out['margins'] = $margins;
         }
 
+        foreach (['header', 'footer'] as $kind) {
+            $band = $this->parseBand($sectPr, $kind);
+            if ($band !== null) {
+                $out[$kind] = $band;
+            }
+        }
+
         return $out === [] ? null : $out;
+    }
+
+    /**
+     * The section's DEFAULT header or footer as a band: left / center / right
+     * text with PAGE and NUMPAGES fields read back as `{page}` / `{pages}`.
+     *
+     * Our writer puts the slots in one paragraph separated by two tabs. A band
+     * from another producer is read the same way: three tab-separated segments
+     * are left/center/right, two are left/right, one goes to the slot its
+     * paragraph alignment names. Only the first paragraph is read.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function parseBand(DOMElement $sectPr, string $kind): ?array
+    {
+        $part = null;
+        foreach ($sectPr->childNodes as $node) {
+            if ($node instanceof DOMElement && $node->localName === $kind . 'Reference' && in_array($this->wAttr($node, 'type'), ['default', null], true)) {
+                $rid = (string) $this->rAttr($node, 'id');
+                $target = $this->rels[$rid]['target'] ?? null;
+                $part = is_string($target) ? ($this->bandParts[ltrim(str_replace('\\', '/', $target), '/')] ?? null) : null;
+            }
+        }
+        if ($part === null) {
+            return null;
+        }
+
+        $dom = new DOMDocument();
+        $prev = libxml_use_internal_errors(true);
+        $ok = $dom->loadXML($part, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$ok || $dom->documentElement === null) {
+            return null;
+        }
+        $p = $this->firstChildByName($dom->documentElement, 'p');
+        if ($p === null) {
+            return null;
+        }
+
+        $segments = [''];
+        $firstRun = null;
+        $field = null; // inside a complex field: its instruction so far
+        $walk = function (DOMElement $node) use (&$walk, &$segments, &$firstRun, &$field): void {
+            foreach ($node->childNodes as $child) {
+                if (!$child instanceof DOMElement) {
+                    continue;
+                }
+                $name = $child->localName;
+                if ($name === 'fldSimple') {
+                    $segments[count($segments) - 1] .= self::fieldToken((string) $this->wAttr($child, 'instr'));
+                } elseif ($name === 'r') {
+                    $firstRun ??= $child;
+                    $walk($child);
+                } elseif ($name === 'fldChar') {
+                    $type = $this->wAttr($child, 'fldCharType');
+                    if ($type === 'begin') {
+                        $field = '';
+                    } elseif ($type === 'separate' && $field !== null) {
+                        $segments[count($segments) - 1] .= self::fieldToken($field);
+                        $field = false; // skip the cached result
+                    } elseif ($type === 'end') {
+                        $field = null;
+                    }
+                } elseif ($name === 'instrText' && is_string($field)) {
+                    $field .= $child->textContent;
+                } elseif ($field === null && $name === 't') {
+                    $segments[count($segments) - 1] .= $child->textContent;
+                } elseif ($field === null && $name === 'tab') {
+                    $segments[] = '';
+                } elseif ($name === 'hyperlink' || $name === 'smartTag') {
+                    $walk($child);
+                }
+            }
+        };
+        $walk($p);
+
+        $slots = match (count($segments)) {
+            1 => [match ($this->paragraphAlign($p)) {
+                'center' => 'center',
+                'right' => 'right',
+                default => 'left',
+            } => $segments[0]],
+            2 => ['left' => $segments[0], 'right' => $segments[1]],
+            default => ['left' => $segments[0], 'center' => $segments[1], 'right' => implode(' ', array_slice($segments, 2))],
+        };
+
+        $band = [];
+        foreach (['left', 'center', 'right'] as $slot) {
+            if (($slots[$slot] ?? '') !== '') {
+                $band[$slot] = $slots[$slot];
+            }
+        }
+        if ($band === []) {
+            return null;
+        }
+
+        // Size and colour only when they differ from what the writer puts there
+        // unasked, as every other optional field in a read document is.
+        $rPr = $firstRun !== null ? $this->firstChildByName($firstRun, 'rPr') : null;
+        $sz = $rPr !== null ? $this->firstChildByName($rPr, 'sz') : null;
+        if ($sz !== null && is_numeric($this->wAttr($sz, 'val')) && (int) $this->wAttr($sz, 'val') !== 18) {
+            $band['size'] = ((int) $this->wAttr($sz, 'val')) / 2;
+        }
+        $color = $rPr !== null ? $this->firstChildByName($rPr, 'color') : null;
+        $hex = $color !== null ? strtoupper((string) $this->wAttr($color, 'val')) : null;
+        if ($hex !== null && preg_match('/^[0-9A-F]{6}$/', $hex) === 1 && $hex !== '6B7280') {
+            $band['color'] = '#' . $hex;
+        }
+
+        return $band;
+    }
+
+    /** A field instruction as a band token: PAGE → {page}, NUMPAGES → {pages}, else ''. */
+    private static function fieldToken(string $instr): string
+    {
+        $word = strtoupper(strtok(trim($instr), " \\") ?: '');
+
+        return match ($word) {
+            'PAGE' => '{page}',
+            'NUMPAGES', 'SECTIONPAGES' => '{pages}',
+            default => '',
+        };
+    }
+
+    /** A paragraph's w:jc, normalised to left / center / right. */
+    private function paragraphAlign(DOMElement $p): string
+    {
+        $pPr = $this->firstChildByName($p, 'pPr');
+        $jc = $pPr !== null ? $this->firstChildByName($pPr, 'jc') : null;
+        $val = $jc !== null ? (string) $this->wAttr($jc, 'val') : '';
+
+        return match ($val) {
+            'center' => 'center',
+            'right', 'end' => 'right',
+            default => 'left',
+        };
     }
 
     /**
@@ -265,8 +412,15 @@ final class DocxReader
                 $this->stylesXml = is_string($stylesXml) ? $stylesXml : null;
 
                 $this->media = [];
+                $this->bandParts = [];
                 for ($i = 0; $i < $zip->numFiles; $i++) {
                     $name = $zip->getNameIndex($i);
+                    if (is_string($name) && preg_match('#^word/(header|footer)\d*\.xml$#', $name) === 1) {
+                        $data = $zip->getFromIndex($i);
+                        if (is_string($data)) {
+                            $this->bandParts[substr($name, strlen('word/'))] = $data;
+                        }
+                    }
                     if (is_string($name) && str_starts_with($name, 'word/media/')) {
                         $data = $zip->getFromIndex($i);
                         if (is_string($data)) {

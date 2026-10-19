@@ -44,6 +44,28 @@ final class Validator
                 $this->validateEnum($doc['page']['size'] ?? null, 'page.size', 'page size', ['letter', 'legal', 'a4'], $errors);
                 $this->validateEnum($doc['page']['orientation'] ?? null, 'page.orientation', 'page orientation', ['portrait', 'landscape'], $errors);
                 $this->validateSides($doc['page']['margins'] ?? null, 'page.margins', 'page margins', $errors);
+                foreach (['header', 'footer'] as $kind) {
+                    $band = $doc['page'][$kind] ?? null;
+                    if ($band === null) {
+                        continue;
+                    }
+                    if (!is_array($band)) {
+                        $errors[] = self::error("page.{$kind}", "page {$kind} must be an object ({left?, center?, right?, size?, color?})");
+
+                        continue;
+                    }
+                    foreach (['left', 'center', 'right'] as $slot) {
+                        if (isset($band[$slot]) && !is_string($band[$slot])) {
+                            $errors[] = self::error("page.{$kind}.{$slot}", "page {$kind} {$slot} must be text");
+                        }
+                    }
+                    if (isset($band['size']) && (!is_numeric($band['size']) || (float) $band['size'] <= 0)) {
+                        $errors[] = self::error("page.{$kind}.size", "page {$kind} size must be a positive number of points");
+                    }
+                    if (isset($band['color']) && (!is_string($band['color']) || preg_match('/^#[0-9A-Fa-f]{6}$/', $band['color']) !== 1)) {
+                        $errors[] = self::error("page.{$kind}.color", "page {$kind} color must be #RRGGBB");
+                    }
+                }
             }
         }
 

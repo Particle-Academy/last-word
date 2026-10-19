@@ -108,6 +108,20 @@ final class DocxWriter
      */
     private int $contentWidth = 9360;
 
+    /**
+     * The running header and footer this document asked for, as finished parts:
+     * kind ('header' | 'footer') => part XML. Empty when none were asked for, and
+     * then nothing about the package changes.
+     *
+     * @var array<string, string>
+     */
+    private array $bands = [];
+
+    /** A band's default type: small and muted, so it frames the page rather than competing with it. */
+    private const BAND_SIZE_PT = 9;
+
+    private const BAND_COLOR = '6B7280';
+
     /** Page sizes in twips (1/1440in), portrait. */
     private const PAGE_SIZES = [
         'letter' => [12240, 15840],
@@ -224,6 +238,9 @@ final class DocxWriter
                 // give the template's structure in the default's colours.
                 $zip->addFromString('word/theme/theme1.xml', (string) $this->template->theme());
             }
+            foreach ($this->bands as $kind => $xml) {
+                $zip->addFromString('word/' . $kind . '1.xml', $xml);
+            }
             $zip->addFromString('word/_rels/document.xml.rels', $this->buildDocumentRels());
             foreach ($this->mediaFiles as $archivePath => $bytes) {
                 $zip->addFromString($archivePath, $bytes);
@@ -248,6 +265,85 @@ final class DocxWriter
         }
     }
 
+    // ─── Running header / footer ─────────────────────────────────────────
+
+    /**
+     * A band spec, normalised; null when it asks for nothing.
+     *
+     * @return array{left: string, center: string, right: string, size: float, color: string}|null
+     */
+    private static function band(mixed $spec): ?array
+    {
+        if (!is_array($spec)) {
+            return null;
+        }
+        $slot = static fn (string $k): string => is_string($spec[$k] ?? null) ? $spec[$k] : '';
+        $band = ['left' => $slot('left'), 'center' => $slot('center'), 'right' => $slot('right')];
+        if ($band['left'] === '' && $band['center'] === '' && $band['right'] === '') {
+            return null;
+        }
+        $band['size'] = is_numeric($spec['size'] ?? null) && (float) $spec['size'] > 0 ? (float) $spec['size'] : (float) self::BAND_SIZE_PT;
+        $band['color'] = self::hex($spec['color'] ?? null) ?? self::BAND_COLOR;
+
+        return $band;
+    }
+
+    /**
+     * One paragraph: left, TAB, centre, TAB, right, against a centre tab stop at
+     * half the content width and a right one at its edge -- so the three slots
+     * sit where a reader expects whatever the margins are.
+     *
+     * @param  array{left: string, center: string, right: string, size: float, color: string}  $band
+     */
+    private function bandXml(string $kind, array $band): string
+    {
+        $rPr = '<w:rPr><w:color w:val="' . $band['color'] . '"/><w:sz w:val="' . self::halfPoints($band['size']) . '"/></w:rPr>';
+        $tag = $kind === 'header' ? 'w:hdr' : 'w:ftr';
+
+        return Xml::declaration()
+            . '<' . $tag . ' xmlns:w="' . self::NS_W . '" xmlns:r="' . self::NS_R . '">'
+            . '<w:p><w:pPr><w:tabs>'
+            . '<w:tab w:val="center" w:pos="' . intdiv($this->contentWidth, 2) . '"/>'
+            . '<w:tab w:val="right" w:pos="' . $this->contentWidth . '"/>'
+            . '</w:tabs><w:spacing w:before="0" w:after="0"/></w:pPr>'
+            . self::bandRuns($band['left'], $rPr)
+            . '<w:r>' . $rPr . '<w:tab/></w:r>'
+            . self::bandRuns($band['center'], $rPr)
+            . '<w:r>' . $rPr . '<w:tab/></w:r>'
+            . self::bandRuns($band['right'], $rPr)
+            . '</w:p>'
+            . '</' . $tag . '>';
+    }
+
+    /**
+     * Text with `{page}` / `{pages}` as live PAGE / NUMPAGES fields.
+     *
+     * COMPLEX fields (begin / instrText / separate / result / end), every piece a
+     * run carrying the band's formatting. A `w:fldSimple` rendered its number in
+     * the paragraph's default size and colour in LibreOffice -- a black 11pt "2"
+     * in a grey 9pt footer -- because only the cached result run was styled.
+     */
+    private static function bandRuns(string $text, string $rPr): string
+    {
+        $out = '';
+        foreach (preg_split('/(\{page\}|\{pages\})/', $text, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [] as $piece) {
+            $instr = match ($piece) {
+                '{page}' => 'PAGE',
+                '{pages}' => 'NUMPAGES',
+                default => null,
+            };
+            $out .= $instr === null
+                ? '<w:r>' . $rPr . '<w:t xml:space="preserve">' . Xml::text($piece) . '</w:t></w:r>'
+                : '<w:r>' . $rPr . '<w:fldChar w:fldCharType="begin"/></w:r>'
+                    . '<w:r>' . $rPr . '<w:instrText xml:space="preserve"> ' . $instr . ' </w:instrText></w:r>'
+                    . '<w:r>' . $rPr . '<w:fldChar w:fldCharType="separate"/></w:r>'
+                    . '<w:r>' . $rPr . '<w:t>1</w:t></w:r>'
+                    . '<w:r>' . $rPr . '<w:fldChar w:fldCharType="end"/></w:r>';
+        }
+
+        return $out;
+    }
+
     // ─── Parts ───────────────────────────────────────────────────────────
 
     private function buildContentTypes(bool $hasTitle): string
@@ -265,6 +361,9 @@ final class DocxWriter
             // A part present but undeclared makes the package invalid, and Word
             // reports it as "unreadable content" without naming the part.
             $xml .= '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>';
+        }
+        foreach (array_keys($this->bands) as $kind) {
+            $xml .= '<Override PartName="/word/' . $kind . '1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
         }
         if ($hasTitle) {
             $xml .= '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>';
@@ -312,6 +411,9 @@ final class DocxWriter
         if ($this->template !== null && $this->template->hasTheme()) {
             $xml .= '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>';
         }
+        foreach (array_keys($this->bands) as $kind) {
+            $xml .= '<Relationship Id="rId' . ucfirst($kind) . '1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . $kind . '1.xml"/>';
+        }
         foreach ($this->rels as $rId => $rel) {
             if ($rel['type'] === 'hyperlink') {
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' . Xml::attr($rel['target']) . '" TargetMode="External"/>';
@@ -340,8 +442,22 @@ final class DocxWriter
         // slot shared with the Node mirror — not in a body paragraph.
         $body = $this->renderBlocks($doc['blocks'] ?? []);
 
+        // Header/footer references come FIRST in w:sectPr; the schema orders them
+        // before w:pgSz, and Word drops a reference it finds after it.
+        $this->bands = [];
+        $references = '';
+        $pageSpec = is_array($doc['page'] ?? null) ? $doc['page'] : [];
+        foreach (['header', 'footer'] as $kind) {
+            $band = self::band($pageSpec[$kind] ?? null);
+            if ($band !== null) {
+                $this->bands[$kind] = $this->bandXml($kind, $band);
+                $references .= '<w:' . $kind . 'Reference w:type="default" r:id="rId' . ucfirst($kind) . '1"/>';
+            }
+        }
+
         $orient = $page['orientation'] === 'landscape' ? ' w:orient="landscape"' : '';
         $body .= '<w:sectPr>'
+            . $references
             . '<w:pgSz w:w="' . $page['w'] . '" w:h="' . $page['h'] . '"' . $orient . '/>'
             . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
             . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'

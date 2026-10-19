@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
+### Added
+
+- **Running headers and footers with live page numbers**: `page.header` and
+  `page.footer`, each one line with `left`, `center` and `right` slots (plus
+  optional `size` and `color`). `{page}` and `{pages}` become PAGE and NUMPAGES
+  fields, so "Page {page} of {pages}" stays true when the document is edited:
+  `{"page": {"footer": {"left": "Q3 Board Memo | Confidential", "right": "Page {page} of {pages}"}}}`.
+  9pt grey by default. The reader reads them back, including Word's own
+  simple and complex page fields. Every multi-page document agents built for
+  review was marked down for having no page numbers, and there was no way to
+  ask for one. **Nothing to do**: a document without them is byte-identical.
+  Lands with `@particle-academy/last-word` 0.8.0 and `fancy-last-word` 0.4.0;
+  parity holds.
+
 ## [0.7.0] - 2026-10-07
 
 ### Added
