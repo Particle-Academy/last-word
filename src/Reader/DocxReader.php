@@ -86,6 +86,15 @@ final class DocxReader
     /** header/footer part name (without leading word/) → XML. */
     private array $bandParts = [];
 
+    /** chart part name (without leading word/) → XML. */
+    private array $chartParts = [];
+
+    /**
+     * The section's text column in twips, read before any block so a chart
+     * that spans it -- the writer's default -- reads back without a size.
+     */
+    private int $contentWidth = 9360;
+
     /** docProps/core.xml contents, when the archive has one. */
     private ?string $coreXml = null;
 
@@ -123,6 +132,7 @@ final class DocxReader
         // top-level Title-styled paragraph — is consumed instead (see
         // parseBlockContainer()).
         $this->title = $this->parseCoreTitle();
+        $this->contentWidth = $this->contentWidthOf($body !== null ? $this->firstChildByName($body, 'sectPr') : null);
         $blocks = $body !== null ? $this->parseBlockContainer($body, true) : [];
 
         $doc = [];
@@ -145,6 +155,21 @@ final class DocxReader
         $doc['blocks'] = $blocks;
 
         return $doc;
+    }
+
+    /** Twips between the margins: page width (landscape-aware) less left and right. */
+    private function contentWidthOf(?DOMElement $sectPr): int
+    {
+        if ($sectPr === null) {
+            return 9360;
+        }
+        $pgSz = $this->firstChildByName($sectPr, 'pgSz');
+        $w = $pgSz !== null && is_numeric($this->wAttr($pgSz, 'w')) ? (int) $this->wAttr($pgSz, 'w') : 12240;
+        $pgMar = $this->firstChildByName($sectPr, 'pgMar');
+        $left = $pgMar !== null && is_numeric($this->wAttr($pgMar, 'left')) ? (int) $this->wAttr($pgMar, 'left') : 1440;
+        $right = $pgMar !== null && is_numeric($this->wAttr($pgMar, 'right')) ? (int) $this->wAttr($pgMar, 'right') : 1440;
+
+        return max(1, $w - $left - $right);
     }
 
     /**
@@ -413,8 +438,15 @@ final class DocxReader
 
                 $this->media = [];
                 $this->bandParts = [];
+                $this->chartParts = [];
                 for ($i = 0; $i < $zip->numFiles; $i++) {
                     $name = $zip->getNameIndex($i);
+                    if (is_string($name) && preg_match('#^word/charts/[^/]+\.xml$#', $name) === 1) {
+                        $data = $zip->getFromIndex($i);
+                        if (is_string($data)) {
+                            $this->chartParts[substr($name, strlen('word/'))] = $data;
+                        }
+                    }
                     if (is_string($name) && preg_match('#^word/(header|footer)\d*\.xml$#', $name) === 1) {
                         $data = $zip->getFromIndex($i);
                         if (is_string($data)) {
@@ -1551,7 +1583,7 @@ final class DocxReader
     {
         $blip = $this->firstDescendantByName($drawing, 'blip');
         if ($blip === null) {
-            return null;
+            return $this->parseChartDrawing($drawing);
         }
         $rId = $this->rAttr($blip, 'embed') ?? $this->rAttr($blip, 'link');
         $target = $rId !== null ? ($this->rels[$rId]['target'] ?? null) : null;
@@ -1598,6 +1630,59 @@ final class DocxReader
         }
 
         return $image;
+    }
+
+    /**
+     * A drawing holding a chart (`a:graphicData` of the chart namespace), back
+     * as a chart block; null for any drawing that is not a chart this package
+     * can model -- the drawing is skipped, the read carries on.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function parseChartDrawing(DOMElement $drawing): ?array
+    {
+        $chart = $this->firstDescendantByName($drawing, 'chart');
+        $graphicData = $chart?->parentNode;
+        if ($chart === null || !($graphicData instanceof DOMElement) || $graphicData->getAttribute('uri') !== ChartReader::NS_C) {
+            return null;
+        }
+        $rId = $this->rAttr($chart, 'id');
+        $target = $rId !== null ? ($this->rels[$rId]['target'] ?? null) : null;
+        if ($target === null) {
+            return null;
+        }
+        $target = ltrim($target, '/');
+        if (str_starts_with($target, 'word/')) {
+            $target = substr($target, strlen('word/'));
+        }
+        $xml = $this->chartParts[$target] ?? null;
+        $read = is_string($xml) ? ChartReader::read($xml) : null;
+        if ($read === null) {
+            return null;
+        }
+
+        $block = ['type' => 'chart', 'option' => $read['option']];
+
+        // The size, unless it is exactly what the writer gives a chart that
+        // names none: the text column, 0.6 as tall.
+        $extent = $this->firstDescendantByName($drawing, 'extent');
+        $cx = $extent !== null ? (int) $extent->getAttribute('cx') : 0;
+        $cy = $extent !== null ? (int) $extent->getAttribute('cy') : 0;
+        $column = $this->contentWidth * 635;
+        if ($cx > 0 && $cy > 0 && !($cx === $column && $cy === (int) round($column * \LastWord\Helpers\Chart::DEFAULT_ASPECT))) {
+            $block['widthPx'] = (int) round($cx / 9525);
+            $block['heightPx'] = (int) round($cy / 9525);
+        }
+        if ($read['numberFormat'] !== null) {
+            $block['numberFormat'] = $read['numberFormat'];
+        }
+        $docPr = $this->firstDescendantByName($drawing, 'docPr');
+        $descr = $docPr?->getAttribute('descr');
+        if (is_string($descr) && $descr !== '') {
+            $block['alt'] = $descr;
+        }
+
+        return $block;
     }
 
     // ─── Lists ───────────────────────────────────────────────────────────

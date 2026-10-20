@@ -121,6 +121,7 @@ Blocks, discriminated by `type`:
 | `code` | `{ language?, text }` — multiline, monospace, shaded |
 | `quote` | `{ blocks }` |
 | `image` | `{ src: "data:image/png;base64,…", widthPx?, heightPx?, alt? }` |
+| `chart` | `{ option: <ECharts option>, widthPx?, heightPx?, width? (% of column), numberFormat?, alt? }` — a native, editable Word chart (bar / column / line / pie) with an embedded workbook; `option` is the same field dark-slide's chart takes |
 | `pageBreak` | `{ }` |
 | `hr` | `{ }` |
 

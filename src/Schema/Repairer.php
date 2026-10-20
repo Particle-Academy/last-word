@@ -114,6 +114,7 @@ final class Repairer
             'code' => $this->repairCode($block, $path),
             'quote' => $this->repairQuote($block, $path),
             'image' => $this->repairImage($block, $path),
+            'chart' => $this->repairChart($block, $path),
             'pageBreak' => ['type' => 'pageBreak'],
             'hr' => ['type' => 'hr'],
         };
@@ -327,6 +328,136 @@ final class Repairer
         }
 
         return $block;
+    }
+
+    /**
+     * A chart block. Two slips are common enough to repair rather than reject:
+     *
+     *   - the SHORTHAND an agent reaches for when it has not read the schema,
+     *     `{chartType, title, categories, series: [{name, values, color}]}`,
+     *     becomes the ECharts option it stands for. `chartType` takes Word's
+     *     words: column, bar (horizontal), line, pie.
+     *   - `series[].values` where ECharts says `data`.
+     *
+     * A chart that still cannot be drawn is dropped, with the reason kept.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private function repairChart(array $block, string $path): ?array
+    {
+        if (!is_array($block['option'] ?? null) && is_array($block['series'] ?? null)) {
+            $block = self::chartFromShorthand($block);
+            $this->note("{$path}.option", 'converted the chart shorthand (chartType / categories / series[].values) to an ECharts option');
+        }
+
+        $option = $block['option'] ?? null;
+        if (is_array($option) && is_array($option['series'] ?? null) && array_is_list($option['series'])) {
+            foreach ($option['series'] as $i => $series) {
+                if (is_array($series) && !isset($series['data']) && is_array($series['values'] ?? null)) {
+                    $series['data'] = $series['values'];
+                    unset($series['values']);
+                    $option['series'][$i] = $series;
+                    $this->note("{$path}.option.series[{$i}].data", 'renamed series "values" to "data", as ECharts names it');
+                }
+            }
+            $block['option'] = $option;
+        }
+
+        foreach (['widthPx', 'heightPx'] as $dim) {
+            if (isset($block[$dim]) && (!(is_int($block[$dim]) || is_float($block[$dim])) || $block[$dim] <= 0)) {
+                unset($block[$dim]);
+                $this->note("{$path}.{$dim}", "dropped invalid {$dim}");
+            }
+        }
+        if (isset($block['width']) && (!(is_int($block['width']) || is_float($block['width'])) || $block['width'] <= 0 || $block['width'] > 100)) {
+            unset($block['width']);
+            $this->note("{$path}.width", 'dropped invalid chart width');
+        }
+        if (isset($block['numberFormat']) && (!is_string($block['numberFormat']) || $block['numberFormat'] === '')) {
+            unset($block['numberFormat']);
+            $this->note("{$path}.numberFormat", 'dropped invalid numberFormat');
+        }
+        if (isset($block['alt']) && !is_string($block['alt'])) {
+            unset($block['alt']);
+            $this->note("{$path}.alt", 'dropped non-string alt');
+        }
+
+        if ((new Validator())->validate(['blocks' => [$block]]) !== []) {
+            $this->note($path, 'dropped a chart that cannot be drawn (see Agent::validate() for why)');
+
+            return null;
+        }
+
+        return $block;
+    }
+
+    /**
+     * `{chartType, title, categories, series: [{name, values, color}]}` as the
+     * chart block it stands for.
+     *
+     * @param  array<string, mixed>  $block
+     * @return array<string, mixed>
+     */
+    private static function chartFromShorthand(array $block): array
+    {
+        $chartType = is_string($block['chartType'] ?? null) ? strtolower($block['chartType']) : 'column';
+        $type = match ($chartType) {
+            'line' => 'line',
+            'pie' => 'pie',
+            default => 'bar',
+        };
+        $categories = is_array($block['categories'] ?? null) ? array_values($block['categories']) : [];
+
+        $series = [];
+        foreach (array_values($block['series']) as $one) {
+            if (!is_array($one)) {
+                continue;
+            }
+            $out = ['type' => $type];
+            if (isset($one['name'])) {
+                $out['name'] = $one['name'];
+            }
+            $values = is_array($one['values'] ?? null) ? array_values($one['values']) : (is_array($one['data'] ?? null) ? array_values($one['data']) : []);
+            if ($type === 'pie') {
+                $data = [];
+                foreach ($values as $i => $value) {
+                    $data[] = ['name' => \LastWord\Helpers\Chart::label($categories[$i] ?? null) ?? 'Slice ' . ($i + 1), 'value' => $value];
+                }
+                $out['data'] = $data;
+            } else {
+                $out['data'] = $values;
+            }
+            if (is_string($one['color'] ?? null)) {
+                $out['itemStyle'] = ['color' => $one['color']];
+            }
+            $series[] = $out;
+        }
+
+        $option = [];
+        if (is_string($block['title'] ?? null) && $block['title'] !== '') {
+            $option['title'] = ['text' => $block['title']];
+        }
+        if ($type !== 'pie') {
+            $category = ['type' => 'category', 'data' => $categories];
+            $value = ['type' => 'value'];
+            if ($chartType === 'bar') {
+                $option['xAxis'] = $value;
+                $option['yAxis'] = $category;
+            } else {
+                $option['xAxis'] = $category;
+                $option['yAxis'] = $value;
+            }
+        }
+        $option['series'] = $series;
+
+        $out = ['type' => 'chart', 'option' => $option];
+        foreach (['widthPx', 'heightPx', 'width', 'numberFormat', 'alt'] as $key) {
+            if (array_key_exists($key, $block)) {
+                $out[$key] = $block[$key];
+            }
+        }
+
+        return $out;
     }
 
     /**

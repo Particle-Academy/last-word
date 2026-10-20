@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LastWord\Markdown;
 
+use LastWord\Helpers\Chart;
+
 /**
  * Doc model → GFM markdown. The Editor bridge's outbound half — hand-rolled
  * (no external markdown dependency), emitting the same canonical form
@@ -58,6 +60,7 @@ final class ToMarkdown
             'code' => $this->code($block),
             'quote' => $this->quote($block),
             'image' => $this->image($block),
+            'chart' => $this->chart($block),
             'pageBreak' => '<!-- pagebreak -->',
             'hr' => '---',
             default => null,
@@ -168,6 +171,44 @@ final class ToMarkdown
     }
 
     /** @param  array<string, mixed>  $block */
+    /**
+     * A chart as the data it plots: its title in bold, then a table with a
+     * column of categories and one column per series. Markdown cannot hold a
+     * chart; it can hold the numbers, which is what a reader of the markdown
+     * needs. (Read back, this is a paragraph and a table -- not a chart.)
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private function chart(array $block): ?string
+    {
+        $spec = Chart::spec($block['option'] ?? null);
+        if ($spec === null) {
+            return null;
+        }
+        $cell = static fn (string $text): array => ['blocks' => [['type' => 'paragraph', 'runs' => [['text' => $text]]]]];
+
+        $header = [$cell($spec['categoryTitle'])];
+        foreach ($spec['series'] as $series) {
+            $header[] = $cell($series['name']);
+        }
+        $rows = [['cells' => $header]];
+        $count = count($spec['categories']);
+        foreach ($spec['series'] as $series) {
+            $count = max($count, count($series['values']));
+        }
+        for ($r = 0; $r < $count; $r++) {
+            $cells = [$cell($spec['categories'][$r] ?? ($spec['categories'] === [] ? (string) ($r + 1) : ''))];
+            foreach ($spec['series'] as $series) {
+                $cells[] = $cell(array_key_exists($r, $series['values']) ? Chart::num($series['values'][$r]) : '');
+            }
+            $rows[] = ['cells' => $cells];
+        }
+
+        $table = $this->table(['rows' => $rows]);
+
+        return $spec['title'] !== '' ? $this->inline([['text' => $spec['title'], 'bold' => true]]) . "\n\n" . $table : $table;
+    }
+
     private function image(array $block): string
     {
         $alt = is_string($block['alt'] ?? null) ? $block['alt'] : '';

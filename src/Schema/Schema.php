@@ -25,6 +25,7 @@ final class Schema
         'code',
         'quote',
         'image',
+        'chart',
         'pageBreak',
         'hr',
     ];
@@ -253,6 +254,20 @@ final class Schema
                     'alt' => ['type' => 'string'],
                 ],
             ],
+            'chart' => [
+                'type' => 'object',
+                'required' => ['type', 'option'],
+                'description' => 'A native Word chart -- editable in Word, with its numbers in an embedded workbook ("Edit Data") -- drawn from an Apache ECharts option: the same `option` a dark-slide chart element takes, so a chart moves between a deck and a report unchanged. Kinds: column (bar series over a category xAxis), horizontal bar (bar series over a category yAxis), line, pie. Put a caption paragraph above it, as for a table.',
+                'properties' => [
+                    'type' => ['const' => 'chart'],
+                    'option' => self::chartOptionJsonSchema(),
+                    'widthPx' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Width in px at 96 dpi; capped at the text column.'],
+                    'heightPx' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Height in px at 96 dpi. Absent, 0.6 of the width.'],
+                    'width' => ['type' => 'number', 'exclusiveMinimum' => 0, 'maximum' => 100, 'description' => 'Width as a percentage of the text column, used when widthPx is absent. Absent both, the chart spans the column.'],
+                    'numberFormat' => ['type' => 'string', 'description' => 'An Excel number format for the values, on the value axis, the data labels and the workbook: "#,##0", "0.0%", "$#,##0.00". Absent, General.'],
+                    'alt' => ['type' => 'string', 'description' => 'Alternative text: what the chart shows, for a screen reader.'],
+                ],
+            ],
             'pageBreak' => [
                 'type' => 'object',
                 'required' => ['type'],
@@ -298,6 +313,58 @@ final class Schema
                 'boxSides' => $boxSides,
                 'band' => $band,
                 'block' => ['oneOf' => array_values($blocks)],
+            ],
+        ];
+    }
+
+    /**
+     * A chart block's `option`: the subset of an ECharts option this writer
+     * reads, described in dark-slide's words wherever the two agree.
+     * `additionalProperties` stays open -- it IS an ECharts option, and a viewer
+     * handing it to ECharts may use keys a Word chart has no slot for.
+     *
+     * @return array<string, mixed>
+     */
+    private static function chartOptionJsonSchema(): array
+    {
+        $hex = ['type' => 'string', 'pattern' => '^#[0-9A-Fa-f]{6}$'];
+        $axis = [
+            'type' => 'object',
+            'properties' => [
+                'type' => ['enum' => ['category', 'value']],
+                'data' => ['type' => 'array', 'items' => ['type' => ['string', 'number']], 'description' => 'The category labels, on the category axis.'],
+                'name' => ['type' => 'string', 'description' => 'The axis title.'],
+            ],
+        ];
+
+        return [
+            'type' => 'object',
+            'required' => ['series'],
+            'description' => 'An Apache ECharts option. Column chart: {"xAxis": {"type": "category", "data": ["Q1", "Q2"]}, "yAxis": {"type": "value"}, "series": [{"type": "bar", "name": "Revenue", "data": [120, 135]}]}. Swap the two axes for horizontal bars. Pie: {"series": [{"type": "pie", "data": [{"name": "Payroll", "value": 61}, {"name": "Cloud", "value": 22}]}]}.',
+            'properties' => [
+                'series' => [
+                    'type' => 'array',
+                    'minItems' => 1,
+                    'description' => 'The data to plot, every series of one type; a pie takes exactly one.',
+                    'items' => [
+                        'type' => 'object',
+                        'required' => ['data'],
+                        'properties' => [
+                            'type' => ['type' => 'string', 'enum' => \LastWord\Helpers\Chart::SUPPORTED_TYPES, 'description' => 'The chart kind, bar when absent. A bar series draws columns over a category xAxis and horizontal bars over a category yAxis. scatter, radar, gauge and other ECharts types are not supported in a document.'],
+                            'name' => ['type' => 'string', 'description' => 'The series name, shown in the legend and the workbook header.'],
+                            'data' => ['type' => 'array', 'description' => 'The points, one per category: a number, or {"value": number}; for a pie, {"name": string, "value": number}, whose names become the labels. Colour ONE point to make the finding stand out: {"value": 90.7, "itemStyle": {"color": "#DC2626"}}.'],
+                            'itemStyle' => ['type' => 'object', 'properties' => ['color' => $hex], 'description' => 'The series\' own colour: {"color": "#1F3A5F"}. A muted series with one highlighted point reads faster than a rainbow.'],
+                            'label' => ['type' => 'object', 'properties' => ['show' => ['type' => 'boolean']], 'description' => 'Data labels: {"show": true} draws each value on the chart, in numberFormat.'],
+                            'smooth' => ['type' => 'boolean', 'description' => 'A smoothed line (line series).'],
+                            'stack' => ['type' => 'string', 'description' => 'Any name stacks the bar series that carry one.'],
+                        ],
+                    ],
+                ],
+                'xAxis' => $axis,
+                'yAxis' => $axis,
+                'title' => ['type' => 'object', 'properties' => ['text' => ['type' => 'string']], 'description' => 'The chart title, {"text": "..."}. A report usually captions the chart in a paragraph instead.'],
+                'legend' => ['type' => 'object', 'properties' => ['show' => ['type' => 'boolean']], 'description' => 'A legend below the chart, drawn when present and show is not false. A single series rarely needs one.'],
+                'color' => ['type' => 'array', 'items' => $hex, 'description' => 'The palette series (or pie slices) take in turn. Absent, Office\'s default accents.'],
             ],
         ];
     }

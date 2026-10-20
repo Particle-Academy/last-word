@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LastWord\Schema;
 
+use LastWord\Helpers\Chart;
+
 /**
  * Structural validation of the Doc model. Returns a flat error list —
  * `{path, message}` pairs, empty when the document is valid — designed to
@@ -126,8 +128,136 @@ final class Validator
             'code' => $this->validateCode($block, $path, $errors),
             'quote' => $this->validateQuote($block, $path, $errors),
             'image' => $this->validateImage($block, $path, $errors),
+            'chart' => $this->validateChart($block, $path, $errors),
             'pageBreak', 'hr' => null,
         };
+    }
+
+    /**
+     * A chart block. Everything {@see Chart::spec()} needs to draw is checked
+     * here, so a valid chart is always a drawable one: the writer's fallback text
+     * is for unvalidated input, never for an agent's document.
+     *
+     * @param  array<string, mixed>  $block
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateChart(array $block, string $path, array &$errors): void
+    {
+        foreach (['widthPx', 'heightPx'] as $dim) {
+            $value = $block[$dim] ?? null;
+            if ($value !== null && (!(is_int($value) || is_float($value)) || $value <= 0)) {
+                $errors[] = self::error("{$path}.{$dim}", "{$dim} must be a positive number of px when present");
+            }
+        }
+        $width = $block['width'] ?? null;
+        if ($width !== null && (!(is_int($width) || is_float($width)) || $width <= 0 || $width > 100)) {
+            $errors[] = self::error("{$path}.width", 'chart width must be a percentage of the text column, above 0 and at most 100');
+        }
+        if (isset($block['numberFormat']) && (!is_string($block['numberFormat']) || $block['numberFormat'] === '')) {
+            $errors[] = self::error("{$path}.numberFormat", 'numberFormat must be an Excel number format string, e.g. "#,##0" or "0.0%"');
+        }
+        if (isset($block['alt']) && !is_string($block['alt'])) {
+            $errors[] = self::error("{$path}.alt", 'alt must be a string when present');
+        }
+
+        $option = $block['option'] ?? null;
+        if (!is_array($option) || ($option !== [] && array_is_list($option))) {
+            $errors[] = self::error("{$path}.option", 'chart requires an "option" object: an Apache ECharts option, e.g. {"xAxis": {"type": "category", "data": ["Q1", "Q2"]}, "yAxis": {"type": "value"}, "series": [{"type": "bar", "name": "Revenue", "data": [120, 135]}]}');
+
+            return;
+        }
+        $optPath = "{$path}.option";
+
+        $series = $option['series'] ?? null;
+        if (is_array($series) && $series !== [] && !array_is_list($series)) {
+            $series = [$series];
+        }
+        if (!is_array($series) || $series === []) {
+            $errors[] = self::error("{$optPath}.series", 'chart option requires "series": a list of {type, name, data} objects');
+
+            return;
+        }
+
+        $supported = implode(', ', Chart::SUPPORTED_TYPES);
+        $kind = null;
+        foreach ($series as $i => $one) {
+            $serPath = "{$optPath}.series[{$i}]";
+            if (!is_array($one) || ($one !== [] && array_is_list($one))) {
+                $errors[] = self::error($serPath, 'a series must be an object ({type, name, data})');
+
+                continue;
+            }
+            $type = $one['type'] ?? 'bar';
+            if (!is_string($type) || !in_array($type, Chart::SUPPORTED_TYPES, true)) {
+                $errors[] = self::error("{$serPath}.type", "series type must be one of: {$supported} (a document chart cannot draw " . (is_string($type) ? "\"{$type}\"" : 'that') . ')');
+
+                continue;
+            }
+            if ($kind === null) {
+                $kind = $type;
+            } elseif ($type !== $kind) {
+                $errors[] = self::error("{$serPath}.type", "every series in a chart must be the same type: this one is \"{$type}\", the first is \"{$kind}\"");
+            }
+            if (isset($one['name']) && !is_string($one['name']) && !is_int($one['name']) && !is_float($one['name'])) {
+                $errors[] = self::error("{$serPath}.name", 'series name must be a string');
+            }
+            $this->validateHex(is_array($one['itemStyle'] ?? null) ? ($one['itemStyle']['color'] ?? null) : null, "{$serPath}.itemStyle.color", 'series colour', $errors);
+
+            $data = $one['data'] ?? null;
+            if (!is_array($data) || ($data !== [] && !array_is_list($data))) {
+                $hint = isset($one['values']) ? ' (ECharts calls it "data", not "values")' : '';
+                $errors[] = self::error("{$serPath}.data", 'series requires a "data" list of numbers' . $hint);
+
+                continue;
+            }
+            foreach ($data as $p => $point) {
+                if (Chart::pointValue($point) === null) {
+                    $errors[] = self::error("{$serPath}.data[{$p}]", $type === 'pie'
+                        ? 'a pie point must be {"name": string, "value": number}'
+                        : 'a point must be a number, or {"value": number}');
+
+                    continue;
+                }
+                if (is_array($point)) {
+                    $this->validateHex(is_array($point['itemStyle'] ?? null) ? ($point['itemStyle']['color'] ?? null) : null, "{$serPath}.data[{$p}].itemStyle.color", 'point colour', $errors);
+                }
+            }
+        }
+        if ($kind === 'pie' && count($series) > 1) {
+            $errors[] = self::error("{$optPath}.series", 'a pie chart takes exactly one series');
+        }
+
+        foreach (['xAxis', 'yAxis'] as $key) {
+            $axis = $option[$key] ?? null;
+            if ($axis === null) {
+                continue;
+            }
+            if (is_array($axis) && $axis !== [] && array_is_list($axis)) {
+                $axis = $axis[0];
+            }
+            if (!is_array($axis)) {
+                $errors[] = self::error("{$optPath}.{$key}", "{$key} must be an object ({type, data, name})");
+
+                continue;
+            }
+            $this->validateEnum($axis['type'] ?? null, "{$optPath}.{$key}.type", "{$key} type", ['category', 'value'], $errors);
+            if (isset($axis['data']) && (!is_array($axis['data']) || ($axis['data'] !== [] && !array_is_list($axis['data'])))) {
+                $errors[] = self::error("{$optPath}.{$key}.data", "{$key}.data must be a list of category labels");
+            }
+            if (isset($axis['name']) && !is_string($axis['name'])) {
+                $errors[] = self::error("{$optPath}.{$key}.name", "{$key}.name (the axis title) must be a string");
+            }
+        }
+
+        if (isset($option['color'])) {
+            if (!is_array($option['color']) || ($option['color'] !== [] && !array_is_list($option['color']))) {
+                $errors[] = self::error("{$optPath}.color", 'option.color must be a list of #RRGGBB colours');
+            } else {
+                foreach ($option['color'] as $c => $color) {
+                    $this->validateHex($color, "{$optPath}.color[{$c}]", 'palette colour', $errors);
+                }
+            }
+        }
     }
 
     /** @param  array<string, mixed>  $block */

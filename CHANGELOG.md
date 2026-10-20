@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-20
+
+A minor release. Pre-1.0, breaking changes may land in a minor; this one has none.
+
+### Added
+
+- **A native `chart` block** (last-word#4). Bar (vertical columns or horizontal
+  bars), line and pie charts are written as real Word charts: a
+  `word/charts/chartN.xml` part inline in the text, with an embedded workbook so
+  Word's "Edit Data" opens the numbers. Before this a report that needed a chart
+  could only offer a table. The block takes an Apache ECharts `option`, the
+  same field dark-slide's chart element takes, so one prompt teaches charts in
+  both formats and a chart moves from a deck into a report unchanged:
+  `{"type": "chart", "option": {"xAxis": {"type": "category", "data": ["Q1", "Q2"]}, "yAxis": {"type": "value", "name": "USD (k)"}, "series": [{"type": "bar", "name": "Revenue", "data": [120, 135]}]}, "numberFormat": "#,##0"}`.
+  A category `yAxis` gives horizontal bars, as it does in ECharts; a series
+  `stack` stacks bars; `label.show` draws data labels; `itemStyle.color` and
+  `option.color` colour a series, a slice or one highlighted point; `title`,
+  `legend` and each axis `name` are honoured. Sized by `widthPx` / `heightPx`,
+  or `width` as a percentage of the text column, or the full column at 0.6 of
+  its width as tall. `numberFormat` is an Excel number format for the value
+  axis, the data labels and the workbook. `alt` is the alternative text.
+- **The reader reads charts back** into the same block, in a canonical form:
+  colours come back on each series (`itemStyle.color`, omitted when it is the
+  default palette's), stacking as `stack: "total"`, the legend as
+  `{"show": true}`, a percentage width as the `widthPx` / `heightPx` it resolved
+  to. A chart it cannot map (radar, scatter, 3-D, a damaged part) is skipped,
+  never a failed read.
+- **Agents learn it from the package**: `Agent::validate()` checks a chart and
+  says how to fix it; `Agent::validateAndRepair()` converts the
+  `{chartType, categories, series: [{name, values, color}]}` shorthand and
+  `series[].values` into the ECharts form; `Agent::jsonSchema()` publishes the
+  block; `Agent::guide()` teaches it (the guide's hash moves in all three
+  engines). `Agent::toMarkdown()` renders a chart as its data table.
+- Not supported, and a validation error rather than a silent placeholder:
+  scatter (dark-slide draws it), area and combination charts.
+
+**Nothing to do**: a document without a chart writes byte-identical output.
+Lands with `@particle-academy/last-word` 0.10.0 and `fancy-last-word` 0.6.0;
+every chart part, the embedded workbook's included, is byte-identical across
+the three engines.
+
 ## [0.9.0] - 2026-10-19
 
 ### Added

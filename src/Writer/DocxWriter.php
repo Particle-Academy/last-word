@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LastWord\Writer;
 
+use LastWord\Helpers\Chart;
 use LastWord\Helpers\ImageSize;
 use LastWord\Helpers\Xml;
 use RuntimeException;
@@ -26,8 +27,11 @@ use ZipArchive;
  *   word/numbering.xml     (bullet + decimal abstract numbering, 6 indent
  *                           levels; one fresh instance per ordered list so
  *                           numbering restarts)
- *   word/_rels/document.xml.rels  (styles, numbering, hyperlinks, images)
+ *   word/_rels/document.xml.rels  (styles, numbering, hyperlinks, images, charts)
  *   word/media/imageN.png|jpeg    (decoded data-URL images)
+ *   word/charts/chartN.xml        (one per chart block, then its
+ *   word/charts/_rels/chartN.xml.rels   relationships and the workbook
+ *   word/embeddings/Microsoft_Excel_WorksheetN.xlsx   "Edit Data" opens)
  *
  * Determinism: no timestamps anywhere in the XML, fixed entry order, and
  * every zip entry's mtime pinned via ZipArchive::setMtimeIndex() — calling
@@ -53,6 +57,10 @@ use ZipArchive;
  *                paragraphs
  *   image      — w:drawing inline; extents from widthPx/heightPx or sniffed
  *                from the bytes (PNG IHDR / JPEG SOF), capped at 6.5in width
+ *   chart      — w:drawing inline holding a DrawingML chart (c:chart), written
+ *                from the block's ECharts `option` (see Helpers\Chart and
+ *                ChartPart); sized from widthPx/heightPx or `width` (% of the
+ *                text column), the full column by default
  *   pageBreak  — w:br w:type="page"
  *   hr         — empty paragraph with a bottom border
  */
@@ -64,8 +72,13 @@ final class DocxWriter
     private const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
     private const NS_PIC = 'http://schemas.openxmlformats.org/drawingml/2006/picture';
 
+    private const NS_C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+
     /** EMU per pixel at 96dpi. */
     private const EMU_PER_PX = 9525;
+
+    /** EMU per twip (1/1440in): the text column is measured in twips, a drawing in EMU. */
+    private const EMU_PER_TWIP = 635;
 
     /** Max image width: 6.5in (letter width minus 1in margins) in EMU. */
     private const MAX_IMAGE_WIDTH_EMU = 5943600;
@@ -97,6 +110,22 @@ final class DocxWriter
     private int $relCounter = 2;
 
     private int $imageCounter = 0;
+
+    /**
+     * Chart parts queued for the archive, in order: chart number => its chart
+     * XML, relationships and workbook parts. The workbook is zipped at packaging
+     * time, where the scratch directory exists.
+     *
+     * @var array<int, array{xml: string, rels: string, workbook: array<string, string>}>
+     */
+    private array $charts = [];
+
+    /**
+     * A chart's drawing id is offset from the images' so the two can never
+     * collide: images number theirs 1, 2, 3 ... as they always have, and Word
+     * treats a repeated wp:docPr id as a damaged document.
+     */
+    private const CHART_DOCPR_BASE = 10000;
 
     /** Number of ordered-list numbering instances allocated (numIds 2..N+1). */
     private int $orderedListCount = 0;
@@ -197,6 +226,7 @@ final class DocxWriter
         // from colliding with the first image in a templated document.
         $this->relCounter = $this->template !== null && $this->template->hasTheme() ? 3 : 2;
         $this->imageCounter = 0;
+        $this->charts = [];
         $this->orderedListCount = 0;
 
         $hasTitle = array_key_exists('title', $doc);
@@ -245,6 +275,14 @@ final class DocxWriter
             foreach ($this->mediaFiles as $archivePath => $bytes) {
                 $zip->addFromString($archivePath, $bytes);
             }
+            foreach ($this->charts as $n => $chart) {
+                $zip->addFromString("word/charts/chart{$n}.xml", $chart['xml']);
+                $zip->addFromString("word/charts/_rels/chart{$n}.xml.rels", $chart['rels']);
+                $zip->addFromString(
+                    "word/embeddings/Microsoft_Excel_Worksheet{$n}.xlsx",
+                    $this->zipParts($chart['workbook'], $tmpDir . DIRECTORY_SEPARATOR . "workbook{$n}.xlsx"),
+                );
+            }
 
             // Pin every entry's mtime so the archive bytes are reproducible.
             for ($i = 0; $i < $zip->numFiles; $i++) {
@@ -261,8 +299,44 @@ final class DocxWriter
             return $contents;
         } finally {
             @unlink($tmp);
+            // A workbook left behind only when packaging failed part-way.
+            foreach (array_keys($this->charts) as $n) {
+                $workbook = $tmpDir . DIRECTORY_SEPARATOR . "workbook{$n}.xlsx";
+                if (is_file($workbook)) {
+                    @unlink($workbook);
+                }
+            }
             @rmdir($tmpDir);
         }
+    }
+
+    /**
+     * A nested package -- a chart's embedded workbook -- as bytes, with the same
+     * fixed entry order and pinned mtimes as the document itself, so a document
+     * with a chart is as reproducible as one without.
+     *
+     * @param  array<string, string>  $parts
+     */
+    private function zipParts(array $parts, string $path): string
+    {
+        $zip = new ZipArchive();
+        if ($zip->open($path, ZipArchive::OVERWRITE | ZipArchive::CREATE) !== true) {
+            throw new RuntimeException('Could not open the chart workbook archive for writing.');
+        }
+        foreach ($parts as $name => $xml) {
+            $zip->addFromString($name, $xml);
+        }
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $zip->setMtimeIndex($i, self::FIXED_MTIME);
+        }
+        $zip->close();
+        $bytes = file_get_contents($path);
+        @unlink($path);
+        if ($bytes === false) {
+            throw new RuntimeException('Could not read back the chart workbook archive.');
+        }
+
+        return $bytes;
     }
 
     // ─── Running header / footer ─────────────────────────────────────────
@@ -354,6 +428,9 @@ final class DocxWriter
         $xml .= '<Default Extension="xml" ContentType="application/xml"/>';
         $xml .= '<Default Extension="png" ContentType="image/png"/>';
         $xml .= '<Default Extension="jpeg" ContentType="image/jpeg"/>';
+        if ($this->charts !== []) {
+            $xml .= '<Default Extension="xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>';
+        }
         $xml .= '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>';
         $xml .= '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
         $xml .= '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>';
@@ -364,6 +441,9 @@ final class DocxWriter
         }
         foreach (array_keys($this->bands) as $kind) {
             $xml .= '<Override PartName="/word/' . $kind . '1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
+        }
+        foreach (array_keys($this->charts) as $n) {
+            $xml .= '<Override PartName="/word/charts/chart' . $n . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>';
         }
         if ($hasTitle) {
             $xml .= '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>';
@@ -417,6 +497,8 @@ final class DocxWriter
         foreach ($this->rels as $rId => $rel) {
             if ($rel['type'] === 'hyperlink') {
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' . Xml::attr($rel['target']) . '" TargetMode="External"/>';
+            } elseif ($rel['type'] === 'chart') {
+                $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="' . Xml::attr($rel['target']) . '"/>';
             } else {
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="' . Xml::attr($rel['target']) . '"/>';
             }
@@ -504,6 +586,7 @@ final class DocxWriter
                 'code' => $this->renderCode($block),
                 'quote' => $this->renderQuote($block),
                 'image' => $this->renderImage($block),
+                'chart' => $this->renderChart($block),
                 'pageBreak' => '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
                 'hr' => '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>',
                 default => '',
@@ -883,6 +966,87 @@ final class DocxWriter
             . '</a:graphicData></a:graphic>'
             . '</wp:inline>'
             . '</w:drawing></w:r></w:p>';
+    }
+
+    /**
+     * A native chart, inline, in its own paragraph. An option nothing can be
+     * drawn from (validation stops those before here) degrades to its title as
+     * text rather than vanishing, as an unusable image does.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private function renderChart(array $block): string
+    {
+        $spec = Chart::spec($block['option'] ?? null);
+        if ($spec === null) {
+            $label = Chart::title(is_array($block['option'] ?? null) ? ($block['option']['title'] ?? null) : null);
+
+            return '<w:p><w:r><w:t xml:space="preserve">' . Xml::text('[chart' . ($label !== '' ? ": {$label}" : '') . ']') . '</w:t></w:r></w:p>';
+        }
+        $numberFormat = is_string($block['numberFormat'] ?? null) && $block['numberFormat'] !== '' ? $block['numberFormat'] : null;
+
+        $n = count($this->charts) + 1;
+        $this->charts[$n] = [
+            'xml' => ChartPart::chartXml($spec, $numberFormat),
+            'rels' => ChartPart::relsXml($n),
+            'workbook' => ChartPart::workbookParts($spec, $numberFormat),
+        ];
+        $rId = 'rId' . ++$this->relCounter;
+        $this->rels[$rId] = ['type' => 'chart', 'target' => "charts/chart{$n}.xml"];
+
+        [$cx, $cy] = $this->chartExtents($block);
+        $alt = is_string($block['alt'] ?? null) ? $block['alt'] : '';
+        $descr = $alt !== '' ? ' descr="' . Xml::attr($alt) . '"' : '';
+
+        return '<w:p><w:r><w:drawing>'
+            . '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+            . '<wp:extent cx="' . $cx . '" cy="' . $cy . '"/>'
+            . '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+            . '<wp:docPr id="' . (self::CHART_DOCPR_BASE + $n) . '" name="Chart ' . $n . '"' . $descr . '/>'
+            . '<wp:cNvGraphicFramePr/>'
+            . '<a:graphic><a:graphicData uri="' . self::NS_C . '">'
+            . '<c:chart xmlns:c="' . self::NS_C . '" r:id="' . $rId . '"/>'
+            . '</a:graphicData></a:graphic>'
+            . '</wp:inline>'
+            . '</w:drawing></w:r></w:p>';
+    }
+
+    /**
+     * A chart's extents in EMU. Width: widthPx, else `width` percent of the text
+     * column, else the whole column -- never wider than the column. Height:
+     * heightPx (scaled with the width when the width was capped), else
+     * {@see Chart::DEFAULT_ASPECT} of the width.
+     *
+     * The reader reverses this, and omits the size when it is exactly the
+     * default, so a chart written without one reads back without one.
+     *
+     * @param  array<string, mixed>  $block
+     * @return array{0: int, 1: int}
+     */
+    private function chartExtents(array $block): array
+    {
+        $column = $this->contentWidth * self::EMU_PER_TWIP;
+        $widthPx = is_int($block['widthPx'] ?? null) || is_float($block['widthPx'] ?? null) ? (float) $block['widthPx'] : null;
+        $heightPx = is_int($block['heightPx'] ?? null) || is_float($block['heightPx'] ?? null) ? (float) $block['heightPx'] : null;
+        $percent = is_int($block['width'] ?? null) || is_float($block['width'] ?? null) ? (float) $block['width'] : null;
+
+        $cx = $column;
+        if ($widthPx !== null && $widthPx > 0) {
+            $cx = (int) round($widthPx * self::EMU_PER_PX);
+        } elseif ($percent !== null && $percent > 0) {
+            $cx = (int) round($column * min(100.0, $percent) / 100);
+        }
+        $cy = $heightPx !== null && $heightPx > 0 ? (int) round($heightPx * self::EMU_PER_PX) : null;
+
+        if ($cx > $column) {
+            if ($cy !== null) {
+                $cy = (int) round($cy * $column / $cx);
+            }
+            $cx = $column;
+        }
+        $cx = max(1, $cx);
+
+        return [$cx, max(1, $cy ?? (int) round($cx * Chart::DEFAULT_ASPECT))];
     }
 
     /**
