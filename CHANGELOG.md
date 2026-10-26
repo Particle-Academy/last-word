@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-26
+
 ### Security
 
 - Bound document and template file reads before allocation. DOCX, ODT and
