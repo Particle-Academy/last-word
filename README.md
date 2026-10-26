@@ -15,6 +15,13 @@ emitted by an agent works verbatim on either backend.
 
 ## Why
 
+DOCX, ODT and template archives enforce limits of 64 MiB input/part, 256 MiB
+expanded data, 16,384 members and 1000:1 expansion. Corrupt, duplicate, unsafe
+or unsupported entries raise `LastWord\Exceptions\ArchiveRefused` with a constant
+`reason`. Templates wrap it in `TemplateException` (`getPrevious()` retains the
+cause). Local document/template file input is bounded to 64 MiB too. Archive
+checks do not promise support for every document XML construct.
+
 Sister project to [`holy-sheet`](https://github.com/Particle-Academy/holy-sheet)
 (XLSX) and [`dark-slide`](https://github.com/Particle-Academy/dark-slide)
 (PPTX). The three share an "agent emits JSON, PHP writes a real Office

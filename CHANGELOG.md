@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Security
+
+- Bound document and template file reads before allocation. DOCX, ODT and
+  template archive reads now reject excessive expansion, duplicate or unsafe
+  names, corrupt sizes/CRC, inconsistent ZIP metadata and truncation with
+  `LastWord\Exceptions\ArchiveRefused`. Templates keep `TemplateException`, with
+  the typed refusal available through `getPrevious()`. Valid fixture payloads
+  and reader projections remain unchanged; no new dependency.
+
 ## [0.10.0] - 2026-10-20
 
 A minor release. Pre-1.0, breaking changes may land in a minor; this one has none.

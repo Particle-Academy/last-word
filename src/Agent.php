@@ -257,12 +257,7 @@ final class Agent
         }
 
         if (strlen($bytesOrPath) <= 4096 && is_file($bytesOrPath)) {
-            $bytes = file_get_contents($bytesOrPath);
-            if ($bytes === false) {
-                throw new InvalidArgumentException("Could not read file: {$bytesOrPath}");
-            }
-
-            return $bytes;
+            return \LastWord\Reader\FileInput::read($bytesOrPath);
         }
 
         return $bytesOrPath;

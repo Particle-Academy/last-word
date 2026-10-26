@@ -8,8 +8,8 @@ use DOMDocument;
 use DOMElement;
 use DOMNode;
 use DOMText;
+use LastWord\Archive\SourceArchive;
 use RuntimeException;
-use ZipArchive;
 
 /**
  * OpenDocument Text -> the same document shape `DocxReader` returns.
@@ -101,50 +101,19 @@ final class OdtReader
     /** @return array<string, string> */
     private function parts(string $bytes): array
     {
-        // ZipArchive needs a path. The temp file is created, read and removed
-        // inside this method and never escapes it.
-        $tmp = tempnam(sys_get_temp_dir(), 'lw_odt_');
-        if ($tmp === false) {
-            throw new RuntimeException('Could not create a temporary file to open the ODT.');
+        $zip = SourceArchive::open($bytes, ['maxPartBytes' => self::MAX_PART_BYTES]);
+        $parts = [];
+        foreach (['content.xml', 'styles.xml', 'meta.xml'] as $name) {
+            $xml = $zip->read($name);
+            if ($xml !== null) {
+                $parts[$name] = $xml;
+            }
+        }
+        if (! isset($parts['content.xml'])) {
+            throw new RuntimeException('ODT archive has no content.xml.');
         }
 
-        try {
-            if (file_put_contents($tmp, $bytes) === false) {
-                throw new RuntimeException('Could not write the ODT to a temporary file.');
-            }
-
-            $zip = new ZipArchive();
-            if ($zip->open($tmp, ZipArchive::RDONLY) !== true) {
-                throw new RuntimeException('Could not open the ODT archive.');
-            }
-
-            try {
-                $parts = [];
-                foreach (['content.xml', 'styles.xml', 'meta.xml'] as $name) {
-                    $stat = $zip->statName($name);
-                    if ($stat === false) {
-                        continue;
-                    }
-                    if ($stat['size'] > self::MAX_PART_BYTES) {
-                        throw new RuntimeException("ODT part {$name} is too large to read.");
-                    }
-                    $xml = $zip->getFromName($name);
-                    if (is_string($xml)) {
-                        $parts[$name] = $xml;
-                    }
-                }
-            } finally {
-                $zip->close();
-            }
-
-            if (! isset($parts['content.xml'])) {
-                throw new RuntimeException('ODT archive has no content.xml.');
-            }
-
-            return $parts;
-        } finally {
-            @unlink($tmp);
-        }
+        return $parts;
     }
 
     private static function parse(?string $xml, string $name, bool $required): ?DOMDocument

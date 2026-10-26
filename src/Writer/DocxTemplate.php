@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace LastWord\Writer;
 
+use LastWord\Archive\SourceArchive;
+use LastWord\Exceptions\ArchiveRefused;
 use LastWord\Exceptions\TemplateException;
-use ZipArchive;
+use LastWord\Reader\FileInput;
 
 /**
  * A `.dotx` / `.docx` opened for the parts that carry its LOOK.
@@ -69,40 +71,18 @@ final class DocxTemplate
      */
     public static function open(string $pathOrBytes): self
     {
-        $bytes = self::bytesOf($pathOrBytes);
-
-        $tmp = tempnam(sys_get_temp_dir(), 'lw-tpl');
-        if ($tmp === false) {
-            throw new TemplateException('Could not create a temporary file to read the template.');
-        }
-
         try {
-            file_put_contents($tmp, $bytes);
-
-            $zip = new ZipArchive();
-            if ($zip->open($tmp, ZipArchive::RDONLY) !== true) {
-                throw new TemplateException(
-                    'The template is not a readable .dotx/.docx package (it did not open as a zip).',
-                );
-            }
-
-            try {
-                $styles = $zip->getFromName('word/styles.xml');
-                if ($styles === false || $styles === '') {
-                    throw new TemplateException(
-                        'The template has no word/styles.xml, so it defines no styles to bind to.',
-                    );
-                }
-
-                $theme = $zip->getFromName('word/theme/theme1.xml');
-            } finally {
-                $zip->close();
-            }
-        } finally {
-            @unlink($tmp);
+            $zip = SourceArchive::open(self::bytesOf($pathOrBytes));
+        } catch (ArchiveRefused $error) {
+            throw new TemplateException('The template is not a readable .dotx/.docx package within the archive limits.', 0, $error);
         }
+        $styles = $zip->read('word/styles.xml');
+        if ($styles === null || $styles === '') {
+            throw new TemplateException('The template has no word/styles.xml, so it defines no styles to bind to.');
+        }
+        $theme = $zip->read('word/theme/theme1.xml');
 
-        return new self($styles, $theme === false || $theme === '' ? null : $theme, self::idsIn($styles));
+        return new self($styles, $theme === null || $theme === '' ? null : $theme, self::idsIn($styles));
     }
 
     /** The template's `word/styles.xml`, verbatim. */
@@ -190,8 +170,8 @@ final class DocxTemplate
             );
         }
 
-        $bytes = file_get_contents($pathOrBytes);
-        if ($bytes === false || $bytes === '') {
+        $bytes = FileInput::read($pathOrBytes);
+        if ($bytes === '') {
             throw new TemplateException('The template file could not be read, or is empty.');
         }
 

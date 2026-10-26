@@ -1,0 +1,20 @@
+{
+    "tests/fixtures/node-canonical.docx": {
+        "sourceSha256": "270e00e6e5183e7f5b9989e6c75600dd3ebaa81e54998b8144522ce6d8c09759",
+        "entries": 8,
+        "payloadsSha256": "46f02244687b265c10c72a43117cd038efba800347a7832777a174fdb4c57557",
+        "projectionSha256": "f671db07f7e6eacea290083073bdab5011196d04197d1f507c714c67adc0647d"
+    },
+    "tests/fixtures/formats/report.docx": {
+        "sourceSha256": "282f957b7473ba461201cc5bf10f3da9423767ed692091f7b5c1d13b90b301b6",
+        "entries": 6,
+        "payloadsSha256": "addf3535153f5514ef886c35b956fbcf3285d76aeb2661ebd9b8336d44fa3543",
+        "projectionSha256": "6d8ae8843b89b489d4d4f10b6195e2b090e8f1adf2413dcba51272ee32804cbc"
+    },
+    "tests/fixtures/formats/report.odt": {
+        "sourceSha256": "eb154bef33f63f3a63e8077514bcd2da03972e9d8452a5b436190710ca866ee9",
+        "entries": 9,
+        "payloadsSha256": "a1f178468d38742ef6cfa981b5cdfa4f284a6c266aee61548f1ca5e2c82c9bcf",
+        "projectionSha256": "6d8ae8843b89b489d4d4f10b6195e2b090e8f1adf2413dcba51272ee32804cbc"
+    }
+}

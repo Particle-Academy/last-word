@@ -7,9 +7,9 @@ namespace LastWord\Reader;
 use DOMDocument;
 use DOMElement;
 use DOMNode;
+use LastWord\Archive\SourceArchive;
 use LastWord\Writer\DocxWriter;
 use RuntimeException;
-use ZipArchive;
 
 /**
  * DOCX reader — parses .docx bytes back into the Doc model.
@@ -395,80 +395,36 @@ final class DocxReader
         return $out;
     }
 
-    /**
-     * Open the zip (ZipArchive requires a real path — write the bytes to a
-     * temp file first), pull the parts we need, and return document.xml.
-     */
+    /** Read only verified payloads; archive validation precedes XML parsing. */
     private function openArchive(string $bytes): string
     {
-        $base = rtrim($this->tempDir ?? sys_get_temp_dir(), DIRECTORY_SEPARATOR);
-        $tmpDir = $base . DIRECTORY_SEPARATOR . 'last-word-read-' . bin2hex(random_bytes(8));
-        if (!is_dir($tmpDir) && !@mkdir($tmpDir, 0700, true) && !is_dir($tmpDir)) {
-            throw new RuntimeException("Could not allocate temp dir for reading at: {$tmpDir}.");
+        $zip = SourceArchive::open($bytes, tempDir: $this->tempDir);
+        $documentXml = $zip->read('word/document.xml');
+        if ($documentXml === null) {
+            throw new RuntimeException('No word/document.xml part — not a DOCX file.');
         }
-        $tmp = $tmpDir . DIRECTORY_SEPARATOR . 'document.docx';
-
-        try {
-            if (file_put_contents($tmp, $bytes) === false) {
-                throw new RuntimeException('Could not stage DOCX bytes for reading.');
+        $relsXml = $zip->read('word/_rels/document.xml.rels');
+        $this->rels = $relsXml !== null ? $this->parseRels($relsXml) : [];
+        $numberingXml = $zip->read('word/numbering.xml');
+        $this->numbering = $numberingXml !== null ? $this->parseNumbering($numberingXml) : [];
+        $this->coreXml = $zip->read('docProps/core.xml');
+        $this->stylesXml = $zip->read('word/styles.xml');
+        $this->media = [];
+        $this->bandParts = [];
+        $this->chartParts = [];
+        foreach ($zip->names() as $name) {
+            if (preg_match('#^word/charts/[^/]+\.xml$#', $name) === 1) {
+                $this->chartParts[substr($name, strlen('word/'))] = $zip->read($name);
             }
-
-            $zip = new ZipArchive();
-            if ($zip->open($tmp, ZipArchive::RDONLY) !== true) {
-                throw new RuntimeException('Not a readable DOCX (zip) archive.');
+            if (preg_match('#^word/(header|footer)\d*\.xml$#', $name) === 1) {
+                $this->bandParts[substr($name, strlen('word/'))] = $zip->read($name);
             }
-
-            try {
-                $documentXml = $zip->getFromName('word/document.xml');
-                if ($documentXml === false) {
-                    throw new RuntimeException('No word/document.xml part — not a DOCX file.');
-                }
-
-                $relsXml = $zip->getFromName('word/_rels/document.xml.rels');
-                $this->rels = is_string($relsXml) ? $this->parseRels($relsXml) : [];
-
-                $numberingXml = $zip->getFromName('word/numbering.xml');
-                $this->numbering = is_string($numberingXml) ? $this->parseNumbering($numberingXml) : [];
-
-                $coreXml = $zip->getFromName('docProps/core.xml');
-                $this->coreXml = is_string($coreXml) ? $coreXml : null;
-
-                $stylesXml = $zip->getFromName('word/styles.xml');
-                $this->stylesXml = is_string($stylesXml) ? $stylesXml : null;
-
-                $this->media = [];
-                $this->bandParts = [];
-                $this->chartParts = [];
-                for ($i = 0; $i < $zip->numFiles; $i++) {
-                    $name = $zip->getNameIndex($i);
-                    if (is_string($name) && preg_match('#^word/charts/[^/]+\.xml$#', $name) === 1) {
-                        $data = $zip->getFromIndex($i);
-                        if (is_string($data)) {
-                            $this->chartParts[substr($name, strlen('word/'))] = $data;
-                        }
-                    }
-                    if (is_string($name) && preg_match('#^word/(header|footer)\d*\.xml$#', $name) === 1) {
-                        $data = $zip->getFromIndex($i);
-                        if (is_string($data)) {
-                            $this->bandParts[substr($name, strlen('word/'))] = $data;
-                        }
-                    }
-                    if (is_string($name) && str_starts_with($name, 'word/media/')) {
-                        $data = $zip->getFromIndex($i);
-                        if (is_string($data)) {
-                            $this->media[substr($name, strlen('word/'))] = $data;
-                        }
-                    }
-                }
-            } finally {
-                $zip->close();
+            if (str_starts_with($name, 'word/media/')) {
+                $this->media[substr($name, strlen('word/'))] = $zip->read($name);
             }
-
-            return $documentXml;
-        } finally {
-            @unlink($tmp);
-            @rmdir($tmpDir);
         }
+
+        return $documentXml;
     }
 
     /**
