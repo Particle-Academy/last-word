@@ -8,6 +8,7 @@ use DOMDocument;
 use DOMElement;
 use DOMNode;
 use DOMText;
+use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\SourceArchive;
 use RuntimeException;
 
@@ -61,6 +62,8 @@ final class OdtReader
 
     private int $repeatedCells = 0;
 
+    private string $sourceKind = OfficeTemplate::DOCUMENT;
+
     /** @var array<string, DOMElement> automatic styles from content.xml, by name */
     private array $automaticStyles = [];
 
@@ -92,6 +95,10 @@ final class OdtReader
         }
 
         $doc['blocks'] = $body !== null ? $this->blocks($body, 0) : [];
+        // An .ott reads exactly like its .odt twin, and says so.
+        if ($this->sourceKind === OfficeTemplate::TEMPLATE) {
+            $doc['sourceKind'] = OfficeTemplate::TEMPLATE;
+        }
 
         return $doc;
     }
@@ -102,6 +109,7 @@ final class OdtReader
     private function parts(string $bytes): array
     {
         $zip = SourceArchive::open($bytes, ['maxPartBytes' => self::MAX_PART_BYTES]);
+        $this->sourceKind = OfficeTemplate::kind($zip);
         $parts = [];
         foreach (['content.xml', 'styles.xml', 'meta.xml'] as $name) {
             $xml = $zip->read($name);

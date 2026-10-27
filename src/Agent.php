@@ -274,6 +274,37 @@ final class Agent
     }
 
     /**
+     * Turn a Word `.dotx` / LibreOffice `.ott` template into its `.docx` /
+     * `.odt` twin, or back. `$to` is `document`, `template`, or null to flip.
+     *
+     * Only the declaration moves: the main part's content type in
+     * `[Content_Types].xml`, or the ODF `mimetype` entry together with the
+     * manifest's root media-type (ODF 1.3 requires them to agree). Every other
+     * member is copied as its original zip record, byte for byte; no reader or
+     * writer is in the path, so nothing is reflowed or lost.
+     *
+     * Macro-enabled packages (.dotm, .docm) are refused, never converted.
+     *
+     * @throws \LastWord\Exceptions\OfficeTemplateRefused
+     * @throws \LastWord\Exceptions\ArchiveRefused
+     * @throws UnsupportedFormatException for anything that is not a Word or ODF text package
+     */
+    public static function convertTemplate(string $bytesOrPath, ?string $to = null): string
+    {
+        $bytes = self::bytesFrom($bytesOrPath);
+        $format = Format::detect($bytes);
+        if ($format !== Format::DOCX && $format !== Format::ODT) {
+            throw new UnsupportedFormatException(
+                $format,
+                'Agent::convertTemplate() converts Word (.dotx/.docx) and OpenDocument text (.ott/.odt) packages'
+                .($format === Format::UNKNOWN ? '; these bytes are neither.' : "; this is a .{$format} file."),
+            );
+        }
+
+        return \LastWord\Archive\OfficeTemplate::convert($bytes, $to);
+    }
+
+    /**
      * Plain-text summary of a document — title, block counts by type, word
      * count. Useful as an agent tool that "describes" a document without
      * dumping the full JSON back to the model.

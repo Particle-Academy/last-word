@@ -272,6 +272,37 @@ What it cannot read it refuses with `UnsupportedFormatException`, whose
 `RuntimeException` instead — "this file is broken" and "save it as .docx" send a
 person to do different things.
 
+## Word and LibreOffice templates (.dotx, .ott)
+
+A `.dotx` is a `.docx` whose main part is declared a template; an `.ott` is an
+`.odt` whose `mimetype` (and manifest root entry) says `text-template`.
+`Agent::read()` reads both exactly as it reads their twins and adds
+`"sourceKind": "template"` to the result. A document read has no `sourceKind`
+key, as before.
+
+```php
+Agent::read('letterhead.dotx');            // [..., 'sourceKind' => 'template']
+Agent::convertTemplate('letterhead.dotx'); // .docx bytes ('document' | 'template' | null = flip)
+```
+
+```
+vendor/bin/last-word template:convert letterhead.dotx letterhead.docx
+vendor/bin/last-word template:convert memo.odt memo.ott --to=template
+```
+
+Conversion rewrites only the declaration: the content-type value in
+`[Content_Types].xml`, or the ODF `mimetype` entry plus the manifest's root
+`media-type` (ODF 1.3 requires the two to match). Every other member is copied
+as its original zip record, byte for byte, and `mimetype` stays first and
+stored. No reader or writer is in the path.
+
+Refused with `LastWord\Exceptions\OfficeTemplateRefused` (a constant `reason`):
+macro-enabled templates `.dotm` (`macro_enabled`; never read, never converted,
+and a `.docm` is not converted either), a package declaring a template of
+another family or whose parts disagree with its declaration
+(`family_mismatch`). The archive guards above apply first, so bombs and unsafe
+names raise `ArchiveRefused` as for any document.
+
 ## Determinism
 
 `toBytes()` is reproducible: no timestamps in any XML part, fixed zip

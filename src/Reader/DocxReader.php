@@ -7,6 +7,7 @@ namespace LastWord\Reader;
 use DOMDocument;
 use DOMElement;
 use DOMNode;
+use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\SourceArchive;
 use LastWord\Writer\DocxWriter;
 use RuntimeException;
@@ -102,6 +103,8 @@ final class DocxReader
 
     private ?string $title = null;
 
+    private string $sourceKind = OfficeTemplate::DOCUMENT;
+
     public function __construct(
         private ?string $tempDir = null,
     ) {
@@ -153,6 +156,10 @@ final class DocxReader
         }
 
         $doc['blocks'] = $blocks;
+        // A .dotx reads exactly like its .docx twin, and says so.
+        if ($this->sourceKind === OfficeTemplate::TEMPLATE) {
+            $doc['sourceKind'] = OfficeTemplate::TEMPLATE;
+        }
 
         return $doc;
     }
@@ -399,6 +406,7 @@ final class DocxReader
     private function openArchive(string $bytes): string
     {
         $zip = SourceArchive::open($bytes, tempDir: $this->tempDir);
+        $this->sourceKind = OfficeTemplate::kind($zip);
         $documentXml = $zip->read('word/document.xml');
         if ($documentXml === null) {
             throw new RuntimeException('No word/document.xml part — not a DOCX file.');

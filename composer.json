@@ -35,6 +35,9 @@
         "pestphp/pest": "^3.0|^4.0",
         "particle-academy/fancy-conformance": "^0.22.0"
     },
+    "bin": [
+        "bin/last-word"
+    ],
     "autoload": {
         "psr-4": {
             "LastWord\\": "src/"

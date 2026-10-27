@@ -1,0 +1,16 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Composer sets this for proxied bin scripts; the fallbacks cover running from
+// a checkout and from vendor/particle-academy/last-word/bin.
+$autoload = $GLOBALS['_composer_autoload_path'] ?? null;
+foreach ([$autoload, __DIR__.'/../vendor/autoload.php', __DIR__.'/../../../autoload.php'] as $candidate) {
+    if (is_string($candidate) && is_file($candidate)) {
+        require $candidate;
+        break;
+    }
+}
+
+exit(LastWord\Cli::run(array_slice($argv, 1), STDOUT, STDERR));

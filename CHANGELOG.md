@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Word `.dotx` and LibreOffice `.ott` templates.** `Agent::read()` reads them
+  exactly as their `.docx` / `.odt` twins and adds `"sourceKind": "template"`.
+  Document reads are unchanged and carry no `sourceKind` key, so nothing to do
+  unless you want to tell the two apart.
+- **`Agent::convertTemplate($bytesOrPath, $to = null)`** and the
+  `vendor/bin/last-word template:convert <in> <out> [--to=document|template] [--force]`
+  CLI turn a template into its document twin and back. Only the declaration is
+  rewritten: the main part's content-type value (OOXML), or the `mimetype`
+  entry plus the manifest root's `media-type` (ODF 1.3 Part 2 section 3.3
+  requires them to agree). Every other zip member is copied as its original
+  record, byte for byte; `mimetype` stays first and stored.
+- `LastWord\Exceptions\OfficeTemplateRefused` with a constant `reason`.
+
+### Changed
+
+- **A macro-enabled template (`.dotm`) is now refused** with
+  `OfficeTemplateRefused('macro_enabled')`; it used to be read as a document
+  with its VBA silently ignored. So is a `.dotx` carrying a `vbaProject.bin`.
+  A `.docm` still reads as before but is never converted. Re-save a `.dotm` as
+  `.dotx` if you need it read.
+- A package that declares a template of another family (a PowerPoint or Excel
+  template type, an ODF `presentation-template`, a `text-template` whose body is
+  a spreadsheet) is refused with `family_mismatch` instead of being read as
+  whatever its parts looked like.
+
 ## [0.10.1] - 2026-10-26
 
 ### Security
