@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-27
+
 ### Added
 
 - **Word `.dotx` and LibreOffice `.ott` templates.** `Agent::read()` reads them
