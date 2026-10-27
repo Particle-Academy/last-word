@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LastWord\Schema;
 
+use LastWord\Exchange\Content;
+use LastWord\Exchange\Portable;
 use LastWord\Helpers\Chart;
 
 /**
@@ -68,6 +70,7 @@ final class Validator
                         $errors[] = self::error("page.{$kind}.color", "page {$kind} color must be #RRGGBB");
                     }
                 }
+                $this->validatePageDecoration($doc, $errors);
             }
         }
 
@@ -85,6 +88,58 @@ final class Validator
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
 
         return $errors;
+    }
+
+    /**
+     * `page.background` and `page.border`, with fine-print's rules: hex
+     * colours, a known style, a positive width, a non-negative inset, and a
+     * frame that leaves room inside it on both axes.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validatePageDecoration(array $doc, array &$errors): void
+    {
+        $page = $doc['page'];
+        $this->validateHex($page['background'] ?? null, 'page.background', 'page background', $errors);
+        if (!isset($page['border'])) {
+            return;
+        }
+        $border = $page['border'];
+        if (!is_array($border) || ($border !== [] && array_is_list($border))) {
+            $errors[] = self::error('page.border', 'page border must be an object ({style?, width?, color?, inset?})');
+
+            return;
+        }
+        $before = count($errors);
+        $this->validateEnum($border['style'] ?? null, 'page.border.style', 'page border style', self::BORDER_STYLES, $errors);
+        $this->validateFrameNumber($border['width'] ?? null, 'page.border.width', 'page border width', true, $errors);
+        $this->validateHex($border['color'] ?? null, 'page.border.color', 'page border color', $errors);
+        $this->validateFrameNumber($border['inset'] ?? null, 'page.border.inset', 'page border inset', false, $errors);
+        $frame = Schema::pageFrame($doc);
+        if (count($errors) === $before && $frame !== null) {
+            [$w, $h] = Schema::pageSize($doc);
+            if (2 * ($frame['inset'] + $frame['width']) >= min($w, $h)) {
+                $errors[] = self::error('page.border', 'page border inset + width must leave room inside the frame on both axes');
+            }
+        }
+    }
+
+    /** @param  list<array{path: string, message: string}>  $errors */
+    private function validateFrameNumber(mixed $value, string $path, string $label, bool $positive, array &$errors): void
+    {
+        if ($value === null) {
+            return;
+        }
+        if ((!is_int($value) && !is_float($value)) || !is_finite((float) $value)) {
+            $errors[] = self::error($path, "{$label} must be a number of points");
+        } elseif ($positive && $value <= 0) {
+            $errors[] = self::error($path, "{$label} must be greater than zero");
+        } elseif (!$positive && $value < 0) {
+            $errors[] = self::error($path, "{$label} must not be negative");
+        } elseif (abs((float) $value) > 10000) {
+            $errors[] = self::error($path, "{$label} is out of range");
+        }
     }
 
     /**
@@ -114,8 +169,18 @@ final class Validator
 
             return;
         }
+        if ($type === Portable::TYPE) {
+            // Portable content from another package: checked closed and against
+            // the exchange limits; expanded by validateAndRepair and on write.
+            $check = Content::validate($block['content'] ?? null);
+            if (!$check['ok']) {
+                $errors[] = self::error("{$path}.content", "portable content is invalid: {$check['code']} at \"{$check['path']}\" (fancyContent 1; see the exchange spec)");
+            }
+
+            return;
+        }
         if (!in_array($type, Schema::BLOCK_TYPES, true)) {
-            $errors[] = self::error("{$path}.type", "unknown block type \"{$type}\" (expected one of: " . implode(', ', Schema::BLOCK_TYPES) . ')');
+            $errors[] = self::error("{$path}.type", "unknown block type \"{$type}\" (expected one of: " . implode(', ', Schema::BLOCK_TYPES) . ', or portable)');
 
             return;
         }

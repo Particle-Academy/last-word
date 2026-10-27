@@ -2,6 +2,90 @@
 
 ## [Unreleased]
 
+Document exchange, step 4 of the approved plan (`.ai/plans/document-exchange-and-export.md`),
+to fancy-conformance 0.37.0's `suites/exchange/SPEC.md`.
+
+### Added
+
+- **Portable content out: `Agent::catalog($input)` and `Agent::extract($input, $selector, $options)`.**
+  `catalog` lists headings (`{index, level, text, selector}`, the selector grabbing the
+  heading's section) and tables (`{table, index, rows, columns, headerRows, heading,
+  selector}`). `extract` returns `{ok: true, content, report}`: selectors `{table: n}`,
+  `{underHeading: "Results", nth: 0}` and `{blocks: [a, b]}` (0-based, inclusive), or null
+  for the whole document. Reads .docx, .doc, .odt and .rtf (bytes or a path), or a Doc you
+  hold; unreadable input is `{ok: false, refused: {reason}}` (`not_a_document`, `corrupt`,
+  or an archive/template refusal code), never an exception. Not gated: it is a read.
+- **Guarded extraction.** Every string taken from the document is stripped of invisible,
+  bidi-control and Unicode tag characters (fine-print's `AgentReadGuard::INVISIBLE`), one
+  `invisible-chars` finding per run removed. Links outside http, https and mailto are
+  removed and reported `link`, their text kept. **Reports never carry document text**:
+  every `where` is a JSON Pointer built from indexes.
+- **Portable content in: `Agent::fromPortable($content)`** and an inline
+  `{"type": "portable", "content": ...}` block wherever a block may go (the document, a
+  quote, a table cell). `validate` checks it closed and against the exchange limits;
+  `validateAndRepair`, `toBytes` and `write` expand it deterministically. Tables keep header
+  rows, spans and widths, numeric columns are right-aligned, and formulas are never
+  carried (`formula-as-value`). Invalid content is refused, never repaired.
+  `Agent::toPortable($doc, $selector)` and `Agent::validateContent($content)` are the pure
+  halves. `LastWord\Exchange\*` holds them; the classes shared with fine-print 0.5.0
+  (`Content`, `Report`, `FromPortable`, `Portable`, `ExportPolicy`) are kept in step with it.
+- **`Agent::toMarkdownWithReport($doc)`**: the markdown bridge with a report. What
+  `ToMarkdown` used to drop silently (underline, colour, size, font, alignment and spacing,
+  cell styling, spans, nested blocks in cells, extra header rows, line breaks, image size)
+  is now reported by kind and located; a chart is `chart-as-table`. The markdown is the
+  same string `toMarkdown()` returns, so the `fromMarkdown` fixpoint is untouched.
+- **Exports, off by default: `Agent::export($input, $target, $options, $policy)`** with a
+  host-built `LastWord\Exchange\ExportPolicy`. Targets `markdown` (the bridge, guarded,
+  unsafe links removed), `text`, `html` (new: every string escaped, no scripts or event
+  handlers, links only http/https/mailto with `rel="noopener noreferrer"`, images as
+  PNG/JPEG data URIs) and `docx` (from .doc, .odt, .rtf). A null policy or an empty `allow`
+  enables nothing; an `allow` among the agent's options throws `OptionsInvalid`. Refusals
+  in `exchange/policy` order: `export_unsupported`, `export_disabled`, `export_unavailable`,
+  `export_refused` (with the reader's `cause`), then a limit code. **`pdf` answers
+  `export_unavailable` (`missing: fine-print`)** until the PDF bridge (plan step 6), and is
+  never listed by `Agent::exportToolDefinition($policy)`, whose `target` enum shows only
+  enabled targets.
+- **`page.background` and `page.border`** (owner decision 11), with fine-print 0.3.0's
+  meaning: a page colour, and a frame `inset` points from the page edge (24 by default),
+  `width` across (0.5; a double is two rules of a third each), `color` (black), `style`
+  single|double|dashed|dotted|none. Written as `w:background` (plus
+  `w:displayBackgroundShape` in a new `word/settings.xml`, without which Word and
+  LibreOffice ignore it) and `w:pgBorders`, measured from the page up to Word's 31pt
+  limit and from the text beyond it. Read back by `read()`. Validated like fine-print's
+  (including a frame that leaves no room inside it); `validateAndRepair` removes an invalid
+  one with a note. Checked with LibreOffice 26.2 as an oracle: it opens the file with the
+  page colour, the frame at the inset, and the text where the margins put it.
+- `doc-model/shared` rows 0002 and 0003 now pass for last-word: its page field set is
+  fine-print's.
+
+### Changed
+
+- **`jsonSchema()`: `blocks` (and quote and cell `blocks`) now reference
+  `$defs.blockOrPortable`**, which is `$defs.block` or `$defs.portable`. `$defs.block` is
+  unchanged and is still the document model; nothing to do unless you resolved the
+  `blocks.items` reference by hand.
+- `validateAndRepair()` returns a `report` key when it expanded a portable block, and an
+  `errors` note per expansion. Without portable blocks its output is unchanged.
+- **A document whose `page.background` or `page.border` is malformed now fails
+  `validate()`**; both keys used to be ignored. `validateAndRepair()` removes them with a
+  note, so a repair loop needs no change.
+- **`read()` now returns `page.background` / `page.border`** for a .docx that has a page
+  colour or a uniform page border (a Word document authored with them included). Documents
+  without them read exactly as before.
+- Documents without the new page keys write byte-identical files: `settings.xml` is added
+  only for a page colour.
+- `particle-academy/fancy-conformance` (require-dev) is pinned EXACTLY at `0.37.0`, and a
+  test asserts the pin. The new `tests/Unit/Exchange/ConformanceTest.php` runs every
+  exchange suite whose manifest names last-word PHP (186 rows) plus last-word's half of
+  `doc-model/shared` (20 rows), and fails if the manifests name a suite it does not run.
+
+### PARITY
+
+- The Node (`@particle-academy/last-word`) and Python ports have none of this yet; they are
+  plan step 8. Until then both are PHP-only: the ports' validators refuse a `portable`
+  block as an unknown block type, and ignore `page.background` / `page.border`, so the
+  same document writes there without the decoration.
+
 ## [0.11.0] - 2026-10-27
 
 ### Added

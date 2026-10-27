@@ -39,6 +39,16 @@ final class Schema
     /** @var list<string> */
     public const PAGE_SIZES = ['letter', 'legal', 'a4'];
 
+    /** Page sizes in points, portrait (fine-print's numbers; the writer uses the twip equivalents). */
+    public const PAGE_POINTS = [
+        'letter' => [612.0, 792.0],
+        'legal' => [612.0, 1008.0],
+        'a4' => [595.28, 841.89],
+    ];
+
+    /** Points from the page edge to the outside of a page frame, by default (fine-print's). */
+    public const PAGE_FRAME_INSET = 24.0;
+
     /** Boolean run flags (all optional). */
     public const RUN_FLAGS = ['bold', 'italic', 'underline', 'strike', 'code', 'smallCaps'];
 
@@ -146,7 +156,11 @@ final class Schema
             ] + $paragraphProps,
         ];
 
-        $blockRef = ['$ref' => '#/$defs/block'];
+        // Wherever a block may go, a portable node may go too. `$defs.block` is
+        // the document model; `portable` is an input that validateAndRepair and
+        // the writer expand into model blocks, so it is kept beside the model
+        // (doc-model/shared reads `$defs.block`, which stays model-only).
+        $blockRef = ['$ref' => '#/$defs/blockOrPortable'];
 
         $blocks = [
             'heading' => [
@@ -299,6 +313,18 @@ final class Schema
                         'margins' => ['$ref' => '#/$defs/boxSides'],
                         'header' => ['$ref' => '#/$defs/band', 'description' => 'A running header on every page.'],
                         'footer' => ['$ref' => '#/$defs/band', 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers.'],
+                        'background' => $hex + ['description' => 'Page colour on every page, under everything else, e.g. "#FDFAF3". White (none) by default. Word shows it on screen and prints it only when "Print background colors" is on.'],
+                        'border' => [
+                            'type' => 'object',
+                            'additionalProperties' => false,
+                            'description' => 'A frame around every page, measured from the page edge, so it is the same whatever the page holds (a certificate border). e.g. {"style": "double", "width": 6, "color": "#B08D57", "inset": 18}. Margins are separate: keep them wider than inset + width so text clears the frame.',
+                            'properties' => [
+                                'style' => ['enum' => self::BORDER_STYLES, 'description' => 'single by default; double draws two rules with a gap, each a third of the width; none draws nothing.'],
+                                'width' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Points, the whole frame (both rules and the gap, for double). 0.5 by default. Word draws at most 12pt per rule.'],
+                                'color' => $hex + ['description' => 'Black by default.'],
+                                'inset' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points from the page edge to the outside of the frame. '.self::PAGE_FRAME_INSET.' by default.'],
+                            ],
+                        ],
                     ],
                 ],
                 'defaultFont' => ['type' => 'string', 'description' => 'Font every run inherits unless it names its own.'],
@@ -313,7 +339,159 @@ final class Schema
                 'boxSides' => $boxSides,
                 'band' => $band,
                 'block' => ['oneOf' => array_values($blocks)],
+                'portable' => self::portableSchema(),
+                'portableRun' => [
+                    'type' => 'object',
+                    'required' => ['text'],
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'text' => ['type' => 'string'],
+                        'bold' => ['type' => 'boolean'],
+                        'italic' => ['type' => 'boolean'],
+                        'underline' => ['type' => 'boolean'],
+                        'strike' => ['type' => 'boolean'],
+                        'code' => ['type' => 'boolean'],
+                        'link' => ['type' => 'string', 'pattern' => '^(https?://|mailto:)[!-~]+$', 'maxLength' => 2048],
+                    ],
+                ],
+                'portableListItem' => [
+                    'type' => 'object',
+                    'required' => ['runs'],
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'runs' => ['type' => 'array', 'items' => ['$ref' => '#/$defs/portableRun']],
+                        'children' => ['type' => 'array', 'items' => ['$ref' => '#/$defs/portableListItem']],
+                    ],
+                ],
+                'blockOrPortable' => ['oneOf' => [['$ref' => '#/$defs/block'], ['$ref' => '#/$defs/portable']]],
             ],
+        ];
+    }
+
+    /**
+     * The inline portable node and the `fancyContent: 1` format it carries
+     * (fancy-conformance `suites/exchange/SPEC.md`), as fine-print 0.5.0
+     * declares it. Every object is closed. The validator enforces what JSON
+     * Schema cannot say: the grid is a rectangle, runs spell the cell's
+     * display text, image bytes match their mime, and the exchange limits.
+     *
+     * @return array<string, mixed>
+     */
+    private static function portableSchema(): array
+    {
+        $runs = ['type' => 'array', 'items' => ['$ref' => '#/$defs/portableRun']];
+        $closed = fn (array $props, array $required = []) => ['type' => 'object', 'additionalProperties' => false, 'properties' => $props] + ($required === [] ? [] : ['required' => $required]);
+        $cell = $closed([
+            't' => ['enum' => ['string', 'number', 'bool', 'date', 'datetime', 'empty', 'error']],
+            'v' => ['description' => 'The typed value: a string, number or boolean; date YYYY-MM-DD; datetime YYYY-MM-DDTHH:MM:SSZ; error a string starting with #. Absent for empty.'],
+            'text' => ['type' => 'string', 'description' => 'The display string the source showed, when it differs from the value.'],
+            'format' => $closed([
+                'kind' => ['enum' => ['number', 'currency', 'percent', 'date', 'datetime', 'text']],
+                'decimals' => ['type' => 'integer', 'minimum' => 0, 'maximum' => 10],
+                'currency' => ['type' => 'string', 'pattern' => '^[A-Z]{3}$'],
+            ], ['kind']),
+            'formula' => ['type' => 'string', 'minLength' => 1, 'description' => 'Metadata only: never evaluated, never written. The value is written.'],
+            'colSpan' => ['type' => 'integer', 'minimum' => 1],
+            'rowSpan' => ['type' => 'integer', 'minimum' => 1],
+            'align' => ['enum' => ['left', 'center', 'right']],
+            'runs' => $runs,
+        ], ['t']);
+
+        $content = $closed([
+            'fancyContent' => ['const' => 1],
+            'source' => ['type' => 'object', 'description' => 'Where the content came from: {package, kind, version, sourceKind, selector}.'],
+            'items' => ['type' => 'array', 'items' => ['oneOf' => [
+                $closed([
+                    'type' => ['const' => 'table'],
+                    'caption' => ['type' => 'string'],
+                    'headerRows' => ['type' => 'integer', 'minimum' => 0],
+                    'columns' => ['type' => 'array', 'items' => $closed(['width' => ['type' => 'number', 'exclusiveMinimum' => 0], 'align' => ['enum' => ['left', 'center', 'right']]])],
+                    'rows' => ['type' => 'array', 'minItems' => 1, 'items' => $closed(['cells' => ['type' => 'array', 'minItems' => 1, 'items' => $cell]], ['cells'])],
+                ], ['type', 'rows']),
+                $closed([
+                    'type' => ['const' => 'text'],
+                    'role' => ['enum' => ['heading', 'paragraph']],
+                    'level' => ['type' => 'integer', 'minimum' => 1, 'maximum' => 6, 'description' => 'Required for a heading, forbidden otherwise.'],
+                    'runs' => $runs,
+                ], ['type', 'role', 'runs']),
+                $closed([
+                    'type' => ['const' => 'list'],
+                    'ordered' => ['type' => 'boolean'],
+                    'items' => ['type' => 'array', 'minItems' => 1, 'items' => ['$ref' => '#/$defs/portableListItem']],
+                ], ['type', 'items']),
+                $closed([
+                    'type' => ['const' => 'image'],
+                    'ref' => ['type' => 'string', 'description' => 'A key of `images`. Never a URL or a path.'],
+                    'alt' => ['type' => 'string'],
+                    'widthPx' => ['type' => 'number', 'exclusiveMinimum' => 0],
+                    'heightPx' => ['type' => 'number', 'exclusiveMinimum' => 0],
+                ], ['type', 'ref']),
+            ]]],
+            'images' => [
+                'type' => 'object',
+                'propertyNames' => ['pattern' => '^[A-Za-z0-9_-]{1,64}$'],
+                'additionalProperties' => $closed(['mime' => ['enum' => ['image/png', 'image/jpeg']], 'data' => ['type' => 'string', 'description' => 'Standard base64 of the PNG or JPEG bytes.']], ['mime', 'data']),
+            ],
+            'report' => ['type' => 'object', 'description' => 'What the reader lost or approximated: {dropped, approximated, guard}.'],
+        ], ['fancyContent', 'items']);
+
+        return [
+            'type' => 'object',
+            'required' => ['type', 'content'],
+            'additionalProperties' => false,
+            'description' => 'Portable content (fancyContent 1) from another document package, e.g. a spreadsheet range from holy-sheet extract(). Placed as is: validateAndRepair and the writer expand it into headings, paragraphs, lists, images and tables (numbers right-aligned, header rows marked). Pass it through unchanged rather than retyping it.',
+            'properties' => [
+                'type' => ['const' => 'portable'],
+                'content' => $content,
+            ],
+        ];
+    }
+
+    /**
+     * Page width and height in points, after orientation.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array{0: float, 1: float}
+     */
+    public static function pageSize(array $doc): array
+    {
+        $page = is_array($doc['page'] ?? null) ? $doc['page'] : [];
+        $size = is_string($page['size'] ?? null) ? strtolower($page['size']) : 'letter';
+        [$w, $h] = self::PAGE_POINTS[$size] ?? self::PAGE_POINTS['letter'];
+        if (($page['orientation'] ?? 'portrait') === 'landscape') {
+            [$w, $h] = [$h, $w];
+        }
+
+        return [$w, $h];
+    }
+
+    /**
+     * The page frame with fine-print's defaults filled in, or null when there
+     * is none (absent, or style "none"). Values that would not validate fall
+     * back to their defaults; the validator is what refuses them.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array{style: string, width: float, color: string, inset: float}|null
+     */
+    public static function pageFrame(array $doc): ?array
+    {
+        $b = is_array($doc['page'] ?? null) ? ($doc['page']['border'] ?? null) : null;
+        if (! is_array($b)) {
+            return null;
+        }
+        $style = in_array($b['style'] ?? null, self::BORDER_STYLES, true) ? $b['style'] : 'single';
+        if ($style === 'none') {
+            return null;
+        }
+        $width = $b['width'] ?? null;
+        $inset = $b['inset'] ?? null;
+        $color = $b['color'] ?? null;
+
+        return [
+            'style' => $style,
+            'width' => (is_int($width) || is_float($width)) && $width > 0 && is_finite((float) $width) ? (float) $width : 0.5,
+            'color' => is_string($color) && preg_match('/^#[0-9A-Fa-f]{6}$/', $color) === 1 ? $color : '#000000',
+            'inset' => (is_int($inset) || is_float($inset)) && $inset >= 0 && is_finite((float) $inset) ? (float) $inset : self::PAGE_FRAME_INSET,
         ];
     }
 

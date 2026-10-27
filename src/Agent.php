@@ -6,6 +6,14 @@ namespace LastWord;
 
 use InvalidArgumentException;
 use LastWord\Exceptions\SchemaException;
+use LastWord\Exchange\Content;
+use LastWord\Exchange\Exporter;
+use LastWord\Exchange\ExportPolicy;
+use LastWord\Exchange\FromPortable;
+use LastWord\Exchange\InputRefused;
+use LastWord\Exchange\OptionsInvalid;
+use LastWord\Exchange\Portable;
+use LastWord\Exchange\ToPortable;
 use LastWord\Exceptions\TemplateException;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
@@ -77,14 +85,25 @@ final class Agent
      * Designed for agentic feedback loops: hand the agent back the errors
      * if !ok so it can correct its next emission.
      *
+     * Inline `{"type": "portable", "content": ...}` blocks are expanded here,
+     * deterministically, through {@see fromPortable()}: `schema` holds
+     * ordinary blocks, `errors` gains one note per expansion, and the result
+     * gains a `report` (the conversions' reports, every `where` a JSON Pointer
+     * into the document you passed). Portable content that does not validate
+     * is left in place and makes the result `ok: false`.
+     *
      * @param  array<string, mixed>  $doc
-     * @return array{ok: bool, schema: array<string, mixed>, errors: list<array{path: string, message: string}>}
+     * @return array{ok: bool, schema: array<string, mixed>, errors: list<array{path: string, message: string}>, report?: array<string, mixed>}
      */
     public static function validateAndRepair(array $doc): array
     {
+        $x = Portable::expand($doc);
+        $report = $x['expanded'] ? ['report' => $x['report']] : [];
+        $doc = $x['doc'];
+
         $errors = self::validate($doc);
         if (empty($errors)) {
-            return ['ok' => true, 'schema' => $doc, 'errors' => []];
+            return ['ok' => true, 'schema' => $doc, 'errors' => $x['notes']] + $report;
         }
 
         ['doc' => $repaired, 'notes' => $notes] = (new Repairer())->repair($doc);
@@ -93,8 +112,45 @@ final class Agent
         return [
             'ok' => empty($remaining),
             'schema' => $repaired,
-            'errors' => array_merge($notes, $remaining),
-        ];
+            'errors' => array_merge($x['notes'], $notes, $remaining),
+        ] + $report;
+    }
+
+    /**
+     * The document the writer is given: validated, its portable blocks
+     * expanded, and validated again (an expansion is ordinary blocks, which
+     * still face every writer check).
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     *
+     * @throws SchemaException
+     */
+    private static function writable(array $doc): array
+    {
+        self::assertValid($doc);
+        $x = Portable::expand($doc);
+        if ($x['expanded']) {
+            self::assertValid($x['doc']);
+        }
+
+        return $x['doc'];
+    }
+
+    /**
+     * @param  array<string, mixed>  $doc
+     *
+     * @throws SchemaException
+     */
+    private static function assertValid(array $doc): void
+    {
+        $errors = self::validate($doc);
+        if (!empty($errors)) {
+            throw new SchemaException(
+                'Document failed schema validation. Call Agent::validateAndRepair() for a recoverable form.',
+                $errors,
+            );
+        }
     }
 
     /**
@@ -137,13 +193,7 @@ final class Agent
      */
     public static function toBytes(array $doc, array $options = []): string
     {
-        $errors = self::validate($doc);
-        if (!empty($errors)) {
-            throw new SchemaException(
-                'Document failed schema validation. Call Agent::validateAndRepair() for a recoverable form.',
-                $errors,
-            );
-        }
+        $doc = self::writable($doc);
 
         return (new DocxWriter($options['tempDir'] ?? null, self::templateFrom($options)))->toBytes($doc);
     }
@@ -161,13 +211,7 @@ final class Agent
      */
     public static function write(array $doc, string $path, array $options = []): array
     {
-        $errors = self::validate($doc);
-        if (!empty($errors)) {
-            throw new SchemaException(
-                'Document failed schema validation. Call Agent::validateAndRepair() for a recoverable form.',
-                $errors,
-            );
-        }
+        $doc = self::writable($doc);
 
         return (new DocxWriter($options['tempDir'] ?? null, self::templateFrom($options)))->write($doc, $path);
     }
@@ -536,6 +580,171 @@ final class Agent
                 $text[] = $run['text'];
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Exchange: portable content (`fancyContent: 1`) in and out, and exports.
+    // Normative text: fancy-conformance suites/exchange/SPEC.md.
+
+    /**
+     * Portable content to last-word blocks, to edit before placing them (or
+     * put `{"type": "portable", "content": ...}` straight into `blocks` and let
+     * validateAndRepair() / toBytes() do this). Tables keep their header rows,
+     * spans and widths; numeric columns are right-aligned; typed values become
+     * their display text. Formulas are never carried, only their values.
+     *
+     * Returns `{ok: true, blocks, report}`, the report locating every loss in
+     * the content (`typed-as-text`, `formula-as-value`), or `{ok: false,
+     * refused: {reason, path}}` for content that does not validate: closed
+     * objects, http/https/mailto links only, PNG/JPEG bytes matching their
+     * mime, and the exchange limits (`options.limits` overrides them).
+     *
+     * @param  array<string, mixed>|\stdClass  $content
+     * @param  array{limits?: array<string, int>}  $options
+     * @return array<string, mixed>
+     */
+    public static function fromPortable(array|\stdClass $content, array $options = []): array
+    {
+        return FromPortable::convert($content, $options);
+    }
+
+    /**
+     * Check portable content without converting it: `{ok: true}` or
+     * `{ok: false, code, path}`. Bad options throw {@see OptionsInvalid}.
+     *
+     * @return array{ok: bool, code?: string, path?: string}
+     */
+    public static function validateContent(mixed $content, mixed $options = null): array
+    {
+        return Content::validate($content, $options);
+    }
+
+    /**
+     * A Doc to portable content: the pure half of {@see extract()}, for a host
+     * that already holds the model. Selector: null (every block), `{table: n}`,
+     * `{underHeading: "Results", nth: 0}`, `{blocks: [a, b]}`, 0-based and
+     * inclusive.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  array{includeHidden?: bool, headerRows?: int, limits?: array<string, int>}  $options
+     * @return array<string, mixed>  `{ok: true, content}` or `{ok: false, refused: {reason}}`
+     *
+     * @throws OptionsInvalid
+     */
+    public static function toPortable(array $doc, mixed $selector = null, array $options = []): array
+    {
+        return ToPortable::fromDoc($doc, $selector, $options);
+    }
+
+    /**
+     * A cheap index of a document an agent reads instead of the whole thing:
+     * `{ok: true, blocks, headings: [{index, level, text, selector}], tables:
+     * [{table, index, rows, columns, headerRows, heading, selector}], guard}`.
+     * Each entry's `selector` is what {@see extract()} takes to grab it (a
+     * heading's grabs its section). Heading text is guarded (invisible, bidi
+     * and tag characters stripped and counted). Unreadable input is `{ok:
+     * false, refused: {reason}}`, never an exception.
+     *
+     * @param  string|array<string, mixed>  $input  bytes, a path, or a Doc
+     * @return array<string, mixed>
+     */
+    public static function catalog(string|array $input): array
+    {
+        try {
+            $loaded = Exporter::load($input);
+        } catch (InputRefused $e) {
+            return ['ok' => false, 'refused' => ['reason' => $e->reason]];
+        }
+
+        return ['ok' => true] + Exporter::catalog($loaded['doc']);
+    }
+
+    /**
+     * Grab part of a document as portable content (`fancyContent: 1`), for
+     * holy-sheet, dark-slide, fine-print or another last-word to place.
+     *
+     * Selector: null (every block), `{table: n}`, `{underHeading: "Results",
+     * nth: 0}` (the first table after that heading, before the next heading of
+     * the same or higher level; exact match, ASCII case-insensitive), or
+     * `{blocks: [a, b]}`; 0-based, inclusive. Reads .docx, .doc, .odt and
+     * .rtf (bytes or a path), or a Doc you already hold.
+     *
+     * Guarded: invisible, bidi-control and Unicode tag characters are
+     * stripped and counted; links outside http, https and mailto are removed
+     * (their text kept). The report locates every loss by JSON Pointer into
+     * the Doc and never carries document text. Not gated: it is a read.
+     *
+     * @param  string|array<string, mixed>  $input
+     * @param  array{includeHidden?: bool, headerRows?: int, limits?: array<string, int>}  $options
+     * @return array<string, mixed>  `{ok: true, content, report}` or `{ok: false, refused: {reason}}`
+     *
+     * @throws OptionsInvalid for an unknown or malformed option
+     */
+    public static function extract(string|array $input, mixed $selector = null, array $options = []): array
+    {
+        return Exporter::extract($input, $selector, $options);
+    }
+
+    /**
+     * {@see toMarkdown()} plus what the conversion could not carry, in the
+     * exchange report shape: `{markdown, report: {dropped, approximated,
+     * guard}}`. Underline, colour, size, font, alignment and spacing, cell
+     * styling, spans, nested blocks, extra header rows and line breaks are each
+     * reported by kind and located by JSON Pointer; never by their text. The
+     * markdown is exactly what toMarkdown() returns.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array{markdown: string, report: array<string, mixed>}
+     */
+    public static function toMarkdownWithReport(array $doc): array
+    {
+        return (new ToMarkdown())->convertWithReport($doc);
+    }
+
+    /**
+     * Export a document as `markdown`, `text`, `html` or `docx` (`pdf` once
+     * the fine-print bridge ships; until then it is `export_unavailable`).
+     *
+     * OFF by default: the HOST enables targets with an {@see ExportPolicy}; a
+     * null policy allows nothing, and nothing in `$options` (the agent's
+     * `selector`, `headerRows`, `display`) can enable anything. An unknown
+     * option throws.
+     *
+     *   - markdown: the GFM bridge over the selection, guarded, links limited
+     *     to http, https and mailto, with the bridge's report
+     *   - text: plain UTF-8; tables as TAB-separated rows
+     *   - html: a standalone page; every string escaped, no scripts or event
+     *     handlers, links only http, https and mailto, images as data URIs
+     *   - docx: the document (from .doc, .odt, .rtf or .docx) rewritten
+     *
+     * Success: `{ok: true, target, mime, text|bytes, report}`. Refusal: `{ok:
+     * false, refused: {reason, target, message, missing?, cause?}}`, checked in
+     * the order exchange/policy pins: `export_unsupported`, `export_disabled`,
+     * `export_unavailable`, `export_refused` (the input or the selector was
+     * refused; `cause` is that code), then a limit code from the policy's
+     * `limits`.
+     *
+     * @param  string|array<string, mixed>  $input  bytes, a path, or a Doc
+     * @param  array{selector?: mixed, headerRows?: int, display?: bool}  $options
+     * @return array<string, mixed>
+     *
+     * @throws OptionsInvalid
+     */
+    public static function export(string|array $input, string $target, array $options = [], ?ExportPolicy $policy = null): array
+    {
+        return Exporter::export($input, $target, $options, $policy);
+    }
+
+    /**
+     * The export tool for an agent: its `target` enum lists ONLY the targets
+     * this policy enables, so a disabled one is never shown. With a null
+     * policy the enum is empty.
+     *
+     * @return array{name: string, description: string, input_schema: array<string, mixed>}
+     */
+    public static function exportToolDefinition(?ExportPolicy $policy = null): array
+    {
+        return Exporter::toolDefinition($policy);
     }
 
     /**

@@ -136,6 +136,54 @@ Image dimensions are optional — the writer sniffs intrinsic size straight
 from the PNG IHDR / JPEG SOF bytes and caps at 6.5in page width keeping
 aspect.
 
+`page` takes `size`, `orientation`, `margins`, `header`, `footer`, and the
+same page decoration fine-print draws: `background` (`#RRGGBB`) and `border`
+(`{style, width, color, inset}`: a frame `inset` points from the page edge,
+`width` across, single by default; a double is two rules of a third each).
+They are written as Word's `w:background` and `w:pgBorders`. The field set is
+pinned against fine-print's by fancy-conformance `doc-model/shared`.
+
+## Exchange: portable content and exports
+
+last-word reads and writes **portable content** (`fancyContent: 1`), the
+plain-JSON format the document packages use to move content between each
+other (normative text: fancy-conformance `suites/exchange/SPEC.md`):
+
+```php
+$cat = Agent::catalog($docx);                       // headings + tables, each with its selector
+$x   = Agent::extract($docx, ['underHeading' => 'Results', 'nth' => 0]);
+// {ok: true, content: {fancyContent: 1, ...}, report}  or  {ok: false, refused: {reason}}
+
+$doc['blocks'][] = ['type' => 'portable', 'content' => $sheetRange];  // e.g. from holy-sheet extract()
+Agent::toBytes(Agent::validateAndRepair($doc)['schema']);
+```
+
+- **Selectors:** `{table: n}`, `{underHeading, nth}`, `{blocks: [a, b]}`;
+  0-based, inclusive. `null` is the whole document.
+- **Guarded:** invisible, bidi-control and Unicode tag characters are stripped
+  and counted; links outside http, https and mailto are removed (text kept).
+  The report locates every loss by JSON Pointer and never carries document text.
+- **`fromPortable($content)`** and the inline `{"type": "portable"}` block
+  (expanded by `validateAndRepair` and the write path; invalid content is
+  refused, never repaired).
+- **`toMarkdownWithReport($doc)`**: the markdown bridge plus what it lost.
+
+**Exports are off by default.** The host enables targets with an
+`ExportPolicy`; nothing an agent passes can enable one:
+
+```php
+use LastWord\Exchange\ExportPolicy;
+
+$policy = new ExportPolicy(['allow' => ['markdown', 'html']]);
+Agent::export($bytes, 'html', ['selector' => ['table' => 0]], $policy);
+// {ok: true, target, mime, text|bytes, report}  or  {ok: false, refused: {reason, target, message, ...}}
+Agent::exportToolDefinition($policy);   // the tool an agent sees: only enabled targets
+```
+
+Targets: `markdown`, `text`, `html` (escaped, no scripts, links only
+http/https/mailto, images as data URIs), `docx` (from .doc, .odt, .rtf).
+`pdf` answers `export_unavailable` until the fine-print bridge ships.
+
 ## Agent API
 
 Static façade, mirrored exactly in the Node package:
@@ -153,6 +201,10 @@ Static façade, mirrored exactly in the Node package:
 | `Agent::jsonSchema()` | JSON Schema for LLM tool registration |
 | `Agent::diff($a, $b)` / `Agent::reduce($doc, $ops)` | versions as ops: `reduce($a, diff($a, $b))` equals `$b` |
 | `Agent::opSchema()` / `Agent::equivalent($a, $b)` | JSON Schema for one op; whether two documents write the same file |
+| `Agent::catalog($input)` / `Agent::extract($input, $selector)` | an index of a document; part of it as portable content |
+| `Agent::fromPortable($content)` / `Agent::toPortable($doc, $selector)` / `Agent::validateContent($content)` | portable content in and out |
+| `Agent::toMarkdownWithReport($doc)` | the markdown bridge plus its loss report |
+| `Agent::export($input, $target, $options, $policy)` / `Agent::exportToolDefinition($policy)` | host-gated exports |
 | `Agent::version()` | package version |
 
 `validateAndRepair()` is built for agentic feedback loops: bare strings

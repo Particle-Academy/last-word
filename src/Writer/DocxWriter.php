@@ -7,6 +7,7 @@ namespace LastWord\Writer;
 use LastWord\Helpers\Chart;
 use LastWord\Helpers\ImageSize;
 use LastWord\Helpers\Xml;
+use LastWord\Schema\Schema;
 use RuntimeException;
 use ZipArchive;
 
@@ -146,6 +147,12 @@ final class DocxWriter
      */
     private array $bands = [];
 
+    /** Whether this document needs word/settings.xml (it has a page colour). */
+    private bool $hasSettings = false;
+
+    /** Word's largest page-border `w:space`, in points (ECMA-376 17.6.10). */
+    private const PAGE_BORDER_MAX_SPACE = 31;
+
     /** A band's default type: small and muted, so it frames the page rather than competing with it. */
     private const BAND_SIZE_PT = 9;
 
@@ -261,6 +268,9 @@ final class DocxWriter
             $zip->addFromString('word/document.xml', $documentXml);
             $zip->addFromString('word/styles.xml', $this->buildStyles($doc));
             $zip->addFromString('word/numbering.xml', $this->buildNumbering());
+            if ($this->hasSettings) {
+                $zip->addFromString('word/settings.xml', $this->buildSettings());
+            }
             if ($this->template !== null && $this->template->hasTheme()) {
                 // The theme travels WITH the styles. A style that names a theme
                 // colour or font ("accent1", "majorHAnsi") resolves against
@@ -434,6 +444,9 @@ final class DocxWriter
         $xml .= '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>';
         $xml .= '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
         $xml .= '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>';
+        if ($this->hasSettings) {
+            $xml .= '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>';
+        }
         if ($this->template !== null && $this->template->hasTheme()) {
             // A part present but undeclared makes the package invalid, and Word
             // reports it as "unreadable content" without naming the part.
@@ -491,6 +504,9 @@ final class DocxWriter
         if ($this->template !== null && $this->template->hasTheme()) {
             $xml .= '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>';
         }
+        if ($this->hasSettings) {
+            $xml .= '<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>';
+        }
         foreach (array_keys($this->bands) as $kind) {
             $xml .= '<Relationship Id="rId' . ucfirst($kind) . '1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . $kind . '1.xml"/>';
         }
@@ -544,7 +560,15 @@ final class DocxWriter
             . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
             . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'
             . ' w:header="720" w:footer="720" w:gutter="0"/>'
+            // CT_SectPr is a sequence: pgBorders follows pgMar (and paperSrc).
+            . self::pageBordersXml($doc, $page)
             . '</w:sectPr>';
+
+        // The page colour is the document's first child, before the body. Word
+        // and LibreOffice show it only when settings carry
+        // w:displayBackgroundShape, so a settings part is written with it.
+        $background = self::hex($pageSpec['background'] ?? null);
+        $this->hasSettings = $background !== null;
 
         return Xml::declaration()
             . '<w:document'
@@ -553,8 +577,56 @@ final class DocxWriter
             . ' xmlns:wp="' . self::NS_WP . '"'
             . ' xmlns:a="' . self::NS_A . '"'
             . ' xmlns:pic="' . self::NS_PIC . '">'
+            . ($background !== null ? '<w:background w:color="' . $background . '"/>' : '')
             . '<w:body>' . $body . '</w:body>'
             . '</w:document>';
+    }
+
+    /**
+     * `page.border` as `w:pgBorders`, with fine-print's meaning: a frame
+     * `inset` points from the page edge to its outside, `width` points across
+     * (a double is two rules of a third each with a third between, which is
+     * exactly Word's double at w:sz = width / 3).
+     *
+     * Word measures a page border either from the page edge or from the text,
+     * and either way `w:space` is 0 to 31 points. An inset up to 31 is
+     * measured from the page; a deeper one from the text, as the margin less
+     * the inset and width, per edge. A frame Word cannot place exactly (a rule
+     * over 12pt, or a gap to the text over 31pt) is drawn at Word's nearest.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  array{w: int, h: int, top: int, right: int, bottom: int, left: int, orientation: string}  $page
+     */
+    private static function pageBordersXml(array $doc, array $page): string
+    {
+        $frame = Schema::pageFrame($doc);
+        if ($frame === null) {
+            return '';
+        }
+        $rule = $frame['style'] === 'double' ? $frame['width'] / 3 : $frame['width'];
+        $sz = max(2, min(96, (int) round($rule * 8)));
+        $color = strtoupper(substr($frame['color'], 1));
+        $fromPage = $frame['inset'] <= self::PAGE_BORDER_MAX_SPACE;
+
+        $edges = '';
+        foreach (['top', 'left', 'bottom', 'right'] as $edge) {
+            $space = $fromPage
+                ? $frame['inset']
+                : $page[$edge] / 20 - $frame['inset'] - $frame['width'];
+            $space = max(0, min(self::PAGE_BORDER_MAX_SPACE, (int) round($space)));
+            $edges .= '<w:' . $edge . ' w:val="' . $frame['style'] . '" w:sz="' . $sz . '" w:space="' . $space . '" w:color="' . $color . '"/>';
+        }
+
+        return '<w:pgBorders w:offsetFrom="' . ($fromPage ? 'page' : 'text') . '">' . $edges . '</w:pgBorders>';
+    }
+
+    /** The settings part, written only when something needs it (a page colour). */
+    private function buildSettings(): string
+    {
+        return Xml::declaration()
+            . '<w:settings xmlns:w="' . self::NS_W . '">'
+            . '<w:displayBackgroundShape/>'
+            . '</w:settings>';
     }
 
     // ─── Blocks ──────────────────────────────────────────────────────────

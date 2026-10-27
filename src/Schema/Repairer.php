@@ -49,7 +49,40 @@ final class Repairer
 
         $doc['blocks'] = $this->repairBlocks($doc['blocks'], 'blocks');
 
+        if (is_array($doc['page'] ?? null)) {
+            $doc['page'] = $this->repairPageDecoration($doc);
+        }
+
         return ['doc' => $doc, 'notes' => $this->notes];
+    }
+
+    /**
+     * An invalid `page.background` or `page.border` is removed, with a note,
+     * as fine-print's repair does: a page drawn without its decoration is
+     * better than no document, and guessing a colour or a frame is not repair.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     */
+    private function repairPageDecoration(array $doc): array
+    {
+        $page = $doc['page'];
+        foreach (['background', 'border'] as $key) {
+            if (!array_key_exists($key, $page)) {
+                continue;
+            }
+            $probe = ['page' => array_intersect_key($page, array_flip(['size', 'orientation', $key])), 'blocks' => []];
+            $bad = array_filter(
+                (new Validator())->validate($probe),
+                static fn (array $e): bool => str_starts_with($e['path'], 'page.' . $key),
+            );
+            if ($bad !== []) {
+                unset($page[$key]);
+                $this->note("page.{$key}", "removed an invalid page {$key}: " . reset($bad)['message']);
+            }
+        }
+
+        return $page;
     }
 
     /**
@@ -98,6 +131,12 @@ final class Repairer
 
                 return null;
             }
+        }
+
+        if ($type === 'portable') {
+            // Content that expanded is already gone; what is left did not
+            // validate, and is refused rather than guessed at or dropped.
+            return $block;
         }
 
         if (!in_array($type, Schema::BLOCK_TYPES, true)) {

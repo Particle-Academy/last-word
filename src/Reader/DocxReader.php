@@ -9,6 +9,7 @@ use DOMElement;
 use DOMNode;
 use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\SourceArchive;
+use LastWord\Schema\Schema;
 use LastWord\Writer\DocxWriter;
 use RuntimeException;
 
@@ -147,7 +148,7 @@ final class DocxReader
         // differ from what the writer produces unasked, for the same reason
         // table options are: a Letter portrait page at one-inch margins is
         // what every document written before `page` existed contains.
-        $page = $body !== null ? $this->parsePage($this->firstChildByName($body, 'sectPr')) : null;
+        $page = $body !== null ? $this->parsePage($this->firstChildByName($body, 'sectPr'), $dom->documentElement) : null;
         if ($page !== null) {
             $doc['page'] = $page;
         }
@@ -182,12 +183,13 @@ final class DocxReader
     /**
      * @return array<string, mixed>|null
      */
-    private function parsePage(?DOMElement $sectPr): ?array
+    private function parsePage(?DOMElement $sectPr, ?DOMElement $document = null): ?array
     {
         if ($sectPr === null) {
             return null;
         }
         $out = [];
+        $out += $this->parsePageDecoration($sectPr, $document);
 
         $pgSz = $this->firstChildByName($sectPr, 'pgSz');
         $w = $pgSz !== null && is_numeric($this->wAttr($pgSz, 'w')) ? (int) $this->wAttr($pgSz, 'w') : 12240;
@@ -223,7 +225,92 @@ final class DocxReader
             }
         }
 
+        // Decoration last, background before border, so a page reads back in
+        // the order the schema lists it.
+        foreach (['background', 'border'] as $key) {
+            if (isset($out[$key])) {
+                $value = $out[$key];
+                unset($out[$key]);
+                $out[$key] = $value;
+            }
+        }
+
         return $out === [] ? null : $out;
+    }
+
+    /**
+     * `w:background` (the page colour) and `w:pgBorders` back into
+     * `page.background` / `page.border`, with fine-print's meaning: inset from
+     * the page edge to the outside of the frame, width across the whole frame.
+     * Defaults (single, 0.5pt, black, 24pt) are not surfaced, as for table
+     * borders. A frame whose four edges differ is not one this model can hold,
+     * so it is not read (it still renders in Word; it just is not in the model).
+     *
+     * @return array<string, mixed>
+     */
+    private function parsePageDecoration(DOMElement $sectPr, ?DOMElement $document): array
+    {
+        $out = [];
+        $bg = $document !== null ? $this->firstChildByName($document, 'background') : null;
+        $color = $bg !== null ? $this->wAttr($bg, 'color') : null;
+        if (is_string($color) && preg_match('/^[0-9A-Fa-f]{6}$/', $color) === 1) {
+            $out['background'] = '#' . strtoupper($color);
+        }
+
+        $borders = $this->firstChildByName($sectPr, 'pgBorders');
+        if ($borders === null) {
+            return $out;
+        }
+        $edges = [];
+        foreach (self::BOX_EDGES as $edge) {
+            $el = $this->firstChildByName($borders, $edge);
+            if ($el === null) {
+                return $out;
+            }
+            $edges[$edge] = [
+                'val' => (string) $this->wAttr($el, 'val'),
+                'sz' => (int) $this->wAttr($el, 'sz'),
+                'space' => (int) $this->wAttr($el, 'space'),
+                'color' => strtoupper((string) $this->wAttr($el, 'color')),
+            ];
+        }
+        $style = $edges['top']['val'];
+        $first = $edges['top'];
+        foreach ($edges as $e) {
+            if ($e['val'] !== $first['val'] || $e['sz'] !== $first['sz'] || $e['color'] !== $first['color']) {
+                return $out;
+            }
+        }
+        if (! in_array($style, ['single', 'double', 'dashed', 'dotted'], true) || $first['sz'] < 1) {
+            return $out;
+        }
+
+        $width = ($style === 'double' ? 3 : 1) * $first['sz'] / 8;
+        if ($this->wAttr($borders, 'offsetFrom') === 'text') {
+            $pgMar = $this->firstChildByName($sectPr, 'pgMar');
+            $top = $pgMar !== null && is_numeric($this->wAttr($pgMar, 'top')) ? (float) $this->wAttr($pgMar, 'top') : 1440;
+            $inset = $top / 20 - $first['space'] - $width;
+        } else {
+            $inset = (float) $first['space'];
+        }
+        $num = static fn (float $v): float|int => round($v, 2) == (int) round($v, 2) ? (int) round($v, 2) : round($v, 2);
+
+        $border = [];
+        if ($style !== 'single') {
+            $border['style'] = $style;
+        }
+        if (abs($width - 0.5) > 1e-9) {
+            $border['width'] = $num($width);
+        }
+        if (preg_match('/^[0-9A-F]{6}$/', $first['color']) === 1 && $first['color'] !== '000000') {
+            $border['color'] = '#' . $first['color'];
+        }
+        if (abs($inset - Schema::PAGE_FRAME_INSET) > 1e-9 && $inset >= 0) {
+            $border['inset'] = $num($inset);
+        }
+        $out['border'] = $border === [] ? ['style' => 'single'] : $border;
+
+        return $out;
     }
 
     /**
