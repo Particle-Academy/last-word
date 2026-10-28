@@ -175,18 +175,31 @@ final class Agent
      *     the built-in set, because a `w:pStyle` naming an undefined style renders
      *     unstyled in Word rather than erroring.
      *
-     *     NOT taken from the template: `w:sectPr` (page size, margins, headers,
-     *     footers), `word/numbering.xml` (this document's lists reference numbering
-     *     ids defined here) and `word/settings.xml`. So list markers and page setup
-     *     are still ours; the typography, colours and theme are the template's.
+     *     NOT taken by default: the template's section (page size, margins,
+     *     headers, footers) -- see `templateParts`. Never taken: its body,
+     *     `word/numbering.xml` (this document's lists reference numbering ids
+     *     defined here) and `word/settings.xml` (beyond the one even/odd header
+     *     flag a carried even-page header needs).
      *
      *     An unusable template THROWS {@see TemplateException} rather than falling
      *     back -- a document that silently comes out in the wrong style is the
      *     failure this option exists to end. A host can validate a
      *     customer-supplied template at upload by calling this and catching it.
+     *   - `templateParts` (list): which parts of `template` to take, from
+     *     `styles` (with the theme), `headers`, `footers` and `page`. Default
+     *     `['styles']`, which is the behaviour before it existed. The letterhead
+     *     is `['styles', 'headers', 'footers', 'page']` (last-word#5): the
+     *     template's header and footer parts and their images, byte for byte,
+     *     on every page, and its page size and margins.
+     *
+     *     The document's own settings win: a `page.header` / `page.footer`
+     *     replaces the template's of that kind (all of its default / first /
+     *     even variants), and `page.size`, `page.orientation` and each of
+     *     `page.margins` override that one value. Ignored when `template` is
+     *     absent or empty; an unknown part name throws.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>}  $options
      *
      * @throws SchemaException
      * @throws TemplateException
@@ -203,7 +216,7 @@ final class Agent
      * SchemaException on validation errors. Same options as {@see toBytes()}.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>}  $options
      * @return array{path: string, bytes: int, blocks: int}
      *
      * @throws SchemaException
@@ -240,7 +253,7 @@ final class Agent
             );
         }
 
-        return DocxTemplate::open($template);
+        return DocxTemplate::open($template, $options['templateParts'] ?? DocxTemplate::DEFAULT_PARTS);
     }
 
     /**
@@ -380,6 +393,19 @@ final class Agent
             $lines[] = 'Block types: ' . implode(', ', $parts);
         }
         $lines[] = "Words: {$words}";
+
+        // What read() found in a header or footer and could not represent
+        // (last-word#5), so an agent knows a letterhead logo is there before it
+        // writes the document back without one.
+        $notes = [];
+        foreach (is_array($doc['unrepresented'] ?? null) ? $doc['unrepresented'] : [] as $note) {
+            if (is_array($note) && is_string($note['where'] ?? null) && is_string($note['kind'] ?? null) && is_int($note['count'] ?? null)) {
+                $notes[] = $note['where'] . ': ' . $note['count'] . ' ' . $note['kind'];
+            }
+        }
+        if ($notes !== []) {
+            $lines[] = 'Not represented (kept only by writing onto the original as a template): ' . implode(', ', $notes);
+        }
 
         return implode("\n", $lines);
     }

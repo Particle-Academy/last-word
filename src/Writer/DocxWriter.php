@@ -128,6 +128,9 @@ final class DocxWriter
      */
     private const CHART_DOCPR_BASE = 10000;
 
+    /** Added to every wp:docPr id: the largest a template's letterhead parts use (last-word#5). */
+    private int $drawingIdOffset = 0;
+
     /** Number of ordered-list numbering instances allocated (numIds 2..N+1). */
     private int $orderedListCount = 0;
 
@@ -147,8 +150,26 @@ final class DocxWriter
      */
     private array $bands = [];
 
-    /** Whether this document needs word/settings.xml (it has a page colour). */
+    /** Whether this document needs word/settings.xml (a page colour, or even/odd headers). */
     private bool $hasSettings = false;
+
+    /** Whether this document has a page colour (`w:displayBackgroundShape` in settings). */
+    private bool $hasBackground = false;
+
+    /**
+     * The kinds ('header' | 'footer') whose parts come from the template's
+     * section (last-word#5) rather than the document's own band. Empty without
+     * a section template, and then nothing about the package changes.
+     *
+     * @var list<string>
+     */
+    private array $templateKinds = [];
+
+    /** `w:titlePg` carried from the template, because a first-page part it carries needs it. */
+    private bool $titlePg = false;
+
+    /** `w:evenAndOddHeaders` carried from the template, because an even-page part it carries needs it. */
+    private bool $evenAndOdd = false;
 
     /** Word's largest page-border `w:space`, in points (ECMA-376 17.6.10). */
     private const PAGE_BORDER_MAX_SPACE = 31;
@@ -233,6 +254,10 @@ final class DocxWriter
         // from colliding with the first image in a templated document.
         $this->relCounter = $this->template !== null && $this->template->hasTheme() ? 3 : 2;
         $this->imageCounter = 0;
+        // Drawing ids are unique across the package, the template's letterhead
+        // parts included, so ours start above the largest it uses. Zero without
+        // a section template: the ids are what they always were.
+        $this->drawingIdOffset = $this->template?->section()?->maxDrawingId() ?? 0;
         $this->charts = [];
         $this->orderedListCount = 0;
 
@@ -281,8 +306,19 @@ final class DocxWriter
             foreach ($this->bands as $kind => $xml) {
                 $zip->addFromString('word/' . $kind . '1.xml', $xml);
             }
+            // The template's letterhead parts, byte for byte, each followed by
+            // its own regenerated relationships (last-word#5).
+            foreach ($this->templateParts() as $name => $part) {
+                $zip->addFromString($name, $part['xml']);
+                if ($part['rels'] !== null) {
+                    $zip->addFromString('word/_rels/' . substr($name, strlen('word/')) . '.rels', $part['rels']);
+                }
+            }
             $zip->addFromString('word/_rels/document.xml.rels', $this->buildDocumentRels());
             foreach ($this->mediaFiles as $archivePath => $bytes) {
+                $zip->addFromString($archivePath, $bytes);
+            }
+            foreach ($this->templateMedia() as $archivePath => $bytes) {
                 $zip->addFromString($archivePath, $bytes);
             }
             foreach ($this->charts as $n => $chart) {
@@ -428,6 +464,44 @@ final class DocxWriter
         return $out;
     }
 
+    // ─── Template section (letterhead) ───────────────────────────────────
+
+    /**
+     * The carried template header/footer parts, output path => part, in a
+     * fixed order (headers, then footers, each in reference order).
+     *
+     * @return array<string, array{xml: string, rels: ?string, rId: string}>
+     */
+    private function templateParts(): array
+    {
+        $section = $this->template?->section();
+        $out = [];
+        foreach ($this->templateKinds as $kind) {
+            $out += $section?->parts($kind) ?? [];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Media the carried parts reference, output path => bytes, sorted by path
+     * so the entry order is fixed. Media of a kind the document replaced with
+     * its own band is NOT included.
+     *
+     * @return array<string, string>
+     */
+    private function templateMedia(): array
+    {
+        $section = $this->template?->section();
+        $out = [];
+        foreach ($this->templateKinds as $kind) {
+            $out += $section?->media($kind) ?? [];
+        }
+        ksort($out, SORT_NATURAL);
+
+        return $out;
+    }
+
     // ─── Parts ───────────────────────────────────────────────────────────
 
     private function buildContentTypes(bool $hasTitle): string
@@ -440,6 +514,20 @@ final class DocxWriter
         $xml .= '<Default Extension="jpeg" ContentType="image/jpeg"/>';
         if ($this->charts !== []) {
             $xml .= '<Default Extension="xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>';
+        }
+        // A Default per extension the template's media brings that the
+        // writer's own png / jpeg do not cover -- an image with no declared
+        // type is a package Word reports as unreadable content.
+        $extensions = [];
+        foreach (array_keys($this->templateMedia()) as $path) {
+            $ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+            if ($ext !== 'png' && $ext !== 'jpeg') {
+                $extensions[$ext] = TemplateSection::MEDIA[$ext];
+            }
+        }
+        ksort($extensions);
+        foreach ($extensions as $ext => $type) {
+            $xml .= '<Default Extension="' . $ext . '" ContentType="' . $type . '"/>';
         }
         $xml .= '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>';
         $xml .= '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
@@ -454,6 +542,10 @@ final class DocxWriter
         }
         foreach (array_keys($this->bands) as $kind) {
             $xml .= '<Override PartName="/word/' . $kind . '1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
+        }
+        foreach (array_keys($this->templateParts()) as $name) {
+            $kind = str_starts_with($name, 'word/header') ? 'header' : 'footer';
+            $xml .= '<Override PartName="/' . $name . '" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
         }
         foreach (array_keys($this->charts) as $n) {
             $xml .= '<Override PartName="/word/charts/chart' . $n . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>';
@@ -510,6 +602,10 @@ final class DocxWriter
         foreach (array_keys($this->bands) as $kind) {
             $xml .= '<Relationship Id="rId' . ucfirst($kind) . '1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . $kind . '1.xml"/>';
         }
+        foreach ($this->templateParts() as $name => $part) {
+            $kind = str_starts_with($name, 'word/header') ? 'header' : 'footer';
+            $xml .= '<Relationship Id="' . $part['rId'] . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . substr($name, strlen('word/')) . '"/>';
+        }
         foreach ($this->rels as $rId => $rel) {
             if ($rel['type'] === 'hyperlink') {
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' . Xml::attr($rel['target']) . '" TargetMode="External"/>';
@@ -529,7 +625,8 @@ final class DocxWriter
      */
     private function buildDocumentXml(array $doc): string
     {
-        $page = self::pageGeometry($doc['page'] ?? null);
+        $section = $this->template?->section();
+        $page = self::pageGeometry($doc['page'] ?? null, $section?->page());
         // Table grids are laid out against the section's content width, so it
         // has to be known before any block renders. Carrying 9360 as a literal
         // — which all three engines did — silently gives a document with
@@ -542,14 +639,48 @@ final class DocxWriter
 
         // Header/footer references come FIRST in w:sectPr; the schema orders them
         // before w:pgSz, and Word drops a reference it finds after it.
+        //
+        // Precedence (last-word#5): a kind the document gives its own band is
+        // the document's, ALL of it -- the template's default, first and even
+        // parts of that kind are dropped. A kind it leaves unset comes from the
+        // template's section, when that was asked for and has one.
         $this->bands = [];
-        $references = '';
+        $this->templateKinds = [];
         $pageSpec = is_array($doc['page'] ?? null) ? $doc['page'] : [];
+        $own = [];
         foreach (['header', 'footer'] as $kind) {
             $band = self::band($pageSpec[$kind] ?? null);
             if ($band !== null) {
                 $this->bands[$kind] = $this->bandXml($kind, $band);
-                $references .= '<w:' . $kind . 'Reference w:type="default" r:id="rId' . ucfirst($kind) . '1"/>';
+                $own[] = $kind;
+            } elseif ($section !== null && $section->has($kind)) {
+                $this->templateKinds[] = $kind;
+            }
+        }
+
+        // A first-page / even-page switch is carried only when a carried part
+        // needs it; when it is on, the document's own band is referenced for
+        // those pages too, so it is still on every page.
+        $carried = [];
+        foreach ($this->templateKinds as $kind) {
+            foreach ($section?->references($kind) ?? [] as $reference) {
+                $carried[$reference['type']] = true;
+            }
+        }
+        $this->titlePg = $section !== null && $section->titlePg() && isset($carried['first']);
+        $this->evenAndOdd = $section !== null && $section->evenAndOdd() && isset($carried['even']);
+
+        $references = '';
+        foreach (['header', 'footer'] as $kind) {
+            if (in_array($kind, $own, true)) {
+                $types = array_merge(['default'], $this->titlePg ? ['first'] : [], $this->evenAndOdd ? ['even'] : []);
+                foreach ($types as $type) {
+                    $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="rId' . ucfirst($kind) . '1"/>';
+                }
+            } elseif (in_array($kind, $this->templateKinds, true)) {
+                foreach ($section?->references($kind) ?? [] as $reference) {
+                    $references .= '<w:' . $kind . 'Reference w:type="' . $reference['type'] . '" r:id="' . $reference['rId'] . '"/>';
+                }
             }
         }
 
@@ -559,16 +690,19 @@ final class DocxWriter
             . '<w:pgSz w:w="' . $page['w'] . '" w:h="' . $page['h'] . '"' . $orient . '/>'
             . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
             . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'
-            . ' w:header="720" w:footer="720" w:gutter="0"/>'
-            // CT_SectPr is a sequence: pgBorders follows pgMar (and paperSrc).
+            . ' w:header="' . $page['header'] . '" w:footer="' . $page['footer'] . '" w:gutter="' . $page['gutter'] . '"/>'
+            // CT_SectPr is a sequence: pgBorders follows pgMar (and paperSrc),
+            // and titlePg comes after both.
             . self::pageBordersXml($doc, $page)
+            . ($this->titlePg ? '<w:titlePg/>' : '')
             . '</w:sectPr>';
 
         // The page colour is the document's first child, before the body. Word
         // and LibreOffice show it only when settings carry
         // w:displayBackgroundShape, so a settings part is written with it.
         $background = self::hex($pageSpec['background'] ?? null);
-        $this->hasSettings = $background !== null;
+        $this->hasBackground = $background !== null;
+        $this->hasSettings = $this->hasBackground || $this->evenAndOdd;
 
         return Xml::declaration()
             . '<w:document'
@@ -623,9 +757,11 @@ final class DocxWriter
     /** The settings part, written only when something needs it (a page colour). */
     private function buildSettings(): string
     {
+        // CT_Settings is a sequence: displayBackgroundShape precedes evenAndOddHeaders.
         return Xml::declaration()
             . '<w:settings xmlns:w="' . self::NS_W . '">'
-            . '<w:displayBackgroundShape/>'
+            . ($this->hasBackground ? '<w:displayBackgroundShape/>' : '')
+            . ($this->evenAndOdd ? '<w:evenAndOddHeaders/>' : '')
             . '</w:settings>';
     }
 
@@ -1026,7 +1162,7 @@ final class DocxWriter
             . '<wp:inline distT="0" distB="0" distL="0" distR="0">'
             . '<wp:extent cx="' . $cx . '" cy="' . $cy . '"/>'
             . '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-            . '<wp:docPr id="' . $n . '" name="' . $name . '"' . $descr . '/>'
+            . '<wp:docPr id="' . ($this->drawingIdOffset + $n) . '" name="' . $name . '"' . $descr . '/>'
             . '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
             . '<a:graphic><a:graphicData uri="' . self::NS_PIC . '">'
             . '<pic:pic>'
@@ -1074,7 +1210,7 @@ final class DocxWriter
             . '<wp:inline distT="0" distB="0" distL="0" distR="0">'
             . '<wp:extent cx="' . $cx . '" cy="' . $cy . '"/>'
             . '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-            . '<wp:docPr id="' . (self::CHART_DOCPR_BASE + $n) . '" name="Chart ' . $n . '"' . $descr . '/>'
+            . '<wp:docPr id="' . ($this->drawingIdOffset + self::CHART_DOCPR_BASE + $n) . '" name="Chart ' . $n . '"' . $descr . '/>'
             . '<wp:cNvGraphicFramePr/>'
             . '<a:graphic><a:graphicData uri="' . self::NS_C . '">'
             . '<c:chart xmlns:c="' . self::NS_C . '" r:id="' . $rId . '"/>'
@@ -1385,16 +1521,40 @@ final class DocxWriter
     /**
      * Page size and margins in twips.
      *
+     * `$base` is a template's section geometry (last-word#5). The document wins
+     * field by field: its `size` over the template's page shape, its
+     * `orientation` over the template's, each of its `margins` over that one
+     * template margin. The header / footer distances and gutter, which the
+     * model has no field for, are the template's. Without a base every value
+     * is what it always was.
+     *
      * @param  mixed  $page
-     * @return array{w: int, h: int, top: int, right: int, bottom: int, left: int, orientation: string}
+     * @param  array<string, int|bool|null>|null  $base
+     * @return array{w: int, h: int, top: int, right: int, bottom: int, left: int, orientation: string, header: int, footer: int, gutter: int}
      */
-    private static function pageGeometry(mixed $page): array
+    private static function pageGeometry(mixed $page, ?array $base = null): array
     {
         $page = is_array($page) ? $page : [];
-        $size = is_string($page['size'] ?? null) ? strtolower($page['size']) : 'letter';
-        [$w, $h] = self::PAGE_SIZES[$size] ?? self::PAGE_SIZES['letter'];
+        $base ??= [];
+        $baseW = is_int($base['w'] ?? null) ? $base['w'] : null;
+        $baseH = is_int($base['h'] ?? null) ? $base['h'] : null;
 
-        $orientation = ($page['orientation'] ?? null) === 'landscape' ? 'landscape' : 'portrait';
+        if (is_string($page['size'] ?? null) || $baseW === null || $baseH === null) {
+            $size = is_string($page['size'] ?? null) ? strtolower($page['size']) : 'letter';
+            [$w, $h] = self::PAGE_SIZES[$size] ?? self::PAGE_SIZES['letter'];
+            $baseLandscape = false;
+        } else {
+            // The template's own shape, held portrait so orientation applies
+            // to it the same way it applies to a named size.
+            [$w, $h] = [min($baseW, $baseH), max($baseW, $baseH)];
+            $baseLandscape = ($base['landscape'] ?? false) === true || $baseW > $baseH;
+        }
+
+        $orientation = match ($page['orientation'] ?? null) {
+            'landscape' => 'landscape',
+            'portrait' => 'portrait',
+            default => $baseLandscape ? 'landscape' : 'portrait',
+        };
         if ($orientation === 'landscape') {
             // Swapping the axes without w:orient gives a page that is the
             // right shape and prints portrait. Both are required.
@@ -1402,7 +1562,9 @@ final class DocxWriter
         }
 
         $margins = is_array($page['margins'] ?? null) ? $page['margins'] : [];
-        $side = static fn (string $k): int => self::twips($margins[$k] ?? null) ?? 1440;
+        $side = static fn (string $k): int => self::twips($margins[$k] ?? null)
+            ?? (is_int($base[$k] ?? null) ? $base[$k] : 1440);
+        $distance = static fn (string $k, int $default): int => is_int($base[$k] ?? null) ? $base[$k] : $default;
 
         return [
             'w' => $w,
@@ -1412,6 +1574,9 @@ final class DocxWriter
             'bottom' => $side('bottom'),
             'left' => $side('left'),
             'orientation' => $orientation,
+            'header' => $distance('header', 720),
+            'footer' => $distance('footer', 720),
+            'gutter' => $distance('gutter', 0),
         ];
     }
 
@@ -1558,7 +1723,7 @@ final class DocxWriter
     {
         $definitions = $this->styleDefinitions($doc);
 
-        if ($this->template !== null) {
+        if ($this->template !== null && $this->template->hasStyles()) {
             $missing = '';
             foreach ($definitions as $styleId => $xml) {
                 if (! $this->template->defines($styleId)) {

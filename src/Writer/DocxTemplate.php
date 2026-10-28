@@ -37,10 +37,11 @@ use LastWord\Reader\FileInput;
  *     repoint every list at an id that means something else there, or nothing.
  *     Lists therefore take their INDENTS AND MARKERS from us and their
  *     typography from the template's `ListParagraph`.
- *   - **`w:sectPr`** — page size, margins, headers and footers. It lives in
- *     `document.xml`, which the writer owns, so it is a larger change than
- *     binding by style name. The reporter asked for style binding first and
- *     called headers, footers and a cover page secondary.
+ *   - **`w:sectPr`** — page size, margins, headers and footers — unless asked
+ *     for. `document.xml` is still the writer's; the section is read OUT of the
+ *     template's and re-emitted, and its header/footer parts are copied, only
+ *     when `templateParts` names `headers`, `footers` or `page` (last-word#5,
+ *     {@see TemplateSection}). The template's body is never taken.
  *   - **`word/settings.xml`.** Mostly `w:rsid` revision junk, and carrying it
  *     would make output depend on a template's editing history.
  *
@@ -52,11 +53,18 @@ use LastWord\Reader\FileInput;
  */
 final class DocxTemplate
 {
+    /** What `templateParts` may name. `styles` brings the theme with it. */
+    public const PARTS = ['styles', 'headers', 'footers', 'page'];
+
+    /** The parts taken when none are named: the look, exactly as before last-word#5. */
+    public const DEFAULT_PARTS = ['styles'];
+
     private function __construct(
-        private readonly string $styles,
+        private readonly ?string $styles,
         private readonly ?string $theme,
         /** @var list<string> */
         private readonly array $styleIds,
+        private readonly ?TemplateSection $section = null,
     ) {}
 
     /**
@@ -67,28 +75,85 @@ final class DocxTemplate
      * complaint this feature exists to answer — a document that silently comes
      * out in the wrong style, with nothing said.
      *
+     * `$parts` is a subset of {@see PARTS}: `styles` (with the theme),
+     * `headers`, `footers` and `page` -- the last three being the template's
+     * SECTION, its letterhead (last-word#5, see {@see TemplateSection}). The
+     * template's body is never taken, whichever parts are named.
+     *
+     * @param  list<string>  $parts  untyped in the signature so a caller's wrong
+     *                               shape is a TemplateException, not a TypeError
+     *
      * @throws TemplateException
      */
-    public static function open(string $pathOrBytes): self
+    public static function open(string $pathOrBytes, mixed $parts = self::DEFAULT_PARTS): self
     {
+        $parts = self::parts($parts);
         try {
             $zip = SourceArchive::open(self::bytesOf($pathOrBytes));
         } catch (ArchiveRefused $error) {
             throw new TemplateException('The template is not a readable .dotx/.docx package within the archive limits.', 0, $error);
         }
+
+        $kinds = array_values(array_filter(
+            TemplateSection::KINDS,
+            static fn (string $kind): bool => in_array($kind . 's', $parts, true),
+        ));
+        $section = $kinds !== [] || in_array('page', $parts, true)
+            ? TemplateSection::from($zip, $kinds, in_array('page', $parts, true))
+            : null;
+
+        if (! in_array('styles', $parts, true)) {
+            return new self(null, null, [], $section);
+        }
+
         $styles = $zip->read('word/styles.xml');
         if ($styles === null || $styles === '') {
             throw new TemplateException('The template has no word/styles.xml, so it defines no styles to bind to.');
         }
         $theme = $zip->read('word/theme/theme1.xml');
 
-        return new self($styles, $theme === null || $theme === '' ? null : $theme, self::idsIn($styles));
+        return new self($styles, $theme === null || $theme === '' ? null : $theme, self::idsIn($styles), $section);
+    }
+
+    /**
+     * `templateParts`, checked. A name not on the list THROWS: a typo such as
+     * `header` would otherwise quietly produce a document without the
+     * letterhead, which is the failure this option exists to end.
+     *
+     * @return list<string>
+     *
+     * @throws TemplateException
+     */
+    private static function parts(mixed $parts): array
+    {
+        if (! is_array($parts) || ! array_is_list($parts) || $parts === []) {
+            throw new TemplateException('templateParts must be a non-empty list of: ' . implode(', ', self::PARTS) . '.');
+        }
+        foreach ($parts as $part) {
+            if (! is_string($part) || ! in_array($part, self::PARTS, true)) {
+                throw new TemplateException('templateParts may name only: ' . implode(', ', self::PARTS) . '.');
+            }
+        }
+
+        return array_values(array_unique($parts));
+    }
+
+    /** Whether the template's styles (and theme) were taken. */
+    public function hasStyles(): bool
+    {
+        return $this->styles !== null;
+    }
+
+    /** The template's section (letterhead), or null when no section part was asked for. */
+    public function section(): ?TemplateSection
+    {
+        return $this->section;
     }
 
     /** The template's `word/styles.xml`, verbatim. */
     public function styles(): string
     {
-        return $this->styles;
+        return (string) $this->styles;
     }
 
     /** The template's `word/theme/theme1.xml`, or null when it ships none. */
@@ -120,18 +185,19 @@ final class DocxTemplate
      */
     public function stylesWith(string $styleXml): string
     {
+        $styles = (string) $this->styles;
         if ($styleXml === '') {
-            return $this->styles;
+            return $styles;
         }
 
-        $close = strrpos($this->styles, '</w:styles>');
+        $close = strrpos($styles, '</w:styles>');
         if ($close === false) {
             throw new TemplateException(
                 'The template\'s word/styles.xml has no closing </w:styles> element.',
             );
         }
 
-        return substr($this->styles, 0, $close) . $styleXml . substr($this->styles, $close);
+        return substr($styles, 0, $close) . $styleXml . substr($styles, $close);
     }
 
     /**

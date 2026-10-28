@@ -236,16 +236,77 @@ colour or font resolves against whatever theme is in the package, so taking
 styles alone would give you the template's structure in the default's colours — a
 wrong answer that looks deliberate.
 
-**What the template does NOT bring, yet:**
+**What the template does NOT bring:**
 
 | | |
 |---|---|
-| `w:sectPr` | page size, margins, headers, footers — these live in `document.xml`, which the writer owns |
+| its body | a letterhead often arrives as a `.docx` with a sample letter in it; none of its text or images is taken |
 | `word/numbering.xml` | your lists reference numbering ids defined by this package; a template's would repoint them |
-| `word/settings.xml` | mostly `w:rsid` revision history, which would make output depend on a template's editing past |
+| `word/settings.xml` | mostly `w:rsid` revision history, which would make output depend on a template's editing past (only `w:evenAndOddHeaders` is carried, when a carried even-page header needs it) |
 
-So list markers and page setup are still ours; the typography, colours and theme
-are the template's. A cover page is a `sectPr`-and-headers job and is not here.
+So list markers are still ours; the typography, colours and theme are the
+template's. The page setup is ours too, unless you ask for the letterhead.
+
+### Keeping a letterhead: `templateParts`
+
+A customer's letterhead — a logo and address in the page header, a footer line,
+its own page size and margins — is the template's **section**. Name the parts to
+take:
+
+```php
+Agent::toBytes($doc, [
+    'template' => $letterheadDocxOrDotx,
+    'templateParts' => ['styles', 'headers', 'footers', 'page'],
+]);
+```
+
+| part | takes |
+|---|---|
+| `styles` | `word/styles.xml` + the theme, as above. **The default** when `templateParts` is absent, so `template` alone does exactly what it always did |
+| `headers` | every header part the template's section references (default, first-page, even-page), byte for byte, with its images |
+| `footers` | the same for footers |
+| `page` | page size and orientation, the four margins, header/footer distances and gutter |
+
+The header and footer XML and their images are copied **byte for byte**; what is
+renamed is everything that could collide (parts become `header{n}.xml` /
+`footer{n}.xml`, images `media/template{n}.{ext}`, document relationship ids
+`rIdTplHeader{n}`), and drawing ids in your body start above the largest the
+letterhead uses. A first-page header carries `w:titlePg` with it; an even-page
+one carries `w:evenAndOddHeaders`.
+
+**Your document's own settings win, field by field.** A `page.header` replaces
+the template's headers (all of them, first and even included); `page.footer`
+the same for footers; `page.size`, `page.orientation` and each of
+`page.margins` override that one value. Anything you leave unset is the
+template's. When the template has a first-page or even-page part and you set
+your own band for the other kind, your band is referenced for those pages too,
+so it is still on every page.
+
+To write a read document back onto its own original, drop `page.header` and
+`page.footer` first: `read()` fills them with the bands' text, and left in they
+are your own bands and win.
+
+**A letterhead is a customer upload, so it is read as hostile.** Anything that
+cannot be carried safely is refused with `TemplateException` rather than
+dropped (dropping a relationship would leave the part pointing at nothing, which
+Word reports as an unreadable file): a DOCTYPE in any part read; a header/footer
+part over 2 MiB, an image over 16 MiB or 32 MiB in all; any external link that
+is not an http, https or mailto hyperlink — **an externally linked image is
+refused, never fetched and never copied**, because Word would fetch it every time
+the document opens; an embedded object that is not an image; an image that is
+not PNG, JPEG, GIF, BMP, TIFF, EMF or WMF by both extension and leading bytes (so
+SVG is not carried); a field that pulls content in (INCLUDEPICTURE, INCLUDETEXT,
+LINK, DDE, DDEAUTO, IMPORT); a VML `src` / `href` URL. Nothing is fetched, ever.
+A section that is not asked for is not read, so it cannot fail a `styles`-only
+render.
+
+Only the template's body-level (last) section is taken. Numbering inside a
+header (a list in the letterhead) resolves against this package's numbering.
+
+`read()` reports what a header or footer holds that a band cannot: a logo comes
+back as `"unrepresented": [{"where": "/page/header", "kind": "image", "count":
+1}]` (and `nested-block` for paragraphs after the first, or tables), and
+`describe()` says so. Locations and counts only, never text.
 
 **An unusable template throws `TemplateException` rather than falling back.** A
 document that silently comes out in the wrong style is the failure this option

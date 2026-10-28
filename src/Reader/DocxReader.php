@@ -106,6 +106,15 @@ final class DocxReader
 
     private string $sourceKind = OfficeTemplate::DOCUMENT;
 
+    /**
+     * What a header or footer holds that the model's band cannot (last-word#5):
+     * `{where, kind, count}`, `kind` from the exchange report's list (`image`,
+     * `nested-block`). Reported, so a letterhead's logo is not lost in silence.
+     *
+     * @var list<array{where: string, kind: string, count: int}>
+     */
+    private array $unrepresented = [];
+
     public function __construct(
         private ?string $tempDir = null,
     ) {
@@ -119,6 +128,7 @@ final class DocxReader
     public function read(string $bytes): array
     {
         $documentXml = $this->openArchive($bytes);
+        $this->unrepresented = [];
 
         $dom = new DOMDocument();
         $prev = libxml_use_internal_errors(true);
@@ -157,6 +167,10 @@ final class DocxReader
         }
 
         $doc['blocks'] = $blocks;
+        // Never document text: locations and counts only, like the exchange report.
+        if ($this->unrepresented !== []) {
+            $doc['unrepresented'] = $this->unrepresented;
+        }
         // A .dotx reads exactly like its .docx twin, and says so.
         if ($this->sourceKind === OfficeTemplate::TEMPLATE) {
             $doc['sourceKind'] = OfficeTemplate::TEMPLATE;
@@ -346,6 +360,7 @@ final class DocxReader
         if (!$ok || $dom->documentElement === null) {
             return null;
         }
+        $this->noteUnrepresented($dom->documentElement, $kind);
         $p = $this->firstChildByName($dom->documentElement, 'p');
         if ($p === null) {
             return null;
@@ -422,6 +437,49 @@ final class DocxReader
         }
 
         return $band;
+    }
+
+    /**
+     * Record what the band model cannot hold from this header/footer part: its
+     * pictures (`w:drawing`, VML `w:pict`, `w:object`) and every block after
+     * the first paragraph that carries text or is a table. Only the first
+     * paragraph's text is read into the band; without this, a letterhead's
+     * logo and address lines vanish with nothing said.
+     */
+    private function noteUnrepresented(DOMElement $root, string $kind): void
+    {
+        $images = 0;
+        foreach ($root->getElementsByTagName('*') as $el) {
+            if (in_array($el->localName, ['drawing', 'pict', 'object'], true)) {
+                // mc:AlternateContent's fallback is the same picture again.
+                for ($up = $el->parentNode; $up instanceof DOMElement; $up = $up->parentNode) {
+                    if ($up->localName === 'Fallback') {
+                        continue 2;
+                    }
+                }
+                $images++;
+            }
+        }
+        $blocks = 0;
+        $first = true;
+        foreach ($root->childNodes as $node) {
+            if (! $node instanceof DOMElement) {
+                continue;
+            }
+            if ($node->localName === 'p') {
+                if (! $first && trim($node->textContent) !== '') {
+                    $blocks++;
+                }
+                $first = false;
+            } elseif ($node->localName === 'tbl' || $node->localName === 'sdt') {
+                $blocks++;
+            }
+        }
+        foreach (['image' => $images, 'nested-block' => $blocks] as $what => $count) {
+            if ($count > 0) {
+                $this->unrepresented[] = ['where' => '/page/' . $kind, 'kind' => $what, 'count' => $count];
+            }
+        }
     }
 
     /** A field instruction as a band token: PAGE → {page}, NUMPAGES → {pages}, else ''. */

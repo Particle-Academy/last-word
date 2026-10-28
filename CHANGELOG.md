@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Keep a customer's letterhead: `templateParts`** (last-word#5). `toBytes` / `write` take
+  `['template' => $docxOrDotx, 'templateParts' => ['styles', 'headers', 'footers', 'page']]`:
+  the template's header and footer parts (default, first-page and even-page) and their
+  images are copied byte for byte, on every page, and its page size, orientation, margins
+  and header/footer distances are used. The template's BODY is never taken, so a letterhead
+  that arrives as a `.docx` with a sample letter in it is fine. **Nothing to do to keep
+  today's behaviour:** without `templateParts` (or with `['styles']`) the output is
+  byte-identical to 0.12.0.
+  - Precedence: the document wins field by field. `page.header` / `page.footer` replace
+    the template's of that kind, all variants; `page.size`, `page.orientation` and each
+    margin override that one value. Write-back onto the original: drop the `page.header` /
+    `page.footer` that `read()` filled in, or they win.
+  - Hostile input is refused with `TemplateException`, never degraded: DOCTYPEs, oversized
+    parts or images, external links other than http/https/mailto hyperlinks (an externally
+    linked image is refused, never fetched), embedded objects, images that are not
+    PNG/JPEG/GIF/BMP/TIFF/EMF/WMF by extension AND leading bytes (no SVG), fields that pull
+    content in (INCLUDEPICTURE, INCLUDETEXT, LINK, DDE, DDEAUTO, IMPORT), VML URL
+    attributes, undeclared relationship ids. An unknown `templateParts` name throws.
+- **`read()` reports header and footer content a band cannot hold**, as
+  `unrepresented: [{where, kind, count}]` (`image`, `nested-block`), and `describe()`
+  prints it. A letterhead logo was dropped silently before. Present only when there is
+  something to report.
+
 ## [0.12.0] - 2026-10-27
 
 Document exchange, step 4 of the approved plan (`.ai/plans/document-exchange-and-export.md`),

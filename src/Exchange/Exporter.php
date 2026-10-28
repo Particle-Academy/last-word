@@ -337,7 +337,7 @@ final class Exporter
             $blocks = is_array($doc['blocks'] ?? null) ? array_values($doc['blocks']) : [];
             $doc['blocks'] = array_values(array_intersect_key($blocks, array_flip(ToPortable::select($blocks, $selector)['indexes'] ?? [])));
         }
-        unset($doc['sourceKind']); // a reader's note on a template, not part of the model
+        unset($doc['sourceKind'], $doc['unrepresented']); // reader's notes, not part of the model
         $r = Agent::validateAndRepair($doc);
         if (! $r['ok']) {
             return ['refused' => 'schema_invalid'];
