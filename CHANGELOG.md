@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-28
+
 ### Added
 
 - **Keep a customer's letterhead: `templateParts`** (last-word#5). `toBytes` / `write` take
