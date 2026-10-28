@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-27
+
 Document exchange, step 4 of the approved plan (`.ai/plans/document-exchange-and-export.md`),
 to fancy-conformance 0.37.0's `suites/exchange/SPEC.md`.
 
