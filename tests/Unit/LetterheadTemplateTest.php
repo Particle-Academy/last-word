@@ -324,6 +324,17 @@ it('refuses a hostile letterhead rather than carrying it', function (array $vari
     'oversized header part' => [['oversizedHeader' => true]],
 ]);
 
+it('refuses a DOCTYPE in the styles or theme even on the default styles-only path', function (array $variant): void {
+    // The styles path predates templateParts and copied these parts unchecked.
+    // A Word package never legitimately carries a DOCTYPE; an internal subset is
+    // the entry point for entity expansion, so it is refused like every other part.
+    expect(fn () => Agent::toBytes(lhDoc(), ['template' => Letterhead::bytes($variant)]))
+        ->toThrow(TemplateException::class);
+})->with([
+    'DOCTYPE in styles.xml' => [['doctypeStyles' => true]],
+    'DOCTYPE in theme1.xml' => [['doctypeTheme' => true]],
+]);
+
 it('refuses an unknown templateParts name rather than quietly dropping the letterhead', function (mixed $parts): void {
     expect(fn () => Agent::toBytes(lhDoc(), ['template' => Letterhead::bytes(), 'templateParts' => $parts]))
         ->toThrow(TemplateException::class);

@@ -27,6 +27,16 @@
   prints it. A letterhead logo was dropped silently before. Present only when there is
   something to report.
 
+### Security
+
+- **The `template` option now refuses a DOCTYPE in the template's `styles.xml` or
+  theme.** These parts are copied into the output unchanged, and until now they
+  were only scanned for style ids. A Word package never legitimately carries a
+  DOCTYPE, and an internal subset is the entry point for entity expansion, so
+  it is refused like every other template part. **Consumer action: none**,
+  unless you pass hand-made templates that declare a DOCTYPE, which now throw
+  `TemplateException`.
+
 ## [0.12.0] - 2026-10-27
 
 Document exchange, step 4 of the approved plan (`.ai/plans/document-exchange-and-export.md`),

@@ -59,6 +59,7 @@ final class GeneratedLetterhead
      * @param  array{
      *     firstPage?: bool, evenPage?: bool, gifLogo?: bool,
      *     doctypeHeader?: bool, doctypeDocument?: bool, doctypeRels?: bool,
+     *     doctypeStyles?: bool, doctypeTheme?: bool,
      *     externalImage?: bool, svgLogo?: bool, pngNamedSvg?: bool,
      *     includePicture?: bool, oleObject?: bool, vmlSrc?: bool, undeclaredRel?: bool,
      *     template?: bool, oversizedHeader?: bool,
@@ -187,6 +188,14 @@ final class GeneratedLetterhead
         $parts['word/_rels/footer1.xml.rels'] = self::rels([['rId1', 'hyperlink', 'https://example.com/', true]]);
 
         $parts['word/styles.xml'] = GeneratedTemplate::styles();
+        if ($o['doctypeStyles'] ?? false) {
+            $parts['word/styles.xml'] = str_replace('?>', '?><!DOCTYPE w:styles [<!ENTITY e SYSTEM "file:///etc/passwd">]>', $parts['word/styles.xml']);
+        }
+        if ($o['doctypeTheme'] ?? false) {
+            $parts['word/theme/theme1.xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<!DOCTYPE a:theme [<!ENTITY e "e">]>'
+                . '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T"/>';
+        }
         $parts['word/_rels/document.xml.rels'] = self::rels($docRels);
         $parts['_rels/.rels'] = self::rels([['rId1', 'officeDocument', 'word/document.xml', false]]);
 

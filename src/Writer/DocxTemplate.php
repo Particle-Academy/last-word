@@ -112,6 +112,15 @@ final class DocxTemplate
         }
         $theme = $zip->read('word/theme/theme1.xml');
 
+        // These parts are copied into the output unchanged, so they get the same
+        // refusal as the section: a Word package never legitimately carries a
+        // DOCTYPE, and an internal subset is the entry point for entity expansion.
+        foreach (['styles' => $styles, 'theme' => $theme] as $what => $xml) {
+            if ($xml !== null && preg_match('/<!DOCTYPE/i', $xml) === 1) {
+                throw new TemplateException("The template's {$what} part declares a DOCTYPE, which is refused.");
+            }
+        }
+
         return new self($styles, $theme === null || $theme === '' ? null : $theme, self::idsIn($styles), $section);
     }
 
