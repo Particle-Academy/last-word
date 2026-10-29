@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-29
+
 ### Added
 
 - **Headers and footers that hold blocks, so a read letterhead keeps its logo**
