@@ -102,6 +102,9 @@ final class DocxWriter
 
     public const SDT_TAG_QUOTE = 'lastword:quote';
 
+    /** Wraps a `{blocks}` header or footer's content (last-word#6). */
+    public const SDT_TAG_BAND = 'lastword:band';
+
     /** Relationships beyond styles(rId1) + numbering(rId2), keyed by rId. */
     private array $rels = [];
 
@@ -149,6 +152,21 @@ final class DocxWriter
      * @var array<string, string>
      */
     private array $bands = [];
+
+    /**
+     * A `{blocks}` band's OWN relationships (last-word#6), kind => rId => rel,
+     * written as `word/_rels/{kind}1.xml.rels`. Scoped to that part, so its ids
+     * (rId1, rId2 ...) cannot collide with the document's or a template part's.
+     *
+     * @var array<string, array<string, array{type: string, target: string}>>
+     */
+    private array $bandRels = [];
+
+    /**
+     * True while a `{blocks}` band renders: `{page}` / `{pages}` in run text are
+     * live fields there, and chart / pageBreak blocks render as nothing.
+     */
+    private bool $inBand = false;
 
     /** Whether this document needs word/settings.xml (a page colour, or even/odd headers). */
     private bool $hasSettings = false;
@@ -305,6 +323,9 @@ final class DocxWriter
             }
             foreach ($this->bands as $kind => $xml) {
                 $zip->addFromString('word/' . $kind . '1.xml', $xml);
+                if (($this->bandRels[$kind] ?? []) !== []) {
+                    $zip->addFromString('word/_rels/' . $kind . '1.xml.rels', $this->relsXml($this->bandRels[$kind]));
+                }
             }
             // The template's letterhead parts, byte for byte, each followed by
             // its own regenerated relationships (last-word#5).
@@ -432,6 +453,56 @@ final class DocxWriter
             . '<w:r>' . $rPr . '<w:tab/></w:r>'
             . self::bandRuns($band['right'], $rPr)
             . '</w:p>'
+            . '</' . $tag . '>';
+    }
+
+    /**
+     * A `{blocks}` header or footer (last-word#6), through the body's own block
+     * renderer, as a complete part.
+     *
+     * Rendered with the part's OWN relationships swapped in, so an image or a
+     * link registers in `word/_rels/{kind}1.xml.rels` and its rId is scoped to
+     * this part. Media share the document's counter and so its `image{n}` names,
+     * and drawing ids share {@see $drawingIdOffset}: nothing in the package can
+     * repeat a media name or a `wp:docPr` id, whether it came from the body, the
+     * other band, or a template's letterhead (`template{n}`, below the offset).
+     *
+     * @param  list<mixed>  $blocks
+     */
+    private function blocksBandXml(string $kind, array $blocks): string
+    {
+        [$rels, $counter] = [$this->rels, $this->relCounter];
+        $this->rels = [];
+        $this->relCounter = 0;
+        $this->inBand = true;
+        try {
+            $content = $this->renderBlocks($blocks);
+        } finally {
+            $this->bandRels[$kind] = $this->rels;
+            $this->inBand = false;
+            [$this->rels, $this->relCounter] = [$rels, $counter];
+        }
+        // A block container must end in a paragraph, as a table cell must.
+        if (!str_ends_with($content, '</w:p>') && !str_ends_with($content, '<w:p/>')) {
+            $content .= '<w:p/>';
+        }
+        $tag = $kind === 'header' ? 'w:hdr' : 'w:ftr';
+
+        // Wrapped in a content control tagged `lastword:band` -- the slot code
+        // and quote blocks already use, and the wrapper Word itself puts round
+        // its page-number footers -- so a blocks band reads back as blocks even
+        // when it is one plain paragraph, which would otherwise read as the
+        // one-line band.
+        return Xml::declaration()
+            . '<' . $tag
+            . ' xmlns:w="' . self::NS_W . '"'
+            . ' xmlns:r="' . self::NS_R . '"'
+            . ' xmlns:wp="' . self::NS_WP . '"'
+            . ' xmlns:a="' . self::NS_A . '"'
+            . ' xmlns:pic="' . self::NS_PIC . '">'
+            . '<w:sdt><w:sdtPr><w:tag w:val="' . self::SDT_TAG_BAND . '"/></w:sdtPr><w:sdtContent>'
+            . $content
+            . '</w:sdtContent></w:sdt>'
             . '</' . $tag . '>';
     }
 
@@ -606,7 +677,34 @@ final class DocxWriter
             $kind = str_starts_with($name, 'word/header') ? 'header' : 'footer';
             $xml .= '<Relationship Id="' . $part['rId'] . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . substr($name, strlen('word/')) . '"/>';
         }
-        foreach ($this->rels as $rId => $rel) {
+        $xml .= self::relationships($this->rels);
+        $xml .= '</Relationships>';
+
+        return $xml;
+    }
+
+    /**
+     * A part's own relationships file -- a `{blocks}` band's (last-word#6).
+     *
+     * @param  array<string, array{type: string, target: string}>  $rels
+     */
+    private function relsXml(array $rels): string
+    {
+        return Xml::declaration()
+            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            . self::relationships($rels)
+            . '</Relationships>';
+    }
+
+    /**
+     * Hyperlink, chart and image relationships, in the order they were made.
+     *
+     * @param  array<string, array{type: string, target: string}>  $rels
+     */
+    private static function relationships(array $rels): string
+    {
+        $xml = '';
+        foreach ($rels as $rId => $rel) {
             if ($rel['type'] === 'hyperlink') {
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' . Xml::attr($rel['target']) . '" TargetMode="External"/>';
             } elseif ($rel['type'] === 'chart') {
@@ -615,7 +713,6 @@ final class DocxWriter
                 $xml .= '<Relationship Id="' . $rId . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="' . Xml::attr($rel['target']) . '"/>';
             }
         }
-        $xml .= '</Relationships>';
 
         return $xml;
     }
@@ -645,11 +742,26 @@ final class DocxWriter
         // parts of that kind are dropped. A kind it leaves unset comes from the
         // template's section, when that was asked for and has one.
         $this->bands = [];
+        $this->bandRels = [];
         $this->templateKinds = [];
         $pageSpec = is_array($doc['page'] ?? null) ? $doc['page'] : [];
         $own = [];
         foreach (['header', 'footer'] as $kind) {
-            $band = self::band($pageSpec[$kind] ?? null);
+            $spec = $pageSpec[$kind] ?? null;
+            if (is_array($spec) && array_key_exists('blocks', $spec)) {
+                // last-word#6: the blocks form. An empty list asks for nothing,
+                // exactly as an empty band does.
+                $blocks = is_array($spec['blocks']) ? array_values($spec['blocks']) : [];
+                if ($blocks !== []) {
+                    $this->bands[$kind] = $this->blocksBandXml($kind, $blocks);
+                    $own[] = $kind;
+                } elseif ($section !== null && $section->has($kind)) {
+                    $this->templateKinds[] = $kind;
+                }
+
+                continue;
+            }
+            $band = self::band($spec);
             if ($band !== null) {
                 $this->bands[$kind] = $this->bandXml($kind, $band);
                 $own[] = $kind;
@@ -781,6 +893,9 @@ final class DocxWriter
                 continue;
             }
             $type = $block['type'] ?? null;
+            if ($this->inBand && in_array($type, Schema::BAND_REFUSED_TYPES, true)) {
+                continue; // validation refuses these in a band; unvalidated, they are nothing
+            }
             // OOXML merges adjacent tables — pad with an empty paragraph
             // (both readers recognise and drop content-free paragraphs).
             if ($type === 'table' && $prevWasTable) {
@@ -1397,6 +1512,33 @@ final class DocxWriter
         $rPr .= self::shadingXml($run['highlight'] ?? null);
 
         $text = (string) ($run['text'] ?? '');
+        $open = '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '');
+
+        // In a `{blocks}` band (last-word#6) `{page}` and `{pages}` are live
+        // fields, as in a band's slots: complex fields, every piece in this
+        // run's formatting. In the body they are literal text, as always.
+        if ($this->inBand && preg_match('/\{pages?\}/', $text) === 1) {
+            $out = '';
+            foreach (preg_split('/(\{page\}|\{pages\})/', $text, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [] as $piece) {
+                $out .= match ($piece) {
+                    '{page}', '{pages}' => $open . '<w:fldChar w:fldCharType="begin"/></w:r>'
+                        . $open . '<w:instrText xml:space="preserve"> ' . ($piece === '{page}' ? 'PAGE' : 'NUMPAGES') . ' </w:instrText></w:r>'
+                        . $open . '<w:fldChar w:fldCharType="separate"/></w:r>'
+                        . $open . '<w:t>1</w:t></w:r>'
+                        . $open . '<w:fldChar w:fldCharType="end"/></w:r>',
+                    default => $open . self::runBody($piece) . '</w:r>',
+                };
+            }
+
+            return $out;
+        }
+
+        return $open . self::runBody($text) . '</w:r>';
+    }
+
+    /** Run text as w:t pieces, a line break as w:br. */
+    private static function runBody(string $text): string
+    {
         $parts = explode("\n", str_replace("\r\n", "\n", $text));
         $body = '';
         foreach ($parts as $i => $part) {
@@ -1411,7 +1553,7 @@ final class DocxWriter
             $body = '<w:t xml:space="preserve"></w:t>';
         }
 
-        return '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '') . $body . '</w:r>';
+        return $body;
     }
 
     // ─── Units and property fragments ────────────────────────────────────

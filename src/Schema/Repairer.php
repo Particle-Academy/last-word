@@ -51,9 +51,53 @@ final class Repairer
 
         if (is_array($doc['page'] ?? null)) {
             $doc['page'] = $this->repairPageDecoration($doc);
+            foreach (['header', 'footer'] as $kind) {
+                $band = $doc['page'][$kind] ?? null;
+                if (is_array($band) && is_array($band['blocks'] ?? null) && array_is_list($band['blocks'])) {
+                    $path = "page.{$kind}.blocks";
+                    $doc['page'][$kind]['blocks'] = $this->dropRefusedInBand($this->repairBlocks($band['blocks'], $path), $path);
+                }
+            }
         }
 
         return ['doc' => $doc, 'notes' => $this->notes];
+    }
+
+    /**
+     * A `{blocks}` header or footer without what a band cannot hold
+     * ({@see Schema::BAND_REFUSED_TYPES}), at any depth, each drop noted. A mixed
+     * band (slots AND blocks) is left alone: which half was meant is a guess.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     * @return list<array<string, mixed>>
+     */
+    private function dropRefusedInBand(array $blocks, string $path): array
+    {
+        $out = [];
+        foreach ($blocks as $i => $block) {
+            $at = "{$path}[{$i}]";
+            $type = $block['type'] ?? null;
+            if (in_array($type, Schema::BAND_REFUSED_TYPES, true)) {
+                $this->note($at, "dropped a {$type} block: a header or footer cannot hold one");
+
+                continue;
+            }
+            if ($type === 'quote' && is_array($block['blocks'] ?? null)) {
+                $block['blocks'] = $this->dropRefusedInBand($block['blocks'], "{$at}.blocks");
+            }
+            if ($type === 'table' && is_array($block['rows'] ?? null)) {
+                foreach ($block['rows'] as $r => $row) {
+                    foreach (is_array($row['cells'] ?? null) ? $row['cells'] : [] as $c => $cell) {
+                        if (is_array($cell['blocks'] ?? null)) {
+                            $block['rows'][$r]['cells'][$c]['blocks'] = $this->dropRefusedInBand($cell['blocks'], "{$at}.rows[{$r}].cells[{$c}].blocks");
+                        }
+                    }
+                }
+            }
+            $out[] = $block;
+        }
+
+        return $out;
     }
 
     /**

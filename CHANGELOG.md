@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Headers and footers that hold blocks, so a read letterhead keeps its logo**
+  (last-word#6). `page.header` / `page.footer` may now be `{blocks: [...]}` in the body's
+  own block vocabulary (less `chart` and `pageBreak`, at any depth, and `portable`)
+  instead of the one-line `{left, center, right, size, color}` band. The two forms never
+  mix: a band with both is a validation error. In a blocks band, `{page}` and `{pages}` in
+  run text are live page fields, as in a band.
+  - **`read()` output changes only for headers and footers it could not hold before.**
+    A header or footer that is one paragraph of text and nothing else reads exactly as it
+    did. One that held a picture, several paragraphs, a table or a content control (Word's
+    own "Page X of Y" footer is one) now comes back as `{blocks}`: the logo as an image
+    block with a `data:` URL like a body image, PAGE / NUMPAGES as `{page}` / `{pages}`.
+    Those documents were the lossy ones: their logo or extra lines were reported under
+    `unrepresented` and dropped. `unrepresented` now lists only what blocks cannot hold
+    either (VML pictures, embedded objects, GIF / EMF and other non-PNG/JPEG images,
+    linked or oversized images, text boxes as `image`; charts as `chart`).
+    **Consumer action:** if you read `page.header.left` (or `center` / `right`), also
+    accept `page.header.blocks`; a viewer draws it like any other blocks. If you write a
+    read document back onto its own original with `templateParts`, keep dropping
+    `page.header` / `page.footer` first, as before. Without a template, leave them in:
+    the logo and address now write back on their own.
+  - `toBytes` writes a blocks band through the body's block renderer into `header1.xml` /
+    `footer1.xml`, wrapped in a `lastword:band` content control (so a one-paragraph blocks
+    band reads back as blocks), with the part's own relationships file. Media names, drawing
+    ids and relationship ids cannot collide with the body's or with a `templateParts`
+    letterhead's, and the document's own band still replaces the template's.
+  - Hardening equal to 0.13.0's letterhead media, on both paths: a header or footer image
+    must be PNG or JPEG by its leading bytes and its declared type, at most 16 MiB each and
+    32 MiB across the header and footer. On read, a linked picture is never read (nothing
+    is fetched) and a header part over 2 MiB or declaring a DOCTYPE is not read as blocks.
+    A non-`data:` image `src` is refused by validation and, unvalidated, written as its alt
+    text, never fetched.
+  - `validateAndRepair` drops a `chart`, `pageBreak` or `portable` block from a band with a
+    note. `describe()` prints a blocks band (`Page header: 3 blocks (1 image, 2
+    paragraph)`). `diff` / `reduce` carry a band change as one `doc.set` of `page`, and
+    `diff($d, read(toBytes($d)))` stays `[]`. `catalog` / `extract` are unchanged: page
+    furniture is not content.
+  - The JSON Schema gains `$defs.blocksBand`; `page.header` / `page.footer` are
+    `oneOf [band, blocksBand]`. `$defs.band` is unchanged.
+
 ## [0.13.0] - 2026-10-28
 
 ### Added

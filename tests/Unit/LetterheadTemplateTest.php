@@ -6,6 +6,7 @@ use LastWord\Agent;
 use LastWord\Exceptions\TemplateException;
 use LastWord\Tests\Support\GeneratedLetterhead as Letterhead;
 use LastWord\Tests\Support\GeneratedTemplate;
+use LastWord\Tests\Support\Package;
 
 /**
  * A customer's letterhead survives -- `templateParts` (last-word#5).
@@ -33,19 +34,7 @@ function lhDoc(array $page = []): array
 /** @return array<string, string> */
 function lhParts(string $bytes): array
 {
-    $path = tempnam(sys_get_temp_dir(), 'lw-lh-out') . '.docx';
-    file_put_contents($path, $bytes);
-    $zip = new ZipArchive();
-    expect($zip->open($path, ZipArchive::RDONLY | ZipArchive::CHECKCONS))->toBeTrue();
-    $parts = [];
-    for ($i = 0; $i < $zip->numFiles; $i++) {
-        $name = (string) $zip->getNameIndex($i);
-        $parts[$name] = (string) $zip->getFromName($name);
-    }
-    $zip->close();
-    @unlink($path);
-
-    return $parts;
+    return Package::parts($bytes);
 }
 
 function lhSectPr(array $parts): string
@@ -55,60 +44,10 @@ function lhSectPr(array $parts): string
     return $m[0] ?? '';
 }
 
-/**
- * The package is self-consistent: every internal relationship target exists,
- * every part has a content type, and no relationship id repeats in a part.
- */
+/** The package is self-consistent ({@see Package::assertConsistent()}). */
 function lhAssertConsistent(array $parts): void
 {
-    $ct = new DOMDocument();
-    $ct->loadXML($parts['[Content_Types].xml']);
-    $defaults = $overrides = [];
-    foreach ($ct->getElementsByTagName('Default') as $el) {
-        $defaults[strtolower($el->getAttribute('Extension'))] = $el->getAttribute('ContentType');
-    }
-    foreach ($ct->getElementsByTagName('Override') as $el) {
-        $overrides[$el->getAttribute('PartName')] = $el->getAttribute('ContentType');
-    }
-    foreach (array_keys($parts) as $name) {
-        if ($name === '[Content_Types].xml') {
-            continue;
-        }
-        $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
-        expect(isset($overrides['/' . $name]) || isset($defaults[$ext]))->toBeTrue("no content type for {$name}");
-    }
-    foreach ($overrides as $partName => $type) {
-        expect($parts)->toHaveKey(ltrim($partName, '/'));
-    }
-    foreach ($parts as $name => $xml) {
-        if (! str_ends_with($name, '.rels')) {
-            continue;
-        }
-        $source = str_replace('_rels/', '', substr($name, 0, -5));
-        $base = str_contains($source, '/') ? substr($source, 0, strrpos($source, '/') + 1) : '';
-        $rels = new DOMDocument();
-        $rels->loadXML($xml);
-        $ids = [];
-        foreach ($rels->getElementsByTagName('Relationship') as $rel) {
-            $id = $rel->getAttribute('Id');
-            expect($ids)->not->toHaveKey($id);
-            $ids[$id] = true;
-            if ($rel->getAttribute('TargetMode') === 'External') {
-                continue;
-            }
-            expect($parts)->toHaveKey($base . $rel->getAttribute('Target'));
-        }
-        // Every r:* reference in the source part names a declared relationship.
-        if ($source !== '' && isset($parts[$source]) && str_ends_with($source, '.xml')) {
-            preg_match_all('/\sr:(?:id|embed|link)="([^"]+)"/', $parts[$source], $used);
-            foreach ($used[1] as $id) {
-                expect($ids)->toHaveKey($id);
-            }
-        }
-    }
-    // Drawing ids are unique across the package.
-    preg_match_all('/<wp:docPr id="(\d+)"/', implode('', $parts), $drawingIds);
-    expect(count($drawingIds[1]))->toBe(count(array_unique($drawingIds[1])));
+    Package::assertConsistent($parts);
 }
 
 // ─── Defaults ────────────────────────────────────────────────────────────
@@ -206,13 +145,15 @@ it('cannot collide with the writer\'s own media, rel ids or drawing ids', functi
     lhAssertConsistent($parts);
 });
 
-it('opens: the output reads back, and the header is reported as holding an image', function (): void {
+it('opens: the output reads back, the carried header as blocks with its logo', function (): void {
     $bytes = Agent::toBytes(lhDoc(), ['template' => Letterhead::bytes(), 'templateParts' => LH_ALL]);
     $read = Agent::read($bytes);
 
     expect($read['blocks'][0]['runs'][0]['text'])->toBe('Our quote');
-    expect($read['page']['header']['left'] ?? '')->toContain(Letterhead::HEADER_TEXT);
-    expect($read['unrepresented'])->toContain(['where' => '/page/header', 'kind' => 'image', 'count' => 1]);
+    // last-word#6: the logo is read, not reported lost.
+    expect(array_column($read['page']['header']['blocks'], 'type'))->toBe(['image', 'paragraph']);
+    expect($read['page']['header']['blocks'][1]['runs'][0]['text'])->toContain(Letterhead::HEADER_TEXT);
+    expect($read)->not->toHaveKey('unrepresented');
 });
 
 it('is deterministic with a letterhead', function (): void {
@@ -347,7 +288,9 @@ it('refuses an unknown templateParts name rather than quietly dropping the lette
 // ─── Reader ─────────────────────────────────────────────────────────────
 
 it('reports a header image it cannot represent, instead of dropping it silently', function (): void {
-    $read = Agent::read(Letterhead::bytes());
+    // A GIF: outside the image block, so even the blocks form (last-word#6)
+    // cannot hold it. A PNG logo is read; see BlocksBandTest.
+    $read = Agent::read(Letterhead::bytes(['gifLogo' => true]));
 
     expect($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1]]);
     expect(Agent::describe($read))->toContain('/page/header: 1 image');
@@ -365,10 +308,11 @@ it('keeps the letterhead through read and write, the issue repro', function (): 
     // the original as the template, the output has header1.xml with the image.
     $letterhead = Letterhead::bytes();
     $doc = Agent::read($letterhead);
-    // read() fills page.header / page.footer with the bands' TEXT. Left in,
-    // they are the document's own bands and win (the precedence rule), so a
-    // write-back onto the original drops them to let the letterhead through.
-    expect($doc['page']['header']['left'] ?? '')->toContain(Letterhead::HEADER_TEXT);
+    // read() fills page.header / page.footer (the header as blocks since
+    // last-word#6). Left in, they are the document's own bands and win (the
+    // precedence rule), so a write-back onto the original drops them to let the
+    // letterhead through byte for byte.
+    expect($doc['page']['header']['blocks'][1]['runs'][0]['text'] ?? '')->toContain(Letterhead::HEADER_TEXT);
     unset($doc['unrepresented'], $doc['page']['header'], $doc['page']['footer']);
 
     $parts = lhParts(Agent::toBytes($doc, ['template' => $letterhead, 'templateParts' => LH_ALL]));

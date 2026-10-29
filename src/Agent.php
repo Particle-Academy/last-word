@@ -394,6 +394,25 @@ final class Agent
         }
         $lines[] = "Words: {$words}";
 
+        // A header or footer that holds blocks (last-word#6) -- a letterhead's
+        // logo and address -- so an agent knows it is there without the JSON.
+        foreach (['header', 'footer'] as $kind) {
+            $band = is_array($doc['page'] ?? null) ? ($doc['page'][$kind] ?? null) : null;
+            if (!is_array($band) || !is_array($band['blocks'] ?? null)) {
+                continue;
+            }
+            $kinds = [];
+            foreach ($band['blocks'] as $block) {
+                $type = is_array($block) ? (string) ($block['type'] ?? 'unknown') : 'unknown';
+                $kinds[$type] = ($kinds[$type] ?? 0) + 1;
+            }
+            $parts = [];
+            foreach ($kinds as $type => $n) {
+                $parts[] = "{$n} {$type}";
+            }
+            $lines[] = "Page {$kind}: " . count($band['blocks']) . ' blocks' . ($parts !== [] ? ' (' . implode(', ', $parts) . ')' : '');
+        }
+
         // What read() found in a header or footer and could not represent
         // (last-word#5), so an agent knows a letterhead logo is there before it
         // writes the document back without one.

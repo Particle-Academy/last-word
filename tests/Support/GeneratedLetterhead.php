@@ -39,7 +39,10 @@ final class GeneratedLetterhead
 
     public const FOOTER_TEXT = 'Acme Ltd, 1 Example Street';
 
-    public const BODY_TEXT = 'Dear customer, this sample letter is template body.';
+    /** The address under the logo in the `addressBlock` variant, a paragraph each. */
+    public const ADDRESS_LINES = ['Acme Ltd', '1 Example Street, Exampleton'];
+
+    public const BODY_TEXT ='Dear customer, this sample letter is template body.';
 
     public const PAGE_W = 11000;
 
@@ -63,7 +66,14 @@ final class GeneratedLetterhead
      *     externalImage?: bool, svgLogo?: bool, pngNamedSvg?: bool,
      *     includePicture?: bool, oleObject?: bool, vmlSrc?: bool, undeclaredRel?: bool,
      *     template?: bool, oversizedHeader?: bool,
+     *     addressBlock?: bool, pageFooter?: bool, oversizedLogo?: bool,
      * }  $o
+     *
+     * `addressBlock` (last-word#6) gives the header the shape a real letterhead
+     * has: the logo alone in the first paragraph, then {@see ADDRESS_LINES} as a
+     * paragraph each. `pageFooter` makes the footer Word's own "Page X of Y"
+     * gallery footer: a `w:sdt` around one paragraph of complex PAGE / NUMPAGES
+     * fields. `oversizedLogo` makes the logo a PNG one byte over the media cap.
      */
     public static function bytes(array $o = []): string
     {
@@ -167,7 +177,22 @@ final class GeneratedLetterhead
             $extra .= '<w:hyperlink r:id="rId99"><w:r><w:t>x</w:t></w:r></w:hyperlink>';
         }
         $blip = ($o['externalImage'] ?? false) ? '<a:blip r:link="rId1"/>' : '<a:blip r:embed="rId1"/>';
-        $header = self::header(self::HEADER_TEXT, self::drawing('rId1', self::LOGO_DRAWING_ID, 'Logo', 1371600, 457200, $blip) . $extra);
+        $logo = self::drawing('rId1', self::LOGO_DRAWING_ID, 'Logo', 1371600, 457200, $blip);
+        $header = self::header(self::HEADER_TEXT, $logo . $extra);
+        if ($o['addressBlock'] ?? false) {
+            $lines = '';
+            foreach (self::ADDRESS_LINES as $line) {
+                $lines .= '<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:t>' . $line . '</w:t></w:r></w:p>';
+            }
+            $header = str_replace(
+                '<w:p><w:r>' . $logo . $extra . '</w:r><w:r><w:t xml:space="preserve"> ' . self::HEADER_TEXT . '</w:t></w:r></w:p>',
+                '<w:p><w:r>' . $logo . $extra . '</w:r></w:p>' . $lines,
+                $header,
+            );
+        }
+        if ($o['oversizedLogo'] ?? false) {
+            $parts['word/' . $logoTarget] = "\x89PNG\r\n\x1a\n" . random_bytes(\LastWord\Writer\TemplateSection::MEDIA_LIMIT - 7);
+        }
         if ($o['doctypeHeader'] ?? false) {
             $header = str_replace('?>', '?><!DOCTYPE w:hdr [<!ENTITY e SYSTEM "file:///etc/passwd">]>', $header);
         }
@@ -186,6 +211,21 @@ final class GeneratedLetterhead
             . '<w:r><w:t>' . self::FOOTER_TEXT . ' </w:t></w:r>'
             . '<w:hyperlink r:id="rId1"><w:r><w:t>example.com</w:t></w:r></w:hyperlink></w:p></w:ftr>';
         $parts['word/_rels/footer1.xml.rels'] = self::rels([['rId1', 'hyperlink', 'https://example.com/', true]]);
+        if ($o['pageFooter'] ?? false) {
+            $field = static fn (string $instr, string $cached): string => '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                . '<w:r><w:instrText xml:space="preserve"> ' . $instr . ' \* MERGEFORMAT </w:instrText></w:r>'
+                . '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                . '<w:r><w:t>' . $cached . '</w:t></w:r>'
+                . '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+            $parts['word/footer1.xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<w:ftr xmlns:w="' . self::W . '" xmlns:r="' . self::R . '">'
+                . '<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Page Numbers (Bottom of Page)"/><w:docPartUnique/></w:docPartObj></w:sdtPr>'
+                . '<w:sdtContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+                . '<w:r><w:t xml:space="preserve">Page </w:t></w:r>' . $field('PAGE', '2')
+                . '<w:r><w:t xml:space="preserve"> of </w:t></w:r>' . $field('NUMPAGES', '9')
+                . '</w:p></w:sdtContent></w:sdt></w:ftr>';
+            $parts['word/_rels/footer1.xml.rels'] = self::rels([]);
+        }
 
         $parts['word/styles.xml'] = GeneratedTemplate::styles();
         if ($o['doctypeStyles'] ?? false) {

@@ -143,6 +143,59 @@ same page decoration fine-print draws: `background` (`#RRGGBB`) and `border`
 They are written as Word's `w:background` and `w:pgBorders`. The field set is
 pinned against fine-print's by fancy-conformance `doc-model/shared`.
 
+### Headers and footers: a band, or blocks
+
+`page.header` / `page.footer` is one of two forms, never both at once:
+
+```jsonc
+// A band: one line, three slots, 9pt grey unless size / color say otherwise.
+{ "footer": { "left": "Q3 Board Memo", "right": "Page {page} of {pages}" } }
+
+// Blocks: the body's own block vocabulary, for what one line cannot hold.
+{ "header": { "blocks": [
+  { "type": "image", "src": "data:image/png;base64,…", "widthPx": 144, "heightPx": 48 },
+  { "type": "paragraph", "align": "right", "runs": [{ "text": "Acme Ltd", "size": 9 }] },
+  { "type": "paragraph", "align": "right", "runs": [{ "text": "1 Example Street", "size": 9 }] }
+] } }
+```
+
+A blocks header takes every block type except `chart` and `pageBreak`, at any
+depth (a table cell in a header cannot hold one either), and not `portable`. In
+run text `{page}` and `{pages}` are live page fields, as in a band; in the body
+they stay literal. An empty `blocks` list asks for nothing, like an empty band.
+
+**Reading.** `read()` returns the band form for a header or footer that is one
+paragraph of text and nothing else, exactly as it always has. A header that
+held a picture, several paragraphs, a table or a content control (Word's own
+page-number footer is one) comes back as blocks: the logo as an image block with
+a `data:` URL, the same as a body image; PAGE and NUMPAGES fields as `{page}` /
+`{pages}`; and a picture that sits before a paragraph's text in front of that
+paragraph. `unrepresented` then lists only what blocks cannot hold either:
+VML pictures, embedded objects, GIF / EMF and other formats outside the image
+block, linked or oversized images, text boxes (`image`), and charts (`chart`).
+Blocks this package writes are wrapped in a `lastword:band` content control, so
+a one-paragraph blocks band reads back as blocks rather than as a band.
+
+**Writing.** A blocks band goes through the body's block renderer into
+`header1.xml` / `footer1.xml` with its **own** relationships file, so its image
+and link relationship ids are scoped to that part. Images share the document's
+`media/image{n}` numbering and drawing ids, so nothing collides with the body,
+the other band, or a letterhead carried by `templateParts` (`template{n}`
+media, drawing ids below ours). The document's own header still replaces the
+template's.
+
+**Hardening** is the letterhead's. A header or footer image, whether an agent
+wrote it or `read()` took it from an upload, must be PNG or JPEG by its leading
+bytes as well as its type, at most 16 MiB, and at most 32 MiB across the header
+and footer. A `src` that is not a `data:` URL fails validation, and if it
+reaches the writer anyway it is written as its alt text: nothing is fetched. On
+read, a linked (external) picture, a header part over 2 MiB or one declaring a
+DOCTYPE is never read as blocks (the part falls back to the band reading and
+the report).
+
+Only the default header and footer are read; a first-page or even-page variant
+is not part of the model.
+
 ## Exchange: portable content and exports
 
 last-word reads and writes **portable content** (`fancyContent: 1`), the
@@ -283,8 +336,9 @@ your own band for the other kind, your band is referenced for those pages too,
 so it is still on every page.
 
 To write a read document back onto its own original, drop `page.header` and
-`page.footer` first: `read()` fills them with the bands' text, and left in they
-are your own bands and win.
+`page.footer` first: `read()` fills them (as a band or as blocks), and left in
+they are your own and win. Without a template, leave them in: the blocks form
+writes the logo and address back on its own.
 
 **A letterhead is a customer upload, so it is read as hostile.** Anything that
 cannot be carried safely is refused with `TemplateException` rather than
@@ -303,10 +357,10 @@ render.
 Only the template's body-level (last) section is taken. Numbering inside a
 header (a list in the letterhead) resolves against this package's numbering.
 
-`read()` reports what a header or footer holds that a band cannot: a logo comes
-back as `"unrepresented": [{"where": "/page/header", "kind": "image", "count":
-1}]` (and `nested-block` for paragraphs after the first, or tables), and
-`describe()` says so. Locations and counts only, never text.
+`read()` reports what a header or footer holds that even the blocks form
+cannot (see above): a GIF logo comes back as `"unrepresented": [{"where":
+"/page/header", "kind": "image", "count": 1}]`, and `describe()` says so.
+Locations and counts only, never text.
 
 **An unusable template throws `TemplateException` rather than falling back.** A
 document that silently comes out in the wrong style is the failure this option

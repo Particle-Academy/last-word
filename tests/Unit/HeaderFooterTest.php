@@ -80,6 +80,7 @@ it('publishes the bands in the schema', function () {
     $page = $schema['properties']['page']['properties'];
 
     expect($page)->toHaveKeys(['header', 'footer'])
-        ->and($page['footer']['$ref'])->toBe('#/$defs/band')
+        // The one-line band, or blocks (last-word#6).
+        ->and($page['footer']['oneOf'])->toBe([['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']])
         ->and(json_encode($schema['$defs']['band']))->toContain('{pages}');
 });

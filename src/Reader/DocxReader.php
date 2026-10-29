@@ -11,6 +11,7 @@ use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\SourceArchive;
 use LastWord\Schema\Schema;
 use LastWord\Writer\DocxWriter;
+use LastWord\Writer\TemplateSection;
 use RuntimeException;
 
 /**
@@ -88,6 +89,24 @@ final class DocxReader
     /** header/footer part name (without leading word/) → XML. */
     private array $bandParts = [];
 
+    /**
+     * header/footer part name (without leading word/) → that part's OWN
+     * relationships, which resolve its images and links (last-word#6).
+     *
+     * @var array<string, array<string, array{target: string, external: bool}>>
+     */
+    private array $bandRels = [];
+
+    /**
+     * True while a header or footer is read as blocks: images are held to the
+     * template letterhead's media checks, PAGE / NUMPAGES fields read as
+     * `{page}` / `{pages}`, and a picture before a paragraph's text goes first.
+     */
+    private bool $inBand = false;
+
+    /** Image bytes taken into header/footer blocks so far, against the media total cap. */
+    private int $bandMediaBytes = 0;
+
     /** chart part name (without leading word/) → XML. */
     private array $chartParts = [];
 
@@ -129,6 +148,8 @@ final class DocxReader
     {
         $documentXml = $this->openArchive($bytes);
         $this->unrepresented = [];
+        $this->bandMediaBytes = 0;
+        $this->inBand = false;
 
         $dom = new DOMDocument();
         $prev = libxml_use_internal_errors(true);
@@ -341,14 +362,16 @@ final class DocxReader
     private function parseBand(DOMElement $sectPr, string $kind): ?array
     {
         $part = null;
+        $name = null;
         foreach ($sectPr->childNodes as $node) {
             if ($node instanceof DOMElement && $node->localName === $kind . 'Reference' && in_array($this->wAttr($node, 'type'), ['default', null], true)) {
                 $rid = (string) $this->rAttr($node, 'id');
                 $target = $this->rels[$rid]['target'] ?? null;
-                $part = is_string($target) ? ($this->bandParts[ltrim(str_replace('\\', '/', $target), '/')] ?? null) : null;
+                $name = is_string($target) ? ltrim(str_replace('\\', '/', $target), '/') : null;
+                $part = $name !== null ? ($this->bandParts[$name] ?? null) : null;
             }
         }
-        if ($part === null) {
+        if ($part === null || $name === null) {
             return null;
         }
 
@@ -360,7 +383,16 @@ final class DocxReader
         if (!$ok || $dom->documentElement === null) {
             return null;
         }
-        $this->noteUnrepresented($dom->documentElement, $kind);
+
+        // last-word#6: a header the one-line band can hold -- a single paragraph
+        // of text, nothing else -- reads exactly as it always has. Anything
+        // richer, which the band could only report as lost, is read as blocks,
+        // unless the part fails the checks a template letterhead's must pass.
+        [$images, $extra] = $this->bandOverflow($dom->documentElement);
+        if (($images > 0 || $extra > 0) && strlen($part) <= TemplateSection::PART_LIMIT && stripos($part, '<!DOCTYPE') === false) {
+            return $this->parseBlocksBand($dom->documentElement, $name, $kind, $images);
+        }
+        $this->noteUnrepresented($kind, $images, $extra);
         $p = $this->firstChildByName($dom->documentElement, 'p');
         if ($p === null) {
             return null;
@@ -440,13 +472,93 @@ final class DocxReader
     }
 
     /**
-     * Record what the band model cannot hold from this header/footer part: its
+     * A header or footer as `{blocks: [...]}` (last-word#6), read by the body's
+     * own block reader against the part's OWN relationships, so its images and
+     * links resolve. What even blocks cannot hold is still reported: pictures
+     * that did not become image blocks (VML, embedded objects, formats outside
+     * PNG/JPEG, linked or oversized images, text boxes) as `image`, and charts,
+     * whose parts are wired to the body, as `chart`. A page break is dropped:
+     * it means nothing in a running header.
+     *
+     * @return array{blocks: list<array<string, mixed>>}|null
+     */
+    private function parseBlocksBand(DOMElement $root, string $name, string $kind, int $pictures): ?array
+    {
+        [$rels, $this->rels] = [$this->rels, $this->bandRels[$name] ?? []];
+        $this->inBand = true;
+        try {
+            $blocks = $this->parseBlockContainer($root);
+        } finally {
+            $this->rels = $rels;
+            $this->inBand = false;
+        }
+
+        $kept = $charts = 0;
+        $blocks = $this->bandBlocksOnly($blocks, $kept, $charts);
+        $this->noteUnrepresented($kind, max(0, $pictures - $kept - $charts), 0, $charts);
+
+        return $blocks === [] ? null : ['blocks' => $blocks];
+    }
+
+    /**
+     * Blocks without what a band refuses ({@see Schema::BAND_REFUSED_TYPES}),
+     * at any depth, counting the images kept and the charts dropped.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     * @return list<array<string, mixed>>
+     */
+    private function bandBlocksOnly(array $blocks, int &$images, int &$charts): array
+    {
+        $out = [];
+        foreach ($blocks as $block) {
+            $type = $block['type'] ?? null;
+            if ($type === 'chart') {
+                $charts++;
+
+                continue;
+            }
+            if (in_array($type, Schema::BAND_REFUSED_TYPES, true)) {
+                continue;
+            }
+            if ($type === 'image') {
+                $images++;
+            }
+            if ($type === 'quote' && is_array($block['blocks'] ?? null)) {
+                $block['blocks'] = $this->bandBlocksOnly($block['blocks'], $images, $charts);
+            }
+            if ($type === 'table') {
+                foreach ($block['rows'] ?? [] as $r => $row) {
+                    foreach ($row['cells'] ?? [] as $c => $cell) {
+                        $block['rows'][$r]['cells'][$c]['blocks'] = $this->bandBlocksOnly($cell['blocks'] ?? [], $images, $charts);
+                    }
+                }
+            }
+            $out[] = $block;
+        }
+
+        return $out;
+    }
+
+    /** Record what a header or footer held that the model could not (last-word#5). */
+    private function noteUnrepresented(string $kind, int $images, int $blocks, int $charts = 0): void
+    {
+        foreach (['image' => $images, 'nested-block' => $blocks, 'chart' => $charts] as $what => $count) {
+            if ($count > 0) {
+                $this->unrepresented[] = ['where' => '/page/' . $kind, 'kind' => $what, 'count' => $count];
+            }
+        }
+    }
+
+    /**
+     * What the one-line band model cannot hold from this header/footer part: its
      * pictures (`w:drawing`, VML `w:pict`, `w:object`) and every block after
      * the first paragraph that carries text or is a table. Only the first
-     * paragraph's text is read into the band; without this, a letterhead's
-     * logo and address lines vanish with nothing said.
+     * paragraph's text is read into a band; without this, a letterhead's logo
+     * and address lines vanish with nothing said. Both zero: it is a band.
+     *
+     * @return array{0: int, 1: int} [pictures, blocks]
      */
-    private function noteUnrepresented(DOMElement $root, string $kind): void
+    private function bandOverflow(DOMElement $root): array
     {
         $images = 0;
         foreach ($root->getElementsByTagName('*') as $el) {
@@ -475,11 +587,8 @@ final class DocxReader
                 $blocks++;
             }
         }
-        foreach (['image' => $images, 'nested-block' => $blocks] as $what => $count) {
-            if ($count > 0) {
-                $this->unrepresented[] = ['where' => '/page/' . $kind, 'kind' => $what, 'count' => $count];
-            }
-        }
+
+        return [$images, $blocks];
     }
 
     /** A field instruction as a band token: PAGE → {page}, NUMPAGES → {pages}, else ''. */
@@ -564,8 +673,15 @@ final class DocxReader
         $this->stylesXml = $zip->read('word/styles.xml');
         $this->media = [];
         $this->bandParts = [];
+        $this->bandRels = [];
         $this->chartParts = [];
         foreach ($zip->names() as $name) {
+            if (preg_match('#^word/_rels/((?:header|footer)\d*\.xml)\.rels$#', $name, $m) === 1) {
+                $xml = (string) $zip->read($name);
+                // A DOCTYPE is refused in a template's rels (last-word#5); here it
+                // leaves the part with no relationships, so nothing resolves.
+                $this->bandRels[$m[1]] = stripos($xml, '<!DOCTYPE') === false ? $this->parseRels($xml) : [];
+            }
             if (preg_match('#^word/charts/[^/]+\.xml$#', $name) === 1) {
                 $this->chartParts[substr($name, strlen('word/'))] = $zip->read($name);
             }
@@ -764,6 +880,13 @@ final class DocxReader
             }
 
             $p = $this->parseParagraphNode($node);
+
+            // Header/footer only (`leading` is empty elsewhere): a picture before
+            // the paragraph's text -- a logo beside an address -- goes first.
+            if ($p['leading'] !== []) {
+                $flushAll();
+                array_push($blocks, ...$p['leading']);
+            }
 
             // Lists group before style handling — numPr wins.
             if ($p['numPr'] !== null) {
@@ -1035,7 +1158,11 @@ final class DocxReader
             }
         }
 
-        $state = ['pageBreak' => false, 'images' => []];
+        // `leading`: pictures met before any of the paragraph's text, which a
+        // header or footer puts first (a logo beside an address). `field`: a
+        // complex field in a header or footer -- null outside one, its
+        // instruction so far, or false while its cached result is skipped.
+        $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null];
         $runs = $this->parseInlineContainer($p, null, $state);
 
         return [
@@ -1049,6 +1176,7 @@ final class DocxReader
             'codeLanguage' => $codeLanguage,
             'runs' => $this->mergeRuns($runs),
             'images' => $state['images'],
+            'leading' => $state['leading'],
         ];
     }
 
@@ -1235,6 +1363,19 @@ final class DocxReader
                     array_push($runs, ...$this->parseInlineContainer($node, $target ?? $link, $state));
 
                     break;
+                case 'fldSimple':
+                    $token = $this->inBand ? self::fieldToken((string) $this->wAttr($node, 'instr')) : '';
+                    if ($token === '') {
+                        array_push($runs, ...$this->parseInlineContainer($node, $link, $state));
+
+                        break;
+                    }
+                    // The cached result's formatting, the field's token as text.
+                    $inner = $this->parseInlineContainer($node, $link, $state);
+                    $runs[] = ['text' => $token] + ($inner[0] ?? []);
+                    $state['seenText'] = true;
+
+                    break;
                 case 'pPr':
                 case 'bookmarkStart':
                 case 'bookmarkEnd':
@@ -1271,9 +1412,16 @@ final class DocxReader
             if (!($node instanceof DOMElement)) {
                 continue;
             }
+            if ($this->inBand && in_array($node->localName, ['fldChar', 'instrText'], true)) {
+                $text .= $this->bandField($node, $state);
+
+                continue;
+            }
             switch ($node->localName) {
                 case 't':
-                    $text .= $node->textContent;
+                    if ($state['field'] === null) {
+                        $text .= $node->textContent;
+                    }
 
                     break;
                 case 'br':
@@ -1290,7 +1438,9 @@ final class DocxReader
                     break;
                 case 'drawing':
                     $image = $this->parseDrawing($node);
-                    if ($image !== null) {
+                    if ($image !== null && $this->inBand && !$state['seenText'] && $text === '') {
+                        $state['leading'][] = $image;
+                    } elseif ($image !== null) {
                         $state['images'][] = $image;
                     }
 
@@ -1303,6 +1453,7 @@ final class DocxReader
         if ($text === '') {
             return null;
         }
+        $state['seenText'] = true;
 
         $run = ['text' => $text];
         foreach (['bold', 'italic', 'underline', 'strike', 'code', 'smallCaps'] as $flag) {
@@ -1324,6 +1475,38 @@ final class DocxReader
         }
 
         return $run;
+    }
+
+    /**
+     * One piece of a complex field in a header or footer (last-word#6): PAGE
+     * and NUMPAGES come back as `{page}` / `{pages}`, the same tokens a band's
+     * slots use, and their cached result ("1", "9") is skipped. Any other field
+     * keeps its cached result as text, as the body does.
+     *
+     * @param  array{field: string|false|null}  $state
+     */
+    private function bandField(DOMElement $node, array &$state): string
+    {
+        if ($node->localName === 'instrText') {
+            if (is_string($state['field'])) {
+                $state['field'] .= $node->textContent;
+            }
+
+            return '';
+        }
+        $type = $this->wAttr($node, 'fldCharType');
+        if ($type === 'begin') {
+            $state['field'] = '';
+        } elseif ($type === 'separate' && is_string($state['field'])) {
+            $token = self::fieldToken($state['field']);
+            $state['field'] = $token !== '' ? false : null;
+
+            return $token;
+        } elseif ($type === 'end') {
+            $state['field'] = null;
+        }
+
+        return '';
     }
 
     /**
@@ -1694,7 +1877,12 @@ final class DocxReader
         if ($blip === null) {
             return $this->parseChartDrawing($drawing);
         }
-        $rId = $this->rAttr($blip, 'embed') ?? $this->rAttr($blip, 'link');
+        // In a header or footer only an EMBEDDED picture is read: a linked one is
+        // a URL, and nothing here ever fetches (last-word#6, as #5).
+        $rId = $this->inBand ? $this->rAttr($blip, 'embed') : ($this->rAttr($blip, 'embed') ?? $this->rAttr($blip, 'link'));
+        if ($this->inBand && $rId !== null && ($this->rels[$rId]['external'] ?? true)) {
+            return null;
+        }
         $target = $rId !== null ? ($this->rels[$rId]['target'] ?? null) : null;
         if ($target === null) {
             return null;
@@ -1716,6 +1904,16 @@ final class DocxReader
         };
         if ($mime === null) {
             return null; // gif/emf/… — outside the model, degrade by dropping
+        }
+        // A header or footer is where a customer's letterhead lives, so its
+        // pictures face the template letterhead's media checks: the bytes must
+        // start the way the extension says, under the per-image and total caps.
+        if ($this->inBand) {
+            if (!TemplateSection::looksLike($ext, $bytes) || strlen($bytes) > TemplateSection::MEDIA_LIMIT
+                || $this->bandMediaBytes + strlen($bytes) > TemplateSection::MEDIA_TOTAL_LIMIT) {
+                return null;
+            }
+            $this->bandMediaBytes += strlen($bytes);
         }
 
         $image = ['type' => 'image', 'src' => "data:{$mime};base64," . base64_encode($bytes)];

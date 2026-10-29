@@ -7,6 +7,7 @@ namespace LastWord\Schema;
 use LastWord\Exchange\Content;
 use LastWord\Exchange\Portable;
 use LastWord\Helpers\Chart;
+use LastWord\Writer\TemplateSection;
 
 /**
  * Structural validation of the Doc model. Returns a flat error list —
@@ -48,13 +49,19 @@ final class Validator
                 $this->validateEnum($doc['page']['size'] ?? null, 'page.size', 'page size', ['letter', 'legal', 'a4'], $errors);
                 $this->validateEnum($doc['page']['orientation'] ?? null, 'page.orientation', 'page orientation', ['portrait', 'landscape'], $errors);
                 $this->validateSides($doc['page']['margins'] ?? null, 'page.margins', 'page margins', $errors);
+                $bandMedia = 0;
                 foreach (['header', 'footer'] as $kind) {
                     $band = $doc['page'][$kind] ?? null;
                     if ($band === null) {
                         continue;
                     }
                     if (!is_array($band)) {
-                        $errors[] = self::error("page.{$kind}", "page {$kind} must be an object ({left?, center?, right?, size?, color?})");
+                        $errors[] = self::error("page.{$kind}", "page {$kind} must be an object ({left?, center?, right?, size?, color?} or {blocks})");
+
+                        continue;
+                    }
+                    if (array_key_exists('blocks', $band)) {
+                        $this->validateBlocksBand($band, $kind, $bandMedia, $errors);
 
                         continue;
                     }
@@ -88,6 +95,86 @@ final class Validator
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
 
         return $errors;
+    }
+
+    /**
+     * A `{blocks}` header or footer (last-word#6): never mixed with the slot
+     * form, the body's block rules for every block, nothing
+     * {@see Schema::BAND_REFUSED_TYPES} at any depth, and every image's BYTES
+     * checked the way a template letterhead's media are -- PNG or JPEG matching
+     * the declared type by its leading bytes, at most
+     * {@see TemplateSection::MEDIA_LIMIT} each and
+     * {@see TemplateSection::MEDIA_TOTAL_LIMIT} across the header and footer.
+     *
+     * @param  array<string, mixed>  $band
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateBlocksBand(array $band, string $kind, int &$mediaTotal, array &$errors): void
+    {
+        $mixed = array_values(array_intersect(['left', 'center', 'right', 'size', 'color'], array_keys($band)));
+        if ($mixed !== []) {
+            $errors[] = self::error("page.{$kind}", "page {$kind} is either {left, center, right, size, color} or {blocks}, never both (found blocks with " . implode(', ', $mixed) . ')');
+        }
+        $blocks = $band['blocks'];
+        if (!is_array($blocks) || !array_is_list($blocks)) {
+            $errors[] = self::error("page.{$kind}.blocks", "page {$kind} blocks must be a list of block objects");
+
+            return;
+        }
+        $path = "page.{$kind}.blocks";
+        foreach ($blocks as $i => $block) {
+            if (is_array($block) && in_array($block['type'] ?? null, Schema::BAND_REFUSED_TYPES, true)) {
+                continue; // refused below; its own rules are beside the point
+            }
+            $this->validateBlock($block, "{$path}[{$i}]", $errors);
+        }
+        $this->validateBandContent($blocks, $path, $mediaTotal, $errors);
+    }
+
+    /**
+     * @param  list<mixed>  $blocks
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateBandContent(array $blocks, string $path, int &$mediaTotal, array &$errors, int $depth = 0): void
+    {
+        if ($depth > Portable::MAX_DEPTH) {
+            return;
+        }
+        foreach ($blocks as $i => $block) {
+            if (!is_array($block)) {
+                continue;
+            }
+            $at = "{$path}[{$i}]";
+            $type = $block['type'] ?? null;
+            if (in_array($type, Schema::BAND_REFUSED_TYPES, true)) {
+                $errors[] = self::error("{$at}.type", "a header or footer cannot hold a {$type} block");
+
+                continue;
+            }
+            if ($type === 'image' && is_string($block['src'] ?? null)
+                && preg_match('#^data:image/(png|jpe?g);base64,(.*)$#s', $block['src'], $m) === 1) {
+                $bytes = base64_decode($m[2], true);
+                if ($bytes === false || !TemplateSection::looksLike($m[1] === 'png' ? 'png' : 'jpeg', $bytes)) {
+                    $errors[] = self::error("{$at}.src", 'a header or footer image must be PNG or JPEG bytes matching its data URL type');
+                } elseif (strlen($bytes) > TemplateSection::MEDIA_LIMIT) {
+                    $errors[] = self::error("{$at}.src", 'a header or footer image is over ' . TemplateSection::MEDIA_LIMIT . ' bytes');
+                } elseif (($mediaTotal += strlen($bytes)) > TemplateSection::MEDIA_TOTAL_LIMIT) {
+                    $errors[] = self::error("{$at}.src", 'header and footer images together are over ' . TemplateSection::MEDIA_TOTAL_LIMIT . ' bytes');
+                }
+            }
+            if ($type === 'quote' && is_array($block['blocks'] ?? null)) {
+                $this->validateBandContent($block['blocks'], "{$at}.blocks", $mediaTotal, $errors, $depth + 1);
+            }
+            if ($type === 'table' && is_array($block['rows'] ?? null)) {
+                foreach ($block['rows'] as $r => $row) {
+                    foreach (is_array($row) && is_array($row['cells'] ?? null) ? $row['cells'] : [] as $c => $cell) {
+                        if (is_array($cell) && is_array($cell['blocks'] ?? null)) {
+                            $this->validateBandContent($cell['blocks'], "{$at}.rows[{$r}].cells[{$c}].blocks", $mediaTotal, $errors, $depth + 1);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**

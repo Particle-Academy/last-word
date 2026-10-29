@@ -389,7 +389,7 @@ final class TemplateSection
     }
 
     /** Magic bytes for each carried media format. */
-    private static function looksLike(string $ext, string $bytes): bool
+    public static function looksLike(string $ext, string $bytes): bool
     {
         return match ($ext) {
             'png' => str_starts_with($bytes, "\x89PNG\r\n\x1a\n"),

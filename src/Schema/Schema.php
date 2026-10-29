@@ -30,6 +30,16 @@ final class Schema
         'hr',
     ];
 
+    /**
+     * Block types a `{blocks}` header or footer refuses (last-word#6), at any
+     * depth: a page break means nothing in a running header, and a chart's parts
+     * are wired to the document body. `portable` is refused too -- it is an
+     * input the body expands, never part of a band.
+     *
+     * @var list<string>
+     */
+    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable'];
+
     /** @var list<string> */
     public const ALIGNMENTS = ['left', 'center', 'right', 'justify'];
 
@@ -311,8 +321,8 @@ final class Schema
                         'size' => ['enum' => self::PAGE_SIZES],
                         'orientation' => ['enum' => ['portrait', 'landscape']],
                         'margins' => ['$ref' => '#/$defs/boxSides'],
-                        'header' => ['$ref' => '#/$defs/band', 'description' => 'A running header on every page.'],
-                        'footer' => ['$ref' => '#/$defs/band', 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers.'],
+                        'header' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running header on every page: a one-line band, or blocks (a letterhead with a logo).'],
+                        'footer' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers.'],
                         'background' => $hex + ['description' => 'Page colour on every page, under everything else, e.g. "#FDFAF3". White (none) by default. Word shows it on screen and prints it only when "Print background colors" is on.'],
                         'border' => [
                             'type' => 'object',
@@ -338,7 +348,24 @@ final class Schema
                 'tableBorders' => $tableBorders,
                 'boxSides' => $boxSides,
                 'band' => $band,
-                'block' => ['oneOf' => array_values($blocks)],
+                'blocksBand' => [
+                    'type' => 'object',
+                    'required' => ['blocks'],
+                    'additionalProperties' => false,
+                    'description' => 'A running header or footer that holds blocks -- the body\'s own vocabulary less chart and pageBreak (at any depth) -- for what one line cannot: a logo, an address over several lines, a table. e.g. {"blocks": [{"type": "image", "src": "data:image/png;base64,...", "widthPx": 140}, {"type": "paragraph", "align": "right", "runs": [{"text": "Acme Ltd, 1 Example Street", "size": 9}]}]}. In run text `{page}` and `{pages}` are live page fields, as in a band. Never mixed with left/center/right/size/color. Images: PNG or JPEG data URLs whose bytes match, each at most 16 MiB, at most 32 MiB across the header and footer.',
+                    'properties' => [
+                        'blocks' => [
+                            'type' => 'array',
+                            'items' => [
+                                'allOf' => [
+                                    ['$ref' => '#/$defs/block'],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak']]], 'required' => ['type']]],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                'block' =>['oneOf' => array_values($blocks)],
                 'portable' => self::portableSchema(),
                 'portableRun' => [
                     'type' => 'object',
