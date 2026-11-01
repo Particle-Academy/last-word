@@ -40,6 +40,27 @@ final class Schema
      */
     public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable'];
 
+    /**
+     * Block types a footnote's `blocks` refuse, at any depth: a page break means
+     * nothing at the foot of a page, and a chart's parts are wired to the body.
+     * A footnote inside a footnote is refused too (Word has no such thing), and
+     * so is a footnote in a header or footer, which Word cannot hold.
+     *
+     * @var list<string>
+     */
+    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable'];
+
+    /**
+     * What a page margin is when the document does not say, in points: one inch
+     * each side, and half an inch from the page edge to the header and to the
+     * footer. The reader OMITS a value equal to these (a page read back carries
+     * only what differs), so a viewer resolves the rest with
+     * {@see pageMargins()}.
+     */
+    public const PAGE_MARGIN_DEFAULT = 72.0;
+
+    public const PAGE_BAND_DISTANCE_DEFAULT = 36.0;
+
     /** @var list<string> */
     public const ALIGNMENTS = ['left', 'center', 'right', 'justify'];
 
@@ -151,10 +172,11 @@ final class Schema
                 'size' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Font size in points. Half-points are exactly representable.'],
                 'font' => ['type' => 'string', 'description' => 'Font family name.'],
                 'letterSpacing' => ['type' => 'number', 'description' => 'Tracking in points; may be negative.'],
+                'footnote' => ['$ref' => '#/$defs/footnote'],
             ],
         ];
 
-        $runs = ['type' => 'array', 'items' => ['$ref' => '#/$defs/run']];
+        $runs =['type' => 'array', 'items' => ['$ref' => '#/$defs/run']];
 
         $listItem = [
             'type' => 'object',
@@ -320,7 +342,7 @@ final class Schema
                     'properties' => [
                         'size' => ['enum' => self::PAGE_SIZES],
                         'orientation' => ['enum' => ['portrait', 'landscape']],
-                        'margins' => ['$ref' => '#/$defs/boxSides'],
+                        'margins' => ['$ref' => '#/$defs/pageMargins'],
                         'header' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running header on every page: a one-line band, or blocks (a letterhead with a logo).'],
                         'footer' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers.'],
                         'background' => $hex + ['description' => 'Page colour on every page, under everything else, e.g. "#FDFAF3". White (none) by default. Word shows it on screen and prints it only when "Print background colors" is on.'],
@@ -347,6 +369,36 @@ final class Schema
                 'boxBorders' => $boxBorders,
                 'tableBorders' => $tableBorders,
                 'boxSides' => $boxSides,
+                'pageMargins' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'description' => 'Page margins in points, 72 (one inch) each side by default, and the header and footer DISTANCES: how far the header sits from the top edge of the page and the footer from the bottom edge, 36 by default. Word moves the body down (or up) when a header (or footer) is taller than the margin leaves room for. Anything omitted is the default.',
+                    'properties' => [
+                        'top' => $points,
+                        'right' => $points,
+                        'bottom' => $points,
+                        'left' => $points,
+                        'header' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points from the top edge of the page to the top of the header. 36 by default.'],
+                        'footer' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points from the bottom edge of the page to the bottom of the footer. 36 by default.'],
+                    ],
+                ],
+                'footnote' => [
+                    'type' => 'object',
+                    'required' => ['blocks'],
+                    'additionalProperties' => false,
+                    'description' => 'A footnote, carried by a run whose text is "" and which sits where the reference mark goes: {"text": "", "footnote": {"blocks": [{"type": "paragraph", "runs": [{"text": "Audited figures, FY2026."}]}]}}. Word numbers the marks 1, 2, 3 in document order and sets each footnote at the foot of the page that holds its mark. The blocks are the body vocabulary less chart and pageBreak, with no footnote inside a footnote. Not in a header or footer.',
+                    'properties' => [
+                        'blocks' => [
+                            'type' => 'array',
+                            'items' => [
+                                'allOf' => [
+                                    ['$ref' => '#/$defs/block'],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak']]], 'required' => ['type']]],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
                 'band' => $band,
                 'blocksBand' => [
                     'type' => 'object',
@@ -490,6 +542,34 @@ final class Schema
         }
 
         return [$w, $h];
+    }
+
+    /**
+     * Every page margin and both header/footer distances, in points, defaults
+     * filled in -- what a paged viewer lays a page out from. `read()` omits a
+     * value equal to its default ({@see PAGE_MARGIN_DEFAULT},
+     * {@see PAGE_BAND_DISTANCE_DEFAULT}), and omits `page` altogether when
+     * nothing differs, so this is the one place the defaults are applied.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array{top: float, right: float, bottom: float, left: float, header: float, footer: float}
+     */
+    public static function pageMargins(array $doc): array
+    {
+        $page = is_array($doc['page'] ?? null) ? $doc['page'] : [];
+        $m = is_array($page['margins'] ?? null) ? $page['margins'] : [];
+        $value = static fn (string $k, float $default): float => (is_int($m[$k] ?? null) || is_float($m[$k] ?? null)) && is_finite((float) $m[$k])
+            ? (float) $m[$k]
+            : $default;
+
+        return [
+            'top' => $value('top', self::PAGE_MARGIN_DEFAULT),
+            'right' => $value('right', self::PAGE_MARGIN_DEFAULT),
+            'bottom' => $value('bottom', self::PAGE_MARGIN_DEFAULT),
+            'left' => $value('left', self::PAGE_MARGIN_DEFAULT),
+            'header' => $value('header', self::PAGE_BAND_DISTANCE_DEFAULT),
+            'footer' => $value('footer', self::PAGE_BAND_DISTANCE_DEFAULT),
+        ];
     }
 
     /**

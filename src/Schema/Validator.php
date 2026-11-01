@@ -26,6 +26,13 @@ final class Validator
     private const TABLE_EDGES = ['top', 'right', 'bottom', 'left', 'insideH', 'insideV'];
 
     /**
+     * Where the blocks being validated live: the body, a header or footer, or a
+     * footnote. A footnote run is refused in the last two -- Word has no
+     * footnote in a running header, and none inside another footnote.
+     */
+    private string $context = 'body';
+
+    /**
      * @param  array<string, mixed>  $doc
      * @return list<array{path: string, message: string}>
      */
@@ -49,6 +56,13 @@ final class Validator
                 $this->validateEnum($doc['page']['size'] ?? null, 'page.size', 'page size', ['letter', 'legal', 'a4'], $errors);
                 $this->validateEnum($doc['page']['orientation'] ?? null, 'page.orientation', 'page orientation', ['portrait', 'landscape'], $errors);
                 $this->validateSides($doc['page']['margins'] ?? null, 'page.margins', 'page margins', $errors);
+                $margins = $doc['page']['margins'] ?? null;
+                foreach (['header', 'footer'] as $distance) {
+                    $value = is_array($margins) ? ($margins[$distance] ?? null) : null;
+                    if ($value !== null && (!(is_int($value) || is_float($value)) || !is_finite((float) $value) || $value < 0)) {
+                        $errors[] = self::error("page.margins.{$distance}", "page margins {$distance} is the distance from the page edge to the {$distance}: a number of points, 0 or more (36 by default)");
+                    }
+                }
                 $bandMedia = 0;
                 foreach (['header', 'footer'] as $kind) {
                     $band = $doc['page'][$kind] ?? null;
@@ -122,11 +136,16 @@ final class Validator
             return;
         }
         $path = "page.{$kind}.blocks";
-        foreach ($blocks as $i => $block) {
-            if (is_array($block) && in_array($block['type'] ?? null, Schema::BAND_REFUSED_TYPES, true)) {
-                continue; // refused below; its own rules are beside the point
+        [$outer, $this->context] = [$this->context, 'band'];
+        try {
+            foreach ($blocks as $i => $block) {
+                if (is_array($block) && in_array($block['type'] ?? null, Schema::BAND_REFUSED_TYPES, true)) {
+                    continue; // refused below; its own rules are beside the point
+                }
+                $this->validateBlock($block, "{$path}[{$i}]", $errors);
             }
-            $this->validateBlock($block, "{$path}[{$i}]", $errors);
+        } finally {
+            $this->context = $outer;
         }
         $this->validateBandContent($blocks, $path, $mediaTotal, $errors);
     }
@@ -701,7 +720,12 @@ final class Validator
                 continue;
             }
             if (!is_string($run['text'] ?? null)) {
-                $errors[] = self::error("{$runPath}.text", 'run requires a string "text"');
+                $errors[] = self::error("{$runPath}.text", array_key_exists('footnote', $run)
+                    ? 'a footnote run requires "text": "" (Word numbers the mark)'
+                    : 'run requires a string "text"');
+            }
+            if (array_key_exists('footnote', $run)) {
+                $this->validateFootnote($run, $runPath, $errors);
             }
             foreach (Schema::RUN_FLAGS as $flag) {
                 if (isset($run[$flag]) && !is_bool($run[$flag])) {
@@ -721,6 +745,92 @@ final class Validator
             }
             $this->validateNumber($run['size'] ?? null, "{$runPath}.size", 'run size', $errors, true);
             $this->validateNumber($run['letterSpacing'] ?? null, "{$runPath}.letterSpacing", 'run letterSpacing', $errors);
+        }
+    }
+
+    /**
+     * A footnote run: `{"text": "", "footnote": {"blocks": [...]}}`, in the body
+     * only, its blocks the body's rules less {@see Schema::FOOTNOTE_REFUSED_TYPES}
+     * at any depth.
+     *
+     * @param  array<string, mixed>  $run
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateFootnote(array $run, string $runPath, array &$errors): void
+    {
+        $at = "{$runPath}.footnote";
+        if ($this->context === 'band') {
+            $errors[] = self::error($at, 'a header or footer cannot hold a footnote');
+
+            return;
+        }
+        if ($this->context === 'footnote') {
+            $errors[] = self::error($at, 'a footnote cannot hold a footnote');
+
+            return;
+        }
+        if (is_string($run['text'] ?? null) && $run['text'] !== '') {
+            $errors[] = self::error("{$runPath}.text", 'a footnote run\'s text must be "": Word numbers the mark. Put the text it follows in the run before it');
+        }
+        $note = $run['footnote'];
+        if (!is_array($note) || ($note !== [] && array_is_list($note))) {
+            $errors[] = self::error($at, 'footnote must be an object: {"blocks": [{"type": "paragraph", "runs": [{"text": "..."}]}]}');
+
+            return;
+        }
+        $blocks = $note['blocks'] ?? null;
+        if (!is_array($blocks) || !array_is_list($blocks) || $blocks === []) {
+            $errors[] = self::error("{$at}.blocks", 'footnote requires "blocks": a non-empty list of blocks, e.g. [{"type": "paragraph", "runs": [{"text": "Source: ..."}]}]');
+
+            return;
+        }
+
+        [$outer, $this->context] = [$this->context, 'footnote'];
+        try {
+            foreach ($blocks as $i => $block) {
+                if (is_array($block) && in_array($block['type'] ?? null, Schema::FOOTNOTE_REFUSED_TYPES, true)) {
+                    continue; // refused below
+                }
+                $this->validateBlock($block, "{$at}.blocks[{$i}]", $errors);
+            }
+        } finally {
+            $this->context = $outer;
+        }
+        $this->refuseInFootnote($blocks, "{$at}.blocks", $errors);
+    }
+
+    /**
+     * @param  list<mixed>  $blocks
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function refuseInFootnote(array $blocks, string $path, array &$errors, int $depth = 0): void
+    {
+        if ($depth > Portable::MAX_DEPTH) {
+            return;
+        }
+        foreach ($blocks as $i => $block) {
+            if (!is_array($block)) {
+                continue;
+            }
+            $at = "{$path}[{$i}]";
+            $type = $block['type'] ?? null;
+            if (in_array($type, Schema::FOOTNOTE_REFUSED_TYPES, true)) {
+                $errors[] = self::error("{$at}.type", "a footnote cannot hold a {$type} block");
+
+                continue;
+            }
+            if ($type === 'quote' && is_array($block['blocks'] ?? null)) {
+                $this->refuseInFootnote($block['blocks'], "{$at}.blocks", $errors, $depth + 1);
+            }
+            if ($type === 'table' && is_array($block['rows'] ?? null)) {
+                foreach ($block['rows'] as $r => $row) {
+                    foreach (is_array($row) && is_array($row['cells'] ?? null) ? $row['cells'] : [] as $c => $cell) {
+                        if (is_array($cell) && is_array($cell['blocks'] ?? null)) {
+                            $this->refuseInFootnote($cell['blocks'], "{$at}.rows[{$r}].cells[{$c}].blocks", $errors, $depth + 1);
+                        }
+                    }
+                }
+            }
         }
     }
 

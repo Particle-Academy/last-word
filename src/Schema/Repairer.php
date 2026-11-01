@@ -24,6 +24,9 @@ final class Repairer
     /** @var list<array{path: string, message: string}> */
     private array $notes = [];
 
+    /** 'body', 'band' or 'footnote': where a footnote run is being repaired, and so whether it may stay. */
+    private string $context = 'body';
+
     /**
      * @param  array<string, mixed>  $doc
      * @return array{doc: array<string, mixed>, notes: list<array{path: string, message: string}>}
@@ -31,6 +34,7 @@ final class Repairer
     public function repair(array $doc): array
     {
         $this->notes = [];
+        $this->context = 'body';
 
         if (array_key_exists('title', $doc) && !is_string($doc['title'])) {
             if (is_scalar($doc['title'])) {
@@ -55,7 +59,12 @@ final class Repairer
                 $band = $doc['page'][$kind] ?? null;
                 if (is_array($band) && is_array($band['blocks'] ?? null) && array_is_list($band['blocks'])) {
                     $path = "page.{$kind}.blocks";
-                    $doc['page'][$kind]['blocks'] = $this->dropRefusedInBand($this->repairBlocks($band['blocks'], $path), $path);
+                    $this->context = 'band';
+                    try {
+                        $doc['page'][$kind]['blocks'] = $this->dropRefusedInBand($this->repairBlocks($band['blocks'], $path), $path);
+                    } finally {
+                        $this->context = 'body';
+                    }
                 }
             }
         }
@@ -583,6 +592,11 @@ final class Repairer
 
                 continue;
             }
+            if (array_key_exists('footnote', $run)) {
+                array_push($out, ...$this->repairFootnoteRun($run, $runPath));
+
+                continue;
+            }
             if (!is_string($run['text'] ?? null)) {
                 if (is_scalar($run['text'] ?? null)) {
                     $run['text'] = (string) $run['text'];
@@ -610,6 +624,108 @@ final class Repairer
                 $this->note("{$runPath}.link", 'dropped non-string link');
             }
             $out[] = $run;
+        }
+
+        return $out;
+    }
+
+    /**
+     * A footnote run, repaired into what it should have been: text the agent
+     * typed on the mark moves to a run of its own before it (losing nothing),
+     * a missing `text` becomes "", a bare string or a bare list of blocks is
+     * wrapped, and a footnote where Word cannot hold one (a header or footer,
+     * another footnote) is dropped with a note.
+     *
+     * @param  array<string, mixed>  $run
+     * @return list<array<string, mixed>>
+     */
+    private function repairFootnoteRun(array $run, string $path): array
+    {
+        $note = $run['footnote'];
+        unset($run['footnote']);
+        $out = [];
+        if (is_scalar($run['text'] ?? null) && (string) $run['text'] !== '') {
+            $run['text'] = (string) $run['text'];
+            $out[] = $run;
+            $this->note("{$path}.text", 'moved text typed on a footnote mark into a run of its own before it');
+        }
+
+        if ($this->context !== 'body') {
+            $this->note("{$path}.footnote", $this->context === 'band'
+                ? 'dropped a footnote: a header or footer cannot hold one'
+                : 'dropped a footnote inside a footnote');
+
+            return $out;
+        }
+
+        if (is_string($note) && $note !== '') {
+            $note = ['blocks' => [['type' => 'paragraph', 'runs' => [['text' => $note]]]]];
+            $this->note("{$path}.footnote", 'coerced a string footnote to {blocks: [paragraph]}');
+        } elseif (is_array($note) && $note !== [] && array_is_list($note)) {
+            $note = ['blocks' => $note];
+            $this->note("{$path}.footnote", 'coerced a list of blocks to {blocks}');
+        }
+        $blocks = is_array($note) ? ($note['blocks'] ?? null) : null;
+        if (is_string($blocks) && $blocks !== '') {
+            $blocks = [['type' => 'paragraph', 'runs' => [['text' => $blocks]]]];
+        }
+        if (!is_array($blocks) || !array_is_list($blocks)) {
+            $this->note("{$path}.footnote", 'dropped a footnote without blocks');
+
+            return $out;
+        }
+
+        $at = "{$path}.footnote.blocks";
+        $this->context = 'footnote';
+        try {
+            $blocks = $this->dropRefusedInFootnote($this->repairBlocks($blocks, $at), $at);
+        } finally {
+            $this->context = 'body';
+        }
+        if ($blocks === []) {
+            $this->note("{$path}.footnote", 'dropped a footnote with no blocks left');
+
+            return $out;
+        }
+        if (!array_key_exists('text', $run)) {
+            $this->note("{$path}.text", 'defaulted a footnote run\'s text to ""');
+        }
+        $out[]= ['text' => '', 'footnote' => ['blocks' => $blocks]];
+
+        return $out;
+    }
+
+    /**
+     * A footnote's blocks without what a footnote cannot hold
+     * ({@see Schema::FOOTNOTE_REFUSED_TYPES}), at any depth, each drop noted.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     * @return list<array<string, mixed>>
+     */
+    private function dropRefusedInFootnote(array $blocks, string $path): array
+    {
+        $out = [];
+        foreach ($blocks as $i => $block) {
+            $at = "{$path}[{$i}]";
+            $type = $block['type'] ?? null;
+            if (in_array($type, Schema::FOOTNOTE_REFUSED_TYPES, true)) {
+                $this->note($at, "dropped a {$type} block: a footnote cannot hold one");
+
+                continue;
+            }
+            if ($type === 'quote' && is_array($block['blocks'] ?? null)) {
+                $block['blocks'] = $this->dropRefusedInFootnote($block['blocks'], "{$at}.blocks");
+            }
+            if ($type === 'table' && is_array($block['rows'] ?? null)) {
+                foreach ($block['rows'] as $r => $row) {
+                    foreach (is_array($row['cells'] ?? null) ? $row['cells'] : [] as $c => $cell) {
+                        if (is_array($cell['blocks'] ?? null)) {
+                            $block['rows'][$r]['cells'][$c]['blocks'] = $this->dropRefusedInFootnote($cell['blocks'], "{$at}.rows[{$r}].cells[{$c}].blocks");
+                        }
+                    }
+                }
+            }
+            $out[] = $block;
         }
 
         return $out;

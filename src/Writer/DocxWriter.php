@@ -168,7 +168,31 @@ final class DocxWriter
      */
     private bool $inBand = false;
 
-    /** Whether this document needs word/settings.xml (a page colour, or even/odd headers). */
+    /**
+     * The document's footnotes, id => `w:footnote` content (without the
+     * wrapper), numbered 1, 2, 3 in document order as their runs render. The
+     * separator (-1) and continuation separator (0) Word requires are written
+     * around them. Empty without a footnote, and then nothing about the package
+     * changes.
+     *
+     * @var array<int, string>
+     */
+    private array $footnotes = [];
+
+    /**
+     * word/footnotes.xml's OWN relationships (its links and images), written as
+     * `word/_rels/footnotes.xml.rels`. Scoped to that part, as a band's are.
+     *
+     * @var array<string, array{type: string, target: string}>
+     */
+    private array $footnoteRels = [];
+
+    private int $footnoteRelCounter = 0;
+
+    /** True while a footnote's blocks render: a footnote run inside one renders as nothing. */
+    private bool $inFootnote = false;
+
+    /** Whether this document needs word/settings.xml (a page colour, even/odd headers, or footnotes). */
     private bool $hasSettings = false;
 
     /** Whether this document has a page colour (`w:displayBackgroundShape` in settings). */
@@ -278,6 +302,10 @@ final class DocxWriter
         $this->drawingIdOffset = $this->template?->section()?->maxDrawingId() ?? 0;
         $this->charts = [];
         $this->orderedListCount = 0;
+        $this->footnotes = [];
+        $this->footnoteRels = [];
+        $this->footnoteRelCounter = 0;
+        $this->inFootnote = false;
 
         $hasTitle = array_key_exists('title', $doc);
 
@@ -333,6 +361,12 @@ final class DocxWriter
                 $zip->addFromString($name, $part['xml']);
                 if ($part['rels'] !== null) {
                     $zip->addFromString('word/_rels/' . substr($name, strlen('word/')) . '.rels', $part['rels']);
+                }
+            }
+            if ($this->footnotes !== []) {
+                $zip->addFromString('word/footnotes.xml', $this->buildFootnotes());
+                if ($this->footnoteRels !== []) {
+                    $zip->addFromString('word/_rels/footnotes.xml.rels', $this->relsXml($this->footnoteRels));
                 }
             }
             $zip->addFromString('word/_rels/document.xml.rels', $this->buildDocumentRels());
@@ -618,6 +652,9 @@ final class DocxWriter
             $kind = str_starts_with($name, 'word/header') ? 'header' : 'footer';
             $xml .= '<Override PartName="/' . $name . '" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
         }
+        if ($this->footnotes !== []) {
+            $xml .= '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>';
+        }
         foreach (array_keys($this->charts) as $n) {
             $xml .= '<Override PartName="/word/charts/chart' . $n . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>';
         }
@@ -669,6 +706,9 @@ final class DocxWriter
         }
         if ($this->hasSettings) {
             $xml .= '<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>';
+        }
+        if ($this->footnotes !== []) {
+            $xml .= '<Relationship Id="rIdFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>';
         }
         foreach (array_keys($this->bands) as $kind) {
             $xml .= '<Relationship Id="rId' . ucfirst($kind) . '1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . $kind . '1.xml"/>';
@@ -814,7 +854,8 @@ final class DocxWriter
         // w:displayBackgroundShape, so a settings part is written with it.
         $background = self::hex($pageSpec['background'] ?? null);
         $this->hasBackground = $background !== null;
-        $this->hasSettings = $this->hasBackground || $this->evenAndOdd;
+        // Footnotes are registered as the body renders, above, so they are known here.
+        $this->hasSettings = $this->hasBackground || $this->evenAndOdd || $this->footnotes !== [];
 
         return Xml::declaration()
             . '<w:document'
@@ -866,15 +907,111 @@ final class DocxWriter
         return '<w:pgBorders w:offsetFrom="' . ($fromPage ? 'page' : 'text') . '">' . $edges . '</w:pgBorders>';
     }
 
-    /** The settings part, written only when something needs it (a page colour). */
+    /** The settings part, written only when something needs it (a page colour, even/odd headers, footnotes). */
     private function buildSettings(): string
     {
-        // CT_Settings is a sequence: displayBackgroundShape precedes evenAndOddHeaders.
+        // CT_Settings is a sequence: displayBackgroundShape precedes
+        // evenAndOddHeaders, which precedes footnotePr. The footnotePr names the
+        // two separator footnotes, as Word itself writes it.
         return Xml::declaration()
             . '<w:settings xmlns:w="' . self::NS_W . '">'
             . ($this->hasBackground ? '<w:displayBackgroundShape/>' : '')
             . ($this->evenAndOdd ? '<w:evenAndOddHeaders/>' : '')
+            . ($this->footnotes !== [] ? '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>' : '')
             . '</w:settings>';
+    }
+
+    // ─── Footnotes ───────────────────────────────────────────────────────
+
+    /** The mark that opens a footnote's own text: Word's FootnoteReference-styled w:footnoteRef. */
+    private const FOOTNOTE_MARK = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>';
+
+    /**
+     * A footnote run: its blocks rendered into the next footnote, and the
+     * reference run that marks it in the text. Nothing in a header or footer,
+     * nothing inside another footnote, and nothing for a footnote with no
+     * blocks to render (validation refuses all three).
+     *
+     * The blocks render with the footnote part's OWN relationships swapped in,
+     * as a `{blocks}` band's do, so a link or image in a footnote registers in
+     * `word/_rels/footnotes.xml.rels`. Media share the document's counter, so
+     * names and drawing ids stay unique across the package.
+     *
+     * @param  array<string, mixed>  $run
+     */
+    private function renderFootnoteRun(array $run): string
+    {
+        $blocks = is_array($run['footnote']) && is_array($run['footnote']['blocks'] ?? null)
+            ? array_values($run['footnote']['blocks'])
+            : [];
+        if ($this->inBand || $this->inFootnote || $blocks === []) {
+            return '';
+        }
+
+        [$rels, $counter] = [$this->rels, $this->relCounter];
+        [$this->rels, $this->relCounter] = [$this->footnoteRels, $this->footnoteRelCounter];
+        $this->inFootnote = true;
+        try {
+            $content = $this->renderBlocks($blocks, 'FootnoteText');
+        } finally {
+            [$this->footnoteRels, $this->footnoteRelCounter] = [$this->rels, $this->relCounter];
+            [$this->rels, $this->relCounter] = [$rels, $counter];
+            $this->inFootnote = false;
+        }
+        if ($content === '') {
+            return '';
+        }
+
+        // The mark opens the first paragraph, after its properties, followed by
+        // the space Word puts between the number and the text. A footnote that
+        // opens with a table or a quote gets a paragraph of its own for the
+        // mark, and one that ends with a table a closing paragraph: a footnote
+        // is a block container, and must end in a paragraph as a cell must.
+        $mark = self::FOOTNOTE_MARK . '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
+        if (str_starts_with($content, '<w:p>')) {
+            $at = strlen('<w:p>');
+            if (substr($content, $at, strlen('<w:pPr>')) === '<w:pPr>') {
+                $at = strpos($content, '</w:pPr>') + strlen('</w:pPr>');
+            }
+            $content = substr($content, 0, $at) . $mark . substr($content, $at);
+        } else {
+            $content = '<w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>' . self::FOOTNOTE_MARK . '</w:p>' . $content;
+        }
+        if (!str_ends_with($content, '</w:p>')) {
+            $content .= '<w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr></w:p>';
+        }
+
+        $id = count($this->footnotes) + 1;
+        $this->footnotes[$id] = $content;
+
+        return '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="' . $id . '"/></w:r>';
+    }
+
+    /**
+     * word/footnotes.xml: the separator (-1) and continuation separator (0)
+     * Word requires before any footnote of the document's own -- without them
+     * Word reports the file as damaged -- then the document's, from 1.
+     */
+    private function buildFootnotes(): string
+    {
+        $separator = static fn (string $type, int $id, string $tag): string => '<w:footnote w:type="' . $type . '" w:id="' . $id . '">'
+            . '<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:' . $tag . '/></w:r></w:p>'
+            . '</w:footnote>';
+
+        $xml = Xml::declaration()
+            . '<w:footnotes'
+            . ' xmlns:w="' . self::NS_W . '"'
+            . ' xmlns:r="' . self::NS_R . '"'
+            . ' xmlns:wp="' . self::NS_WP . '"'
+            . ' xmlns:a="' . self::NS_A . '"'
+            . ' xmlns:pic="' . self::NS_PIC . '">'
+            . $separator('separator', -1, 'separator')
+            . $separator('continuationSeparator', 0, 'continuationSeparator');
+        foreach ($this->footnotes as $id => $content) {
+            $xml .= '<w:footnote w:id="' . $id . '">' . $content . '</w:footnote>';
+        }
+
+        return $xml . '</w:footnotes>';
     }
 
     // ─── Blocks ──────────────────────────────────────────────────────────
@@ -895,6 +1032,9 @@ final class DocxWriter
             $type = $block['type'] ?? null;
             if ($this->inBand && in_array($type, Schema::BAND_REFUSED_TYPES, true)) {
                 continue; // validation refuses these in a band; unvalidated, they are nothing
+            }
+            if ($this->inFootnote && in_array($type, Schema::FOOTNOTE_REFUSED_TYPES, true)) {
+                continue; // likewise in a footnote
             }
             // OOXML merges adjacent tables — pad with an empty paragraph
             // (both readers recognise and drop content-free paragraphs).
@@ -1439,6 +1579,19 @@ final class DocxWriter
             if (!is_array($run)) {
                 continue;
             }
+            if (array_key_exists('footnote', $run)) {
+                // The mark only: a footnote run carries no text, so no link
+                // either. Unvalidated text typed on the mark is written before
+                // it rather than lost, which is what repair does.
+                if (is_string($run['text'] ?? null) && $run['text'] !== '') {
+                    $plain = $run;
+                    unset($plain['footnote']);
+                    $xml .= $this->renderRuns([$plain]);
+                }
+                $xml .= $this->renderFootnoteRun($run);
+
+                continue;
+            }
             $link = $run['link'] ?? null;
             $runXml = $this->renderRun($run);
             if (is_string($link) && $link !== '') {
@@ -1666,9 +1819,10 @@ final class DocxWriter
      * `$base` is a template's section geometry (last-word#5). The document wins
      * field by field: its `size` over the template's page shape, its
      * `orientation` over the template's, each of its `margins` over that one
-     * template margin. The header / footer distances and gutter, which the
-     * model has no field for, are the template's. Without a base every value
-     * is what it always was.
+     * template margin, and its `margins.header` / `margins.footer` over the
+     * template's header / footer distance. The gutter, which the model has no
+     * field for, is the template's. Without a base every value is what it
+     * always was.
      *
      * @param  mixed  $page
      * @param  array<string, int|bool|null>|null  $base
@@ -1706,7 +1860,15 @@ final class DocxWriter
         $margins = is_array($page['margins'] ?? null) ? $page['margins'] : [];
         $side = static fn (string $k): int => self::twips($margins[$k] ?? null)
             ?? (is_int($base[$k] ?? null) ? $base[$k] : 1440);
-        $distance = static fn (string $k, int $default): int => is_int($base[$k] ?? null) ? $base[$k] : $default;
+        // The header / footer distances are `margins.header` / `margins.footer`
+        // (Word keeps them on w:pgMar too); the document's wins over the
+        // template's, as each side does. The gutter has no model field.
+        // Unsigned in OOXML (ST_TwipsMeasure): an unvalidated negative is 0.
+        $distance = static function (string $k, int $default) use ($margins, $base): int {
+            $own = $k !== 'gutter' ? self::twips($margins[$k] ?? null) : null;
+
+            return $own !== null ? max(0, $own) : (is_int($base[$k] ?? null) ? $base[$k] : $default);
+        };
 
         return [
             'w' => $w,
@@ -1959,6 +2121,21 @@ final class DocxWriter
             . '<w:name w:val="Hyperlink"/><w:qFormat/>'
             . '<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr>'
             . '</w:style>';
+
+        // Only with a footnote, so every other document's styles stay byte-identical.
+        // Word's own names ("footnote text", "footnote reference"): a template
+        // that defines them keeps its own, as for every other style.
+        if ($this->footnotes !== []) {
+            $styles['FootnoteText'] = '<w:style w:type="paragraph" w:styleId="FootnoteText">'
+                . '<w:name w:val="footnote text"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>'
+                . '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+                . '<w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>'
+                . '</w:style>';
+            $styles['FootnoteReference'] = '<w:style w:type="character" w:styleId="FootnoteReference">'
+                . '<w:name w:val="footnote reference"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>'
+                . '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+                . '</w:style>';
+        }
 
         return $styles;
     }

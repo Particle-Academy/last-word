@@ -115,6 +115,9 @@ Runs (inline text spans) carry the formatting:
 { "text": "Hello", "bold": true, "italic": true, "underline": true,
   "strike": true, "code": true, "link": "https://…",
   "color": "#RRGGBB", "highlight": "#RRGGBB" }
+
+// A footnote: the mark, with the note's own blocks (see Footnotes below).
+{ "text": "", "footnote": { "blocks": [ /* Block[] */ ] } }
 ```
 
 Blocks, discriminated by `type`:
@@ -135,6 +138,54 @@ Blocks, discriminated by `type`:
 Image dimensions are optional — the writer sniffs intrinsic size straight
 from the PNG IHDR / JPEG SOF bytes and caps at 6.5in page width keeping
 aspect.
+
+### Footnotes
+
+A footnote is a run with `text: ""` and a `footnote`, placed where the
+reference mark goes:
+
+```jsonc
+{ "type": "paragraph", "runs": [
+  { "text": "Revenue grew 18%" },
+  { "text": "", "footnote": { "blocks": [
+    { "type": "paragraph", "runs": [{ "text": "Audited figures, FY2026." }] }
+  ] } },
+  { "text": " on the prior year." }
+] }
+```
+
+The model carries no number: Word numbers the marks 1, 2, 3 in document order
+and sets each footnote at the foot of the page its mark is on, under a short
+rule and above the footer. A footnote's `blocks` are the body's vocabulary less
+`chart` and `pageBreak` (at any depth); a footnote may sit in a heading, a
+paragraph, a list item, a table cell or a quote, but not inside another
+footnote and not in a header or footer (validation refuses both;
+`validateAndRepair` drops them with a note, and moves text typed on the mark
+into a run of its own before it).
+
+The writer emits `word/footnotes.xml` with the separator (`w:id` -1) and
+continuation separator (0) Word requires, `w:footnotePr` in settings, the
+`FootnoteText` / `FootnoteReference` styles, and the footnotes part's own
+relationships for its links and images. A document without a footnote is
+byte-identical to before. `read()` returns the same run for a `.docx`
+footnote from any producer; the `.doc`, `.odt` and `.rtf` readers still skip
+footnotes. Markdown, HTML, plain-text and portable export do not carry them
+yet: the mark vanishes there and the footnote's text is not exported.
+
+### Page geometry
+
+`page.margins` takes `top`, `right`, `bottom`, `left` and the header and
+footer **distances**, `header` / `footer`: points from the top edge of the page
+to the header and from the bottom edge to the footer (Word's `w:pgMar`
+`header` / `footer`). Defaults: 72 a side, 36 a distance.
+
+`read()` returns only the values that differ from those defaults, and no `page`
+at all when nothing does, so an absent margin means the default, not "none". A
+viewer gets all six numbers from `Schema::pageMargins($doc)`. Where Word puts
+things: the header at `header` from the top, the body from `top`, the footer's
+last line at `footer` from the bottom, footnotes at the foot of the body (above
+`bottom`); Word pushes the body down when a header is taller than `top - header`
+leaves room for, and up when a footer is.
 
 `page` takes `size`, `orientation`, `margins`, `header`, `footer`, and the
 same page decoration fine-print draws: `background` (`#RRGGBB`) and `border`
@@ -411,7 +462,8 @@ The kinds are `blocks`, `items`, `rows` and `cells`, each with `insert`,
 `Heading1-9` styles or `outlineLvl`, run formatting including named
 highlight colors, hyperlinks through the rels part, `numPr` lists with
 `ilvl` nesting (unknown numbering buckets as unordered), tables, inline
-images (returned as data URLs), page breaks and border-only paragraphs.
+images (returned as data URLs), page breaks and border-only paragraphs,
+and footnotes (any ids; Word's own separators skipped).
 Unknown constructs degrade to plain paragraphs — the reader never throws
 on strange XML.
 

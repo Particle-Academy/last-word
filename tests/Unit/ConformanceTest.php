@@ -115,6 +115,92 @@ function childNamed(?DOMElement $parent, string $name): ?DOMElement
     return null;
 }
 
+/**
+ * Every part of a written document, by name.
+ *
+ * @return array<string, string>
+ */
+function writtenParts(array $doc): array
+{
+    $tmp = tempnam(sys_get_temp_dir(), 'lw-conf-') . '.docx';
+    file_put_contents($tmp, Agent::toBytes($doc));
+    $zip = new ZipArchive();
+    expect($zip->open($tmp))->toBeTrue();
+    $parts = [];
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $parts[(string) $zip->getNameIndex($i)] = (string) $zip->getFromIndex($i);
+    }
+    $zip->close();
+    @unlink($tmp);
+
+    return $parts;
+}
+
+function partRoot(?string $xml): ?DOMElement
+{
+    if ($xml === null) {
+        return null;
+    }
+    $dom = new DOMDocument();
+    $dom->loadXML($xml);
+
+    return $dom->documentElement;
+}
+
+/** The `footnotesPart` projection, as the manifest defines it. */
+function footnotesPart(array $doc): array
+{
+    $w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    $parts = writtenParts($doc);
+    $text = static function (DOMElement $el): string {
+        $t = '';
+        foreach (collectByName($el, 't') as $node) {
+            $t .= $node->textContent;
+        }
+
+        return $t;
+    };
+
+    $contentType = null;
+    foreach (collectByName(partRoot($parts['[Content_Types].xml']), 'Override') as $o) {
+        if ($o->getAttribute('PartName') === '/word/footnotes.xml') {
+            $contentType = $o->getAttribute('ContentType');
+        }
+    }
+    $relationship = null;
+    foreach (collectByName(partRoot($parts['word/_rels/document.xml.rels']), 'Relationship') as $rel) {
+        if (str_ends_with($rel->getAttribute('Type'), '/footnotes')) {
+            $relationship = $rel->getAttribute('Target');
+        }
+    }
+    $settings = partRoot($parts['word/settings.xml'] ?? null);
+    $footnotePr = $settings !== null ? childNamed($settings, 'footnotePr') : null;
+
+    $notes = [];
+    $root = partRoot($parts['word/footnotes.xml'] ?? null);
+    foreach ($root?->childNodes ?? [] as $node) {
+        if ($node instanceof DOMElement && $node->localName === 'footnote') {
+            $notes[] = [
+                'id' => $node->getAttributeNS($w, 'id'),
+                'type' => $node->hasAttributeNS($w, 'type') ? $node->getAttributeNS($w, 'type') : null,
+                'text' => $text($node),
+                'content' => normProps($node),
+            ];
+        }
+    }
+
+    return [
+        'contentType' => $contentType,
+        'relationship' => $relationship,
+        'footnotePr' => $footnotePr === null ? null : normProps($footnotePr),
+        'references' => array_map(
+            static fn (DOMElement $r): string => $r->getAttributeNS($w, 'id'),
+            collectByName(partRoot($parts['word/document.xml']), 'footnoteReference'),
+        ),
+        'footnotes' => $notes,
+    ];
+}
+
 function extractorFor(string $fn): callable
 {
     return match ($fn) {
@@ -155,6 +241,8 @@ function extractorFor(string $fn): callable
         'sectionProps' => static fn (array $doc): array => normProps(
             childNamed(childNamed(documentXml($doc), 'body'), 'sectPr'),
         ),
+
+        'footnotesPart' => static fn (array $doc): array => footnotesPart($doc),
 
         'readBack' => static fn (array $doc): array => Agent::read(Agent::toBytes($doc)),
 

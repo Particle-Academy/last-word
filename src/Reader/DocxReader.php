@@ -107,6 +107,24 @@ final class DocxReader
     /** Image bytes taken into header/footer blocks so far, against the media total cap. */
     private int $bandMediaBytes = 0;
 
+    /**
+     * The document's footnotes, by `w:id`, from the part its `footnotes`
+     * relationship names: the `w:footnote` elements of its own (separators and
+     * continuation notices are not footnotes).
+     *
+     * @var array<string, DOMElement>
+     */
+    private array $footnoteNodes = [];
+
+    /** The footnotes part's OWN relationships, which resolve its links and images. */
+    private array $footnoteRels = [];
+
+    /** A footnote's blocks once read, by id: a footnote referenced twice is read once. */
+    private array $footnoteCache = [];
+
+    /** True while a footnote's blocks are read: a reference inside one is ignored. */
+    private bool $inFootnote = false;
+
     /** chart part name (without leading word/) → XML. */
     private array $chartParts = [];
 
@@ -150,6 +168,8 @@ final class DocxReader
         $this->unrepresented = [];
         $this->bandMediaBytes = 0;
         $this->inBand = false;
+        $this->inFootnote = false;
+        $this->footnoteCache = [];
 
         $dom = new DOMDocument();
         $prev = libxml_use_internal_errors(true);
@@ -242,9 +262,14 @@ final class DocxReader
         $pgMar = $this->firstChildByName($sectPr, 'pgMar');
         $margins = [];
         if ($pgMar !== null) {
-            foreach (self::BOX_EDGES as $side) {
+            // Each value only when it differs from what the writer puts there
+            // unasked -- 1440 twips a side, 720 to the header and the footer --
+            // so a document read before the distances were read reads the same.
+            // Schema::pageMargins() fills the defaults back in for a viewer.
+            foreach ([...self::BOX_EDGES, 'header', 'footer'] as $side) {
                 $value = $this->wAttr($pgMar, $side);
-                if (is_numeric($value) && (int) $value !== 1440) {
+                $default = $side === 'header' || $side === 'footer' ? 720 : 1440;
+                if (is_numeric($value) && (int) $value !== $default) {
                     $margins[$side] = self::points((float) $value);
                 }
             }
@@ -667,6 +692,7 @@ final class DocxReader
         }
         $relsXml = $zip->read('word/_rels/document.xml.rels');
         $this->rels = $relsXml !== null ? $this->parseRels($relsXml) : [];
+        $this->loadFootnotes($zip, $relsXml);
         $numberingXml = $zip->read('word/numbering.xml');
         $this->numbering = $numberingXml !== null ? $this->parseNumbering($numberingXml) : [];
         $this->coreXml = $zip->read('docProps/core.xml');
@@ -694,6 +720,108 @@ final class DocxReader
         }
 
         return $documentXml;
+    }
+
+    /** Keeps the footnotes part's DOM alive while its elements are referenced. */
+    private ?DOMDocument $footnotesDom = null;
+
+    /**
+     * The footnotes part the document's `footnotes` relationship names, and its
+     * own relationships. Sized by the archive's own limits, as document.xml is
+     * (a long legal document's footnotes outgrow a header's 2 MiB cap); a part
+     * declaring a DOCTYPE is not read, and its references then read as nothing.
+     */
+    private function loadFootnotes(SourceArchive $zip, ?string $relsXml): void
+    {
+        $this->footnoteNodes = [];
+        $this->footnoteRels = [];
+        $this->footnotesDom = null;
+        $target = $relsXml !== null ? $this->relTargetOfType($relsXml, 'footnotes') : null;
+        if ($target === null) {
+            return;
+        }
+        $name = 'word/' . ltrim(str_replace('\\', '/', $target), '/');
+        if (str_starts_with($target, '/')) {
+            $name = ltrim($target, '/');
+        }
+        $xml = $zip->read($name);
+        if ($xml === null || stripos($xml, '<!DOCTYPE') !== false) {
+            return;
+        }
+        $dom = new DOMDocument();
+        $prev = libxml_use_internal_errors(true);
+        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$ok || $dom->documentElement === null) {
+            return;
+        }
+        foreach ($dom->documentElement->childNodes as $node) {
+            if ($node instanceof DOMElement && $node->localName === 'footnote'
+                && in_array($this->wAttr($node, 'type'), [null, 'normal'], true)) {
+                $id = $this->wAttr($node, 'id');
+                if ($id !== null && !isset($this->footnoteNodes[$id])) {
+                    $this->footnoteNodes[$id] = $node;
+                }
+            }
+        }
+        $this->footnotesDom = $dom;
+
+        $relsName = 'word/_rels/' . basename($name) . '.rels';
+        $partRels = $zip->read($relsName);
+        $this->footnoteRels = $partRels !== null && stripos($partRels, '<!DOCTYPE') === false ? $this->parseRels($partRels) : [];
+    }
+
+    /** The target of the first relationship whose type ends `/{$type}`, or null. */
+    private function relTargetOfType(string $relsXml, string $type): ?string
+    {
+        $dom = new DOMDocument();
+        $prev = libxml_use_internal_errors(true);
+        $ok = $dom->loadXML($relsXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$ok || $dom->documentElement === null) {
+            return null;
+        }
+        foreach ($dom->documentElement->childNodes as $node) {
+            if ($node instanceof DOMElement && $node->localName === 'Relationship'
+                && str_ends_with($node->getAttribute('Type'), '/' . $type)
+                && strcasecmp($node->getAttribute('TargetMode'), 'External') !== 0
+                && $node->getAttribute('Target') !== '') {
+                return $node->getAttribute('Target');
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The model run for a `w:footnoteReference`: `{text: "", footnote: {blocks}}`,
+     * its blocks read by the body's own block reader against the footnotes
+     * part's relationships. Null -- nothing in the model -- for a reference in a
+     * header or footer or inside another footnote (Word allows neither), for an
+     * id with no footnote, and for a footnote with no content.
+     *
+     * @return array{text: string, footnote: array{blocks: list<array<string, mixed>>}}|null
+     */
+    private function footnoteRun(string $id): ?array
+    {
+        if ($this->inBand || $this->inFootnote || !isset($this->footnoteNodes[$id])) {
+            return null;
+        }
+        if (!array_key_exists($id, $this->footnoteCache)) {
+            [$rels, $this->rels] = [$this->rels, $this->footnoteRels];
+            $this->inFootnote = true;
+            try {
+                $this->footnoteCache[$id] = $this->parseBlockContainer($this->footnoteNodes[$id]);
+            } finally {
+                $this->rels = $rels;
+                $this->inFootnote = false;
+            }
+        }
+        $blocks = $this->footnoteCache[$id];
+
+        return $blocks === [] ? null : ['text' => '', 'footnote' => ['blocks' => $blocks]];
     }
 
     /**
@@ -1347,10 +1475,9 @@ final class DocxReader
             }
             switch ($node->localName) {
                 case 'r':
-                    $run = $this->parseRun($node, $link, $state);
-                    if ($run !== null) {
-                        $runs[] = $run;
-                    }
+                    // A list: one w:r holding text AND a footnote reference
+                    // (another producer's spelling) is two runs in the model.
+                    array_push($runs, ...$this->parseRun($node, $link, $state));
 
                     break;
                 case 'hyperlink':
@@ -1396,10 +1523,14 @@ final class DocxReader
     }
 
     /**
+     * One w:r as model runs: usually one, none when it carries no text, and a
+     * footnote run where it holds a `w:footnoteReference` (with the text either
+     * side of it as runs of their own).
+     *
      * @param  array{pageBreak: bool, images: list<array<string, mixed>>}  $state
-     * @return array<string, mixed>|null
+     * @return list<array<string, mixed>>
      */
-    private function parseRun(DOMElement $r, ?string $link, array &$state): ?array
+    private function parseRun(DOMElement $r, ?string $link, array &$state): array
     {
         $props = [];
         $rPr = $this->firstChildByName($r, 'rPr');
@@ -1407,6 +1538,7 @@ final class DocxReader
             $props = $this->parseRunProperties($rPr);
         }
 
+        $out = [];
         $text = '';
         foreach ($r->childNodes as $node) {
             if (!($node instanceof DOMElement)) {
@@ -1420,7 +1552,32 @@ final class DocxReader
             switch ($node->localName) {
                 case 't':
                     if ($state['field'] === null) {
-                        $text .= $node->textContent;
+                        $piece = $node->textContent;
+                        // The space Word puts between a footnote's own mark and
+                        // its text is the mark's, not the text's.
+                        if (($state['afterMark'] ?? false) && $piece !== '') {
+                            if ($piece[0] === ' ') {
+                                $piece = substr($piece, 1);
+                            }
+                            $state['afterMark'] = false;
+                        }
+                        $text .= $piece;
+                    }
+
+                    break;
+                case 'footnoteRef':
+                    // A footnote's own number, inside footnotes.xml: Word draws it.
+                    $state['afterMark'] = true;
+
+                    break;
+                case 'footnoteReference':
+                    $note = $this->footnoteRun((string) $this->wAttr($node, 'id'));
+                    if ($note !== null) {
+                        if ($text !== '') {
+                            $out[] = $this->runFrom($text, $props, $link, $state);
+                            $text = '';
+                        }
+                        $out[] = $note;
                     }
 
                     break;
@@ -1433,6 +1590,11 @@ final class DocxReader
 
                     break;
                 case 'tab':
+                    if ($state['afterMark'] ?? false) {
+                        $state['afterMark'] = false; // a tab after the mark is the mark's too
+
+                        break;
+                    }
                     $text .= "\t";
 
                     break;
@@ -1450,9 +1612,22 @@ final class DocxReader
             }
         }
 
-        if ($text === '') {
-            return null;
+        if ($text !== '') {
+            $out[] = $this->runFrom($text, $props, $link, $state);
         }
+
+        return $out;
+    }
+
+    /**
+     * A model run from text and its run properties.
+     *
+     * @param  array<string, mixed>  $props
+     * @param  array{seenText: bool}  $state
+     * @return array<string, mixed>
+     */
+    private function runFrom(string $text, array $props, ?string $link, array &$state): array
+    {
         $state['seenText'] = true;
 
         $run = ['text' => $text];
@@ -1624,11 +1799,14 @@ final class DocxReader
     {
         $merged = [];
         foreach ($runs as $run) {
-            if ($run['text'] === '') {
+            // A footnote run's text is always "", and it is never merged: two
+            // identical footnotes in a row are two footnotes.
+            $isNote = array_key_exists('footnote', $run);
+            if ($run['text'] === '' && !$isNote) {
                 continue;
             }
             $last = $merged !== [] ? count($merged) - 1 : null;
-            if ($last !== null) {
+            if ($last !== null && !$isNote && !array_key_exists('footnote', $merged[$last])) {
                 $a = $merged[$last];
                 $b = $run;
                 $aProps = $a;
