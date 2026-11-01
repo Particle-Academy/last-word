@@ -18,6 +18,8 @@ with the package's JSON schema (`Agent::jsonSchema()` / `Agent.jsonSchema()` / `
    every derived number, computed and checked before anything is written.
 2. Build the whole JSON in one go, following the recipes below.
 3. Check it: `Agent::validate` (PHP), `Agent.validate` (Node) or `validate` (Python) returns errors with a hint each.
+   In PHP, check the length too: `Agent::layout($doc)` returns the page count and the block
+   each page starts with, as the last-word-ui viewer draws them (PHP only for now).
 4. Write it (`Agent::write` / `Agent.toBytes` / `to_bytes`). If you can render the file and look at it, do,
    but repair only what you can see is wrong: one-shot "improvements" made
    blind regressed more documents than they fixed.
@@ -137,6 +139,13 @@ genre, lead with what the reader must know or decide, and analyse rather than re
   -> Headings name themes ("Growth is concentrated in EMEA"); the table holds the rows.
 - Page 1 dense, page 2 one-third empty. -> Estimate: a letter page at 11pt holds about
   45 lines of body text; balance sections across the pages the brief asks for.
+- "A two-page memo" that the reader sees as three pages. A word count is a poor
+  estimate: headings, lists, tables and a letterhead take room words do not show. ->
+  In PHP, measure it: `$l = Agent::layout($doc, $options)` (pass the same `template`
+  options you write with) gives `$l['pages']`, `$l['pageStarts']` (the block index each
+  page starts with) and `$l['pageList'][$i]['fill']` (0..1). Too long: tighten prose or
+  merge sections, then measure again. `$l['approximate']` lists anything only estimated
+  (a font other than Calibri, code, a date field); empty means exact.
 
 - A last page holding one stranded paragraph and a short section, 70% blank. ->
   Estimate the length first (about 45 lines of 11pt body per letter page, a table row

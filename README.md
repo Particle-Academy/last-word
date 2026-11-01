@@ -353,6 +353,33 @@ Targets: `markdown`, `text`, `html` (escaped, no scripts, links only
 http/https/mailto, images as data URIs), `docx` (from .doc, .odt, .rtf).
 `pdf` answers `export_unavailable` until the fine-print bridge ships.
 
+## Page count
+
+`Agent::layout()` lays a document out the way the
+[`@particle-academy/last-word-ui`](https://www.npmjs.com/package/@particle-academy/last-word-ui)
+viewer (0.3.0+) does, without a browser. That viewer draws Calibri and
+unspecified text in a bundled Carlito (metric-compatible with Calibri), so its
+pages are the same on every machine, and this matches them: on the shared
+fixtures, the page count, every page start and every measured line agree
+exactly.
+
+```php
+$l = Agent::layout($doc);                       // or Agent::layout($doc, $writeOptions)
+// MOIC's letterhead memo (tests/fixtures/layout/viewer-agreement.json, "memo-letterhead"):
+$l['pages'];                                    // 2
+$l['pageStarts'];                               // [0, 9]: block 9 (the table) starts page 2
+$l['pageList'][1];                              // ['page' => 2, 'blocks' => [9, ..., 20], 'continued' => true,
+                                                //  'footnotes' => [], 'used' => 588.9, 'capacity' => 648, 'fill' => 0.909]
+                                                // continued: the table split, its header row repeated
+$l['approximate'];                              // [] = exact; else e.g. ['font:Garamond', 'code']
+```
+
+Pass the options you write with: with a `template`, the document is laid out
+as it reads back (a first-page letterhead from `templateFirstPageOnly` takes
+its real height on page 1). Text in another font, code and band date fields
+are estimates, and `approximate` says so. PHP-first: the Node and Python
+packages do not have it yet.
+
 ## Agent API
 
 Static façade, mirrored exactly in the Node package:
@@ -375,6 +402,7 @@ Static façade, mirrored exactly in the Node package:
 | `Agent::toMarkdownWithReport($doc)` | the markdown bridge plus its loss report |
 | `Agent::export($input, $target, $options, $policy)` / `Agent::exportToolDefinition($policy)` | host-gated exports |
 | `Agent::version()` | package version |
+| `Agent::layout($doc, $options)` | **PHP only.** The page count and where each page starts, as last-word-ui draws it (see *Page count*) |
 
 `validateAndRepair()` is built for agentic feedback loops: bare strings
 become runs, `"text"` shorthand becomes runs, heading levels clamp to 1-6,

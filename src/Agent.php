@@ -14,6 +14,7 @@ use LastWord\Exchange\InputRefused;
 use LastWord\Exchange\OptionsInvalid;
 use LastWord\Exchange\Portable;
 use LastWord\Exchange\ToPortable;
+use LastWord\Layout\PageLayout;
 use LastWord\Exceptions\TemplateException;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
@@ -54,7 +55,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.16.0';
+    public const VERSION = '0.17.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
@@ -805,6 +806,41 @@ final class Agent
     public static function exportToolDefinition(?ExportPolicy $policy = null): array
     {
         return Exporter::toolDefinition($policy);
+    }
+
+    /**
+     * How many pages a document lays out to, and where each page starts:
+     * the pagination `@particle-academy/last-word-ui` (0.3.0+) draws, computed
+     * here without a browser.
+     *
+     * `{pages, pageStarts, pageList, page, font, approximate}`. `pageStarts`
+     * holds, per page, the index of the top-level block that page starts with
+     * (null for an empty page); `pageList[i]` adds the blocks on the page,
+     * whether the first one continues from the page before, its footnote
+     * numbers, and the body height `used` / `capacity` in points with `fill`
+     * (0..1). `approximate` lists what could only be estimated (a font other
+     * than Calibri, code, a character Carlito lacks, a date field); empty means
+     * every line was measured as the viewer measures it.
+     *
+     * Same options as {@see toBytes()}: with a `template`, the document is laid
+     * out as it reads back after writing, which is what the viewer is given --
+     * so a letterhead taken with `templateFirstPageOnly` costs page 1 its real
+     * height. PHP-first: the Node and Python packages do not have it yet.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool}  $options
+     * @return array{pages: int, pageStarts: list<int|null>, pageList: list<array<string, mixed>>, page: array{size: string, width: float, height: float}, font: string, approximate: list<string>}
+     *
+     * @throws SchemaException
+     * @throws TemplateException
+     */
+    public static function layout(array $doc, array $options = []): array
+    {
+        $doc = (($options['template'] ?? null) !== null && ($options['template'] ?? null) !== '')
+            ? self::read(self::toBytes($doc, $options))
+            : self::writable($doc);
+
+        return PageLayout::of($doc);
     }
 
     /**

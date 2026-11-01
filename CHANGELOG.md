@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-01
+
+**What you must do: nothing.** One new method; nothing existing changed. It is
+PHP-first: `last-word-js` and `last-word-py` do not have `layout()` yet.
+
+### Added
+
+- **`Agent::layout($doc, $options = [])`: the page count, computed without a
+  browser** (MOIC, 2026-11-01). Returns `pages` (int), `pageStarts` (per page,
+  the index of the top-level block it starts with; `null` for an empty page),
+  `pageList` (per page: its blocks, whether the first continues from the page
+  before, its footnote numbers, body `used` / `capacity` in points and `fill`
+  0..1), `page` (size, width, height) and `font`, plus `approximate`: what it
+  could only estimate (a font other than Calibri, code, a character Carlito
+  lacks, a date or time field). An empty `approximate` means exact.
+  - It is the pagination `@particle-academy/last-word-ui` 0.3.0 draws, which
+    renders Calibri and unspecified text in a bundled Carlito. The same rules,
+    in PHP: greedy line breaking on Carlito's advance widths per run (size,
+    bold, italic, letter spacing), the viewer's spacing defaults, headings with
+    keep-with-next, list indents, quotes, tables (column weights, collapsed
+    borders, row heights, the header row repeated, rows never split),
+    footnotes taking room on their mark's page, widow and orphan control, and
+    the page model: size, orientation, margins, header and footer distances,
+    and one body height per page class (page 1, even, odd) from the bands each
+    draws.
+  - Takes the same options as `toBytes()`. With a `template`, the document is
+    laid out as it reads back after writing (that is what the viewer is
+    given), so a letterhead taken with `templateParts` and
+    `templateFirstPageOnly` costs page 1 its real height. Taking the
+    template's `styles` can bring its font (the test letterhead brings
+    Garamond); `approximate` then says so.
+  - Agreement: on the shared fixtures
+    (`tests/fixtures/layout/viewer-agreement.json`: MOIC's ~570-word
+    letterhead memo, on a band and on a template, its ~860-word letter,
+    footnotes, a 70-row table, keep-with-next, first/even bands, edge cases),
+    the page count and every page start equal the viewer's in Chromium, and so
+    does every measured input: each block height, line breakpoint, table row,
+    band and footnote height, and footnote mark position.
+  - `resources/layout/carlito.json`: Carlito 1.104's advance widths (every BMP
+    codepoint it maps, four styles), derived from the font files (the sha256 of
+    each is in its `provenance`), and the line-box heights measured in
+    Chromium. `LastWord\Layout\PageLayout::measure()` returns the measured
+    input, for tracing a disagreement block by block.
+- Agent guide: measure the length with `layout()` rather than a word count
+  (the guide's bytes and hash changed; copy them into the Node and Python
+  packages at their next release). New sha256:
+  `cb47bdfa50116a89f5b046f044728abbee2b0455dd5dd6ecb16ef15600db1e72`.
+
 ## [0.16.0] - 2026-11-01
 
 **What you must do: nothing, unless you want a first-page letterhead, first or
