@@ -54,7 +54,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.15.0';
+    public const VERSION = '0.16.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
@@ -197,9 +197,19 @@ final class Agent
      *     even variants), and `page.size`, `page.orientation` and each of
      *     `page.margins` override that one value. Ignored when `template` is
      *     absent or empty; an unknown part name throws.
+     *   - `templateFirstPageOnly` (bool, default false; 0.16.0): the letterhead
+     *     on the FIRST page only. The template's header and footer taken by
+     *     `templateParts` become Word's first-page header and footer (`w:titlePg`
+     *     on) -- the template's own first-page part when it has one in force,
+     *     else its default part; never its even part. Later pages get the
+     *     document's own `page.header` / `page.footer`, and nothing when it sets
+     *     none. A document `page.firstHeader` / `page.firstFooter` still wins
+     *     over the template's for that kind. False or absent is exactly the
+     *     behaviour before it existed, byte for byte. Anything but a boolean
+     *     throws {@see TemplateException}; ignored when `template` is absent.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool}  $options
      *
      * @throws SchemaException
      * @throws TemplateException
@@ -216,7 +226,7 @@ final class Agent
      * SchemaException on validation errors. Same options as {@see toBytes()}.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool}  $options
      * @return array{path: string, bytes: int, blocks: int}
      *
      * @throws SchemaException
@@ -253,7 +263,12 @@ final class Agent
             );
         }
 
-        return DocxTemplate::open($template, $options['templateParts'] ?? DocxTemplate::DEFAULT_PARTS);
+        $firstPageOnly = array_key_exists('templateFirstPageOnly', $options) ? $options['templateFirstPageOnly'] : false;
+        if (! is_bool($firstPageOnly)) {
+            throw new TemplateException('templateFirstPageOnly must be true or false.');
+        }
+
+        return DocxTemplate::open($template, $options['templateParts'] ?? DocxTemplate::DEFAULT_PARTS, $firstPageOnly);
     }
 
     /**
@@ -396,7 +411,7 @@ final class Agent
 
         // A header or footer that holds blocks (last-word#6) -- a letterhead's
         // logo and address -- so an agent knows it is there without the JSON.
-        foreach (['header', 'footer'] as $kind) {
+        foreach (Schema::PAGE_BANDS as $kind) {
             $band = is_array($doc['page'] ?? null) ? ($doc['page'][$kind] ?? null) : null;
             if (!is_array($band) || !is_array($band['blocks'] ?? null)) {
                 continue;

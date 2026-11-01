@@ -61,6 +61,120 @@ final class Schema
 
     public const PAGE_BAND_DISTANCE_DEFAULT = 36.0;
 
+    /**
+     * The page's running bands, in the order the schema lists them and read()
+     * returns them (0.16.0). `header` / `footer` are every page; with a
+     * `firstHeader` they are every page but the first, and with an `evenHeader`
+     * the odd pages. Each variant is the same shape as `header`. Word's own
+     * reference types: `default`, `first`, `even`.
+     *
+     * @var list<string>
+     */
+    public const PAGE_BANDS = ['header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter'];
+
+    /**
+     * A band key => [kind, Word reference type].
+     *
+     * @var array<string, array{0: string, 1: string}>
+     */
+    public const PAGE_BAND_SLOTS = [
+        'header' => ['header', 'default'],
+        'footer' => ['footer', 'default'],
+        'firstHeader' => ['header', 'first'],
+        'firstFooter' => ['footer', 'first'],
+        'evenHeader' => ['header', 'even'],
+        'evenFooter' => ['footer', 'even'],
+    ];
+
+    /**
+     * The field tokens live in header and footer text (0.16.0), as one regex:
+     * `{page}` `{pages}` `{section}` `{sectionpages}` `{author}` `{title}`
+     * `{filename}`, and `{date}` / `{time}` with an optional `:FORMAT` -- a Word
+     * date-time picture, one or more characters, none of `{`, `}`, `"` or a
+     * backslash. Names are lower-case and exact. Anything else in braces is
+     * literal text, and so is `{page:x}`: only date and time take a format.
+     * Group 1 is a plain name; group 2 a dated name and group 3 its format.
+     */
+    public const FIELD_TOKEN = '/\{(?:(page|pages|section|sectionpages|author|title|filename)|(date|time)(?::([^{}"\\\\]+))?)\}/';
+
+    /** Field token name => Word field instruction. */
+    public const FIELD_INSTRUCTIONS = [
+        'page' => 'PAGE',
+        'pages' => 'NUMPAGES',
+        'section' => 'SECTION',
+        'sectionpages' => 'SECTIONPAGES',
+        'author' => 'AUTHOR',
+        'title' => 'TITLE',
+        'filename' => 'FILENAME',
+        'date' => 'DATE',
+        'time' => 'TIME',
+    ];
+
+    /**
+     * Header/footer text split into literal text and field tokens, in order:
+     * a string is literal, an array is a field --
+     * `{token, name, instruction}`, where `instruction` is the Word field
+     * instruction without its surrounding spaces (`PAGE`,
+     * `DATE \@ "yyyy-MM-dd"`). Empty pieces are dropped.
+     *
+     * @return list<string|array{token: string, name: string, instruction: string}>
+     */
+    public static function splitFieldTokens(string $text): array
+    {
+        $out = [];
+        $at = 0;
+        if (preg_match_all(self::FIELD_TOKEN, $text, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE) > 0) {
+            foreach ($matches as $m) {
+                [$token, $offset] = $m[0];
+                if ($offset > $at) {
+                    $out[] = substr($text, $at, $offset - $at);
+                }
+                $plain = $m[1][0] ?? '';
+                $name = $plain !== '' ? $plain : $m[2][0];
+                $format = $plain === '' ? ($m[3][0] ?? '') : '';
+                $out[] = [
+                    'token' => $token,
+                    'name' => $name,
+                    'instruction' => self::FIELD_INSTRUCTIONS[$name] . ($format !== '' ? ' \@ "' . $format . '"' : ''),
+                ];
+                $at = $offset + strlen($token);
+            }
+        }
+        if ($at < strlen($text)) {
+            $out[] = substr($text, $at);
+        }
+
+        return $out;
+    }
+
+    /**
+     * A Word field instruction back as its token, or null when it is not one:
+     * the first word names the field (any case), `\@ "FORMAT"` (or an unquoted
+     * `\@ FORMAT`) is DATE's and TIME's picture, and every other switch or
+     * argument is dropped (`\* MERGEFORMAT`, FILENAME's `\p`, AUTHOR's new name).
+     * A picture the grammar cannot hold reads as the bare `{date}` / `{time}`.
+     */
+    public static function fieldTokenOf(string $instruction): ?string
+    {
+        if (preg_match('/^\s*([A-Za-z]+)(.*)$/s', $instruction, $m) !== 1) {
+            return null;
+        }
+        $name = array_search(strtoupper($m[1]), self::FIELD_INSTRUCTIONS, true);
+        if (!is_string($name)) {
+            return null;
+        }
+        if (in_array($name, ['date', 'time'], true)
+            && preg_match('/\\\\@\s*(?:"([^"]*)"|(\S+))/', $m[2], $p) === 1) {
+            $format = ($p[1] ?? '') !== '' ? $p[1] : ($p[2] ?? '');
+            $token = '{' . $name . ':' . $format . '}';
+            if ($format !== '' && preg_match(self::FIELD_TOKEN, $token, $check) === 1 && $check[0] === $token) {
+                return $token;
+            }
+        }
+
+        return '{' . $name . '}';
+    }
+
     /** @var list<string> */
     public const ALIGNMENTS = ['left', 'center', 'right', 'justify'];
 
@@ -127,7 +241,7 @@ final class Schema
             'description' => 'Box spacing in points. Anything omitted is left alone.',
             'properties' => array_fill_keys(['top', 'right', 'bottom', 'left'], $points),
         ];
-        $bandSlot = ['type' => 'string', 'description' => 'Text. `{page}` is the current page number and `{pages}` the page count, both live fields: "Page {page} of {pages}".'];
+        $bandSlot = ['type' => 'string', 'description' => 'Text with live Word fields: {page} and {pages} ("Page {page} of {pages}"), {section}, {sectionpages}, {author} (meta.author), {title} (the document title), {filename}, {date} and {time} in the reader\'s locale, or {date:FORMAT} / {time:FORMAT} with a Word picture such as {date:d MMMM yyyy} or {time:HH:mm}. Anything else in braces is literal text.'];
         $band = [
             'type' => 'object',
             'additionalProperties' => false,
@@ -333,7 +447,15 @@ final class Schema
             'type' => 'object',
             'required' => ['blocks'],
             'properties' => [
-                'title' => ['type' => 'string'],
+                'title' => ['type' => 'string', 'description' => 'The document title: docProps/core.xml dc:title, what Word shows in File > Info and what a {title} field in a header or footer shows. Not rendered in the body; write a heading for that.'],
+                'meta' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'description' => 'Document properties beyond the title (which is the top-level `title`).',
+                    'properties' => [
+                        'author' => ['type' => 'string', 'description' => 'docProps/core.xml dc:creator: Word\'s Author property, and what an {author} field in a header or footer shows.'],
+                    ],
+                ],
                 'blocks' => ['type' => 'array', 'items' => $blockRef],
                 'page' => [
                     'type' => 'object',
@@ -343,8 +465,12 @@ final class Schema
                         'size' => ['enum' => self::PAGE_SIZES],
                         'orientation' => ['enum' => ['portrait', 'landscape']],
                         'margins' => ['$ref' => '#/$defs/pageMargins'],
-                        'header' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running header on every page: a one-line band, or blocks (a letterhead with a logo).'],
-                        'footer' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers.'],
+                        'header' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running header on every page: a one-line band, or blocks (a letterhead with a logo). With a firstHeader, every page but the first; with an evenHeader, the odd pages.'],
+                        'footer' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.'],
+                        'firstHeader' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a letterhead on page one, a plainer header after. {"blocks": []} leaves page one with no header when header is set.'],
+                        'firstFooter' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.'],
+                        'evenHeader' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.'],
+                        'evenFooter' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The footer of even pages; footer is then the odd pages\'. Without it the footer is on even pages too.'],
                         'background' => $hex + ['description' => 'Page colour on every page, under everything else, e.g. "#FDFAF3". White (none) by default. Word shows it on screen and prints it only when "Print background colors" is on.'],
                         'border' => [
                             'type' => 'object',
@@ -404,7 +530,7 @@ final class Schema
                     'type' => 'object',
                     'required' => ['blocks'],
                     'additionalProperties' => false,
-                    'description' => 'A running header or footer that holds blocks -- the body\'s own vocabulary less chart and pageBreak (at any depth) -- for what one line cannot: a logo, an address over several lines, a table. e.g. {"blocks": [{"type": "image", "src": "data:image/png;base64,...", "widthPx": 140}, {"type": "paragraph", "align": "right", "runs": [{"text": "Acme Ltd, 1 Example Street", "size": 9}]}]}. In run text `{page}` and `{pages}` are live page fields, as in a band. Never mixed with left/center/right/size/color. Images: PNG or JPEG data URLs whose bytes match, each at most 16 MiB, at most 32 MiB across the header and footer.',
+                    'description' => 'A running header or footer that holds blocks -- the body\'s own vocabulary less chart and pageBreak (at any depth) -- for what one line cannot: a logo, an address over several lines, a table. e.g. {"blocks": [{"type": "image", "src": "data:image/png;base64,...", "widthPx": 140}, {"type": "paragraph", "align": "right", "runs": [{"text": "Acme Ltd, 1 Example Street", "size": 9}]}]}. In run text the field tokens are live fields, as in a band ({page}, {pages}, {date:yyyy-MM-dd} ...). Never mixed with left/center/right/size/color. Images: PNG or JPEG data URLs whose bytes match, each at most 16 MiB, at most 32 MiB across the header and footer.',
                     'properties' => [
                         'blocks' => [
                             'type' => 'array',

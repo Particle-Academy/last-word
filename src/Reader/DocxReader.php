@@ -194,6 +194,11 @@ final class DocxReader
         if ($this->title !== null && $this->title !== '') {
             $doc['title'] = $this->title;
         }
+        // meta.author (0.16.0): dc:creator, beside the title it shares a part with.
+        $author = $this->parseCoreElement('creator');
+        if ($author !== null) {
+            $doc['meta'] = ['author' => $author];
+        }
 
         // Section geometry and document defaults are surfaced ONLY when they
         // differ from what the writer produces unasked, for the same reason
@@ -278,11 +283,8 @@ final class DocxReader
             $out['margins'] = $margins;
         }
 
-        foreach (['header', 'footer'] as $kind) {
-            $band = $this->parseBand($sectPr, $kind);
-            if ($band !== null) {
-                $out[$kind] = $band;
-            }
+        foreach ($this->parseBands($sectPr) as $key => $band) {
+            $out[$key] = $band;
         }
 
         // Decoration last, background before border, so a page reads back in
@@ -374,8 +376,88 @@ final class DocxReader
     }
 
     /**
-     * The section's DEFAULT header or footer as a band: left / center / right
-     * text with PAGE and NUMPAGES fields read back as `{page}` / `{pages}`.
+     * The section's headers and footers, by model key, in
+     * {@see Schema::PAGE_BANDS} order: `header` / `footer` from the DEFAULT
+     * references, and (0.16.0) `firstHeader` / `firstFooter` from the FIRST ones
+     * while `w:titlePg` is on, `evenHeader` / `evenFooter` from the EVEN ones
+     * while settings turn on `w:evenAndOddHeaders`. A switch that is off makes
+     * its references nothing, as in Word.
+     *
+     * A variant that names the same part as the default is not repeated (our
+     * writer references the default for page one when only one kind has a
+     * first-page band). One with no part, or an empty part, while the default
+     * has content, is `{"blocks": []}`: that page shows no header in Word, and
+     * the model says so rather than letting a write-back put the default there.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function parseBands(DOMElement $sectPr): array
+    {
+        $titlePg = false;
+        $el = $this->firstChildByName($sectPr, 'titlePg');
+        if ($el !== null) {
+            $titlePg = $this->toggleOn($this->wAttr($el, 'val'));
+        }
+        $found = [];
+        foreach (['header', 'footer'] as $kind) {
+            $default = $this->bandTarget($sectPr, $kind, 'default');
+            $band = $default !== null ? $this->parseBandPart($default, $kind) : null;
+            if ($band !== null) {
+                $found[$kind] = $band;
+            }
+            foreach (['first' => $titlePg, 'even' => $this->evenAndOddHeaders] as $type => $on) {
+                if (!$on) {
+                    continue;
+                }
+                $key = $type . ucfirst($kind);
+                $target = $this->bandTarget($sectPr, $kind, $type);
+                if ($target !== null && $target === $default) {
+                    continue;
+                }
+                $variant = $target !== null ? $this->parseBandPart($target, $key) : null;
+                if ($variant === null && $band !== null) {
+                    $variant = ['blocks' => []];
+                }
+                if ($variant !== null) {
+                    $found[$key] = $variant;
+                }
+            }
+        }
+
+        $out = [];
+        foreach (Schema::PAGE_BANDS as $key) {
+            if (isset($found[$key])) {
+                $out[$key] = $found[$key];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * The part name (`header1.xml`) a section's header or footer reference of
+     * this type names, or null. The last reference of a type wins, as it always
+     * has for the default; a reference with no type is the default.
+     */
+    private function bandTarget(DOMElement $sectPr, string $kind, string $type): ?string
+    {
+        $name = null;
+        foreach ($sectPr->childNodes as $node) {
+            if ($node instanceof DOMElement && $node->localName === $kind . 'Reference' && ($this->wAttr($node, 'type') ?? 'default') === $type) {
+                $rid = (string) $this->rAttr($node, 'id');
+                $target = $this->rels[$rid]['target'] ?? null;
+                $name = is_string($target) ? ltrim(str_replace('\\', '/', $target), '/') : null;
+            }
+        }
+
+        return $name;
+    }
+
+    /**
+     * One header or footer part as a band: left / center / right text with its
+     * field tokens read back (`{page}`, `{date:yyyy-MM-dd}`, ...), or the
+     * `{blocks}` form when one line cannot hold it. `$key` is the model key the
+     * band is read for, which is where anything it cannot hold is reported.
      *
      * Our writer puts the slots in one paragraph separated by two tabs. A band
      * from another producer is read the same way: three tab-separated segments
@@ -384,21 +466,13 @@ final class DocxReader
      *
      * @return array<string, mixed>|null
      */
-    private function parseBand(DOMElement $sectPr, string $kind): ?array
+    private function parseBandPart(string $name, string $key): ?array
     {
-        $part = null;
-        $name = null;
-        foreach ($sectPr->childNodes as $node) {
-            if ($node instanceof DOMElement && $node->localName === $kind . 'Reference' && in_array($this->wAttr($node, 'type'), ['default', null], true)) {
-                $rid = (string) $this->rAttr($node, 'id');
-                $target = $this->rels[$rid]['target'] ?? null;
-                $name = is_string($target) ? ltrim(str_replace('\\', '/', $target), '/') : null;
-                $part = $name !== null ? ($this->bandParts[$name] ?? null) : null;
-            }
-        }
-        if ($part === null || $name === null) {
+        $part = $this->bandParts[$name] ?? null;
+        if ($part === null) {
             return null;
         }
+        $kind = $key;
 
         $dom = new DOMDocument();
         $prev = libxml_use_internal_errors(true);
@@ -433,7 +507,12 @@ final class DocxReader
                 }
                 $name = $child->localName;
                 if ($name === 'fldSimple') {
-                    $segments[count($segments) - 1] .= self::fieldToken((string) $this->wAttr($child, 'instr'));
+                    $token = self::fieldToken((string) $this->wAttr($child, 'instr'));
+                    if ($token !== '') {
+                        $segments[count($segments) - 1] .= $token;
+                    } else {
+                        $walk($child); // not a token: its cached result is the text
+                    }
                 } elseif ($name === 'r') {
                     $firstRun ??= $child;
                     $walk($child);
@@ -441,9 +520,12 @@ final class DocxReader
                     $type = $this->wAttr($child, 'fldCharType');
                     if ($type === 'begin') {
                         $field = '';
-                    } elseif ($type === 'separate' && $field !== null) {
-                        $segments[count($segments) - 1] .= self::fieldToken($field);
-                        $field = false; // skip the cached result
+                    } elseif ($type === 'separate' && is_string($field)) {
+                        $token = self::fieldToken($field);
+                        $segments[count($segments) - 1] .= $token;
+                        // A token's cached result ("1", the author) is skipped;
+                        // any other field's is its text, as in a blocks band.
+                        $field = $token !== '' ? false : null;
                     } elseif ($type === 'end') {
                         $field = null;
                     }
@@ -616,16 +698,14 @@ final class DocxReader
         return [$images, $blocks];
     }
 
-    /** A field instruction as a band token: PAGE → {page}, NUMPAGES → {pages}, else ''. */
+    /**
+     * A field instruction as a band token ({@see Schema::fieldTokenOf()}):
+     * PAGE {page}, NUMPAGES {pages}, SECTIONPAGES {sectionpages},
+     * `DATE \@ "d MMMM yyyy"` {date:d MMMM yyyy} ... and '' for any other field.
+     */
     private static function fieldToken(string $instr): string
     {
-        $word = strtoupper(strtok(trim($instr), " \\") ?: '');
-
-        return match ($word) {
-            'PAGE' => '{page}',
-            'NUMPAGES', 'SECTIONPAGES' => '{pages}',
-            default => '',
-        };
+        return Schema::fieldTokenOf($instr) ?? '';
     }
 
     /** A paragraph's w:jc, normalised to left / center / right. */
@@ -696,6 +776,9 @@ final class DocxReader
         $numberingXml = $zip->read('word/numbering.xml');
         $this->numbering = $numberingXml !== null ? $this->parseNumbering($numberingXml) : [];
         $this->coreXml = $zip->read('docProps/core.xml');
+        $settingsTarget = $relsXml !== null ? $this->relTargetOfType($relsXml, 'settings') : null;
+        $settingsXml = $settingsTarget !== null ? $zip->read('word/' . ltrim(str_replace('\\', '/', $settingsTarget), '/')) : null;
+        $this->evenAndOddHeaders = $settingsXml !== null && $this->settingsEvenAndOdd($settingsXml);
         $this->stylesXml = $zip->read('word/styles.xml');
         $this->media = [];
         $this->bandParts = [];
@@ -720,6 +803,28 @@ final class DocxReader
         }
 
         return $documentXml;
+    }
+
+    /** `w:evenAndOddHeaders` in word/settings.xml: even pages have their own header and footer. */
+    private bool $evenAndOddHeaders = false;
+
+    /** Whether a settings part turns on even/odd headers. A DOCTYPE leaves it off. */
+    private function settingsEvenAndOdd(string $xml): bool
+    {
+        if (stripos($xml, '<!DOCTYPE') !== false) {
+            return false;
+        }
+        $dom = new DOMDocument();
+        $prev = libxml_use_internal_errors(true);
+        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$ok || $dom->documentElement === null) {
+            return false;
+        }
+        $el = $this->firstChildByName($dom->documentElement, 'evenAndOddHeaders');
+
+        return $el !== null && $this->toggleOn($this->wAttr($el, 'val'));
     }
 
     /** Keeps the footnotes part's DOM alive while its elements are referenced. */
@@ -830,7 +935,17 @@ final class DocxReader
      */
     private function parseCoreTitle(): ?string
     {
-        if ($this->coreXml === null) {
+        return $this->parseCoreElement('title');
+    }
+
+    /**
+     * One Dublin Core element's text from docProps/core.xml (`title`,
+     * `creator`) -- null when the part is missing, unparsable, declares a
+     * DOCTYPE, or the element is absent or empty.
+     */
+    private function parseCoreElement(string $localName): ?string
+    {
+        if ($this->coreXml === null || stripos($this->coreXml, '<!DOCTYPE') !== false) {
             return null;
         }
 
@@ -843,12 +958,12 @@ final class DocxReader
             return null;
         }
 
-        $title = $this->firstChildByName($dom->documentElement, 'title');
-        if ($title === null || $title->textContent === '') {
+        $element = $this->firstChildByName($dom->documentElement, $localName);
+        if ($element === null || $element->textContent === '') {
             return null;
         }
 
-        return $title->textContent;
+        return $element->textContent;
     }
 
     /**
@@ -1653,10 +1768,11 @@ final class DocxReader
     }
 
     /**
-     * One piece of a complex field in a header or footer (last-word#6): PAGE
-     * and NUMPAGES come back as `{page}` / `{pages}`, the same tokens a band's
-     * slots use, and their cached result ("1", "9") is skipped. Any other field
-     * keeps its cached result as text, as the body does.
+     * One piece of a complex field in a header or footer (last-word#6): a field
+     * that is a token comes back as it (`{page}`, `{author}`, `{date:yyyy}`),
+     * the same tokens a band's slots use, and its cached result ("1", the
+     * author's name) is skipped. Any other field keeps its cached result as
+     * text, as the body does.
      *
      * @param  array{field: string|false|null}  $state
      */

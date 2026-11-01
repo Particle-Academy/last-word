@@ -44,6 +44,10 @@ final class Validator
             $errors[] = self::error('title', 'title must be a string when present');
         }
 
+        if (array_key_exists('meta', $doc)) {
+            $this->validateMeta($doc['meta'], $errors);
+        }
+
         if (isset($doc['defaultFont']) && !is_string($doc['defaultFont'])) {
             $errors[] = self::error('defaultFont', 'defaultFont must be a font family name');
         }
@@ -64,7 +68,7 @@ final class Validator
                     }
                 }
                 $bandMedia = 0;
-                foreach (['header', 'footer'] as $kind) {
+                foreach (Schema::PAGE_BANDS as $kind) {
                     $band = $doc['page'][$kind] ?? null;
                     if ($band === null) {
                         continue;
@@ -109,6 +113,28 @@ final class Validator
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
 
         return $errors;
+    }
+
+    /**
+     * `meta` (0.16.0): an object whose `author` is text. The title is the
+     * top-level `title`, not `meta.title` -- one slot for dc:title, so the two
+     * cannot disagree; repair moves a `meta.title` there.
+     *
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateMeta(mixed $meta, array &$errors): void
+    {
+        if (!is_array($meta) || ($meta !== [] && array_is_list($meta))) {
+            $errors[] = self::error('meta', 'meta must be an object ({author?})');
+
+            return;
+        }
+        if (array_key_exists('author', $meta) && !is_string($meta['author'])) {
+            $errors[] = self::error('meta.author', 'meta author must be text (docProps/core.xml dc:creator)');
+        }
+        if (array_key_exists('title', $meta)) {
+            $errors[] = self::error('meta.title', 'the document title is the top-level "title", not meta.title');
+        }
     }
 
     /**

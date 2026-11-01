@@ -244,8 +244,73 @@ read, a linked (external) picture, a header part over 2 MiB or one declaring a
 DOCTYPE is never read as blocks (the part falls back to the band reading and
 the report).
 
-Only the default header and footer are read; a first-page or even-page variant
-is not part of the model.
+### First page and even pages (0.16.0)
+
+`page.firstHeader` / `page.firstFooter` replace `header` / `footer` on the first
+page only (Word's "Different first page"); `page.evenHeader` / `page.evenFooter`
+replace them on even pages (Word's "Different odd and even pages"). Each takes
+either form above. Nothing existing changes: `page.header` is still every page,
+and with a `firstHeader` it is every page but the first.
+
+```jsonc
+{ "page": {
+    "firstHeader": { "blocks": [ { "type": "image", "src": "data:image/png;base64,...", "widthPx": 140 },
+                                 { "type": "paragraph", "runs": [ { "text": "1 Example Street" } ] } ] },
+    "header": { "left": "Acme | Proposal 42", "right": "Page {page} of {pages}" },
+    "footer": { "center": "Confidential" } } }      // on page one too: no firstFooter
+```
+
+- A kind with a default band and no variant shows its default on those pages
+  too, so adding a `firstHeader` never removes the footer from page one.
+- `{"blocks": []}` as a variant blanks that page (an empty part) when the kind
+  has a default band; with no default band it asks for nothing.
+- Parts are numbered by slot: `header1.xml` default, `header2.xml` first,
+  `header3.xml` even (and the same for footers).
+- **Why siblings and not `header.first`:** the variants are the same two shapes
+  `header` already takes, so nesting them would make every band shape recursive
+  and break `additionalProperties: false` on both; Word models them as three
+  peer references (`default`, `first`, `even`), and a viewer resolves "the band
+  for page n" with one lookup. No existing document changes shape.
+
+`read()` returns the variants a document has in force: `firstHeader` only while
+`w:titlePg` is on, `evenHeader` only while `w:evenAndOddHeaders` is, never a
+variant that names the same part as the default, and `{"blocks": []}` for a page
+that shows no header while the default does. Footnotes stay refused in every
+band.
+
+### Fields in header and footer text (0.16.0)
+
+| token | Word field | cached result written |
+|---|---|---|
+| `{page}` / `{pages}` | `PAGE` / `NUMPAGES` | `1` |
+| `{section}` / `{sectionpages}` | `SECTION` / `SECTIONPAGES` | `1` |
+| `{author}` | `AUTHOR` | `meta.author`, or nothing |
+| `{title}` | `TITLE` | the document `title`, or nothing |
+| `{filename}` | `FILENAME` | nothing |
+| `{date}` / `{time}` | `DATE` / `TIME` | nothing |
+| `{date:FORMAT}` / `{time:FORMAT}` | `DATE \@ "FORMAT"` / `TIME \@ "FORMAT"` | nothing |
+
+`FORMAT` is a Word date-time picture (`yyyy-MM-dd`, `d MMMM yyyy`, `HH:mm`): one
+or more characters, none of `{`, `}`, `"` or a backslash. Without one, the date
+and time show in the reader's locale. Names are lower-case and exact; anything
+else in braces (`{Date}`, `{foo}`, `{date:}`, `{page:x}`) stays literal text, and
+in the body every token is literal text.
+
+Each is a live complex field in the band's formatting, the same mechanism
+`{page}` already used. The **cached result** is what a viewer, and Word until
+its fields update, shows: it is the value when the writer knows it and nothing
+when it does not, because writing the clock would make the same document write
+different bytes. LibreOffice computes all of them on load (checked: the date,
+the time, the author, the title, the file name, page and section numbers).
+`read()` maps any producer's field back to its token by its first word; a
+`\@` picture the grammar can hold is kept and every other switch is dropped.
+
+### Document properties: `meta`
+
+`meta.author` is Word's Author property (`docProps/core.xml` `dc:creator`) and
+what `{author}` shows. The title is the existing top-level `title` (`dc:title`),
+deliberately not `meta.title`: one slot, so the two can never disagree.
+`validateAndRepair` moves a `meta.title` to `title`.
 
 ## Exchange: portable content and exports
 
@@ -385,6 +450,26 @@ the same for footers; `page.size`, `page.orientation` and each of
 template's. When the template has a first-page or even-page part and you set
 your own band for the other kind, your band is referenced for those pages too,
 so it is still on every page.
+
+**The letterhead on the first page only: `templateFirstPageOnly`.**
+
+```php
+Agent::toBytes($doc, [
+    'template' => $letterhead,
+    'templateParts' => ['styles', 'headers', 'footers', 'page'],
+    'templateFirstPageOnly' => true,
+]);
+```
+
+The template's header and footer become Word's FIRST-page header and footer
+(`w:titlePg` on): the template's own first-page part when it has one in force,
+which is what it shows on page one, otherwise its default part. Its even part is
+not carried. Later pages get your `page.header` / `page.footer`, and nothing
+when you set none. A `page.firstHeader` of your own still wins over the
+template's. `false` or absent is the behaviour before the option existed, byte
+for byte; anything but a boolean throws `TemplateException`. The carried parts
+are `header4.xml` / `footer4.xml` (1-3 are your own bands by slot). `read()`
+returns such a letterhead as `firstHeader` / `firstFooter`, never `header`.
 
 To write a read document back onto its own original, drop `page.header` and
 `page.footer` first: `read()` fills them (as a band or as blocks), and left in

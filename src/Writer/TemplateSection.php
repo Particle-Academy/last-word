@@ -28,7 +28,10 @@ use LastWord\Exceptions\TemplateException;
  *   - parts become `word/header{n}.xml` / `word/footer{n}.xml`, numbered per
  *     kind in reference order. A kind is either wholly the document's own band
  *     or wholly the template's, so the writer's `header1.xml` is never
- *     written beside a template `header1.xml`;
+ *     written beside a template `header1.xml`. The one exception,
+ *     templateFirstPageOnly, carries a single part per kind and numbers it
+ *     {@see FIRST_PAGE_ONLY_NUMBER} (`header4.xml`), past the document's own
+ *     slot-numbered parts 1-3;
  *   - media become `word/media/template{n}.{ext}`, a prefix the writer's own
  *     `image{n}` can never take;
  *   - the document-level relationship ids are `rIdTplHeader{n}` /
@@ -96,6 +99,14 @@ final class TemplateSection
 
     public const REFERENCE_TYPES = ['default', 'first', 'even'];
 
+    /**
+     * The number a part carried by templateFirstPageOnly takes (`word/header4.xml`,
+     * `rIdTplHeader4`). There the template's part sits beside the document's own
+     * bands of the same kind, and those are numbered by slot -- 1 default,
+     * 2 first, 3 even -- so the template's comes after all three.
+     */
+    public const FIRST_PAGE_ONLY_NUMBER = 4;
+
     private const NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
     private const REL_PREFIX = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
@@ -120,6 +131,7 @@ final class TemplateSection
         private readonly bool $titlePg,
         private readonly bool $evenAndOdd,
         private readonly int $maxDrawingId = 0,
+        private readonly bool $firstPageOnly = false,
     ) {}
 
     /**
@@ -127,7 +139,7 @@ final class TemplateSection
      *
      * @throws TemplateException
      */
-    public static function from(SourceArchive $zip, array $kinds, bool $page): self
+    public static function from(SourceArchive $zip, array $kinds, bool $page, bool $firstPageOnly = false): self
     {
         $documentXml = $zip->read('word/document.xml');
         if ($documentXml === null) {
@@ -147,11 +159,14 @@ final class TemplateSection
             $docRels = self::rels($zip, 'word/_rels/document.xml.rels');
             foreach ($kinds as $kind) {
                 $sources = []; // source part => output path
-                foreach ($sectPr->childNodes as $node) {
+                $nodes = $firstPageOnly ? self::firstPageReference($sectPr, $kind, $titlePg) : $sectPr->childNodes;
+                foreach ($nodes as $node) {
                     if (! $node instanceof DOMElement || $node->namespaceURI !== self::NS_W || $node->localName !== $kind . 'Reference') {
                         continue;
                     }
-                    $type = $node->getAttributeNS(self::NS_W, 'type') ?: 'default';
+                    // templateFirstPageOnly: the one part chosen is carried as
+                    // the FIRST-page part, numbered past the document's own.
+                    $type = $firstPageOnly ? 'first' : ($node->getAttributeNS(self::NS_W, 'type') ?: 'default');
                     if (! in_array($type, self::REFERENCE_TYPES, true)) {
                         throw new TemplateException("The template's {$kind} reference has an unknown type.");
                     }
@@ -161,7 +176,7 @@ final class TemplateSection
                     }
                     $source = self::resolve('word/', $rel['target']);
                     if (! isset($sources[$source])) {
-                        $n = count($sources) + 1;
+                        $n = $firstPageOnly ? self::FIRST_PAGE_ONLY_NUMBER : count($sources) + 1;
                         $out = "word/{$kind}{$n}.xml";
                         $sources[$source] = $out;
                         $parts[$kind][$out] = self::part($zip, $source, $kind, $media[$kind], $mediaNames, $mediaTotal, $maxDrawingId)
@@ -183,10 +198,42 @@ final class TemplateSection
             $parts,
             $media,
             $geometry,
-            $titlePg,
-            self::readEvenAndOdd($zip),
+            // Carried as first-page parts, they need the switch whatever the
+            // template set; and no even part is carried, so no even switch.
+            $firstPageOnly ? $references !== [] : $titlePg,
+            $firstPageOnly ? false : self::readEvenAndOdd($zip),
             $maxDrawingId,
+            $firstPageOnly,
         );
+    }
+
+    /**
+     * templateFirstPageOnly (0.16.0): the one reference of a kind that becomes
+     * the document's first-page part -- the template's own FIRST-page part when
+     * it has one in force (`w:titlePg` on), which is what the template shows on
+     * page one, and its default part otherwise. Its even part is never carried.
+     * Word keeps the first reference of a type it meets, and so does this.
+     *
+     * @return list<DOMElement>
+     *
+     * @throws TemplateException
+     */
+    private static function firstPageReference(DOMElement $sectPr, string $kind, bool $titlePg): array
+    {
+        $byType = [];
+        foreach ($sectPr->childNodes as $node) {
+            if (! $node instanceof DOMElement || $node->namespaceURI !== self::NS_W || $node->localName !== $kind . 'Reference') {
+                continue;
+            }
+            $type = $node->getAttributeNS(self::NS_W, 'type') ?: 'default';
+            if (! in_array($type, self::REFERENCE_TYPES, true)) {
+                throw new TemplateException("The template's {$kind} reference has an unknown type.");
+            }
+            $byType[$type] ??= $node;
+        }
+        $chosen = $titlePg && isset($byType['first']) ? $byType['first'] : ($byType['default'] ?? null);
+
+        return $chosen === null ? [] : [$chosen];
     }
 
     /**
@@ -232,6 +279,15 @@ final class TemplateSection
     public function page(): ?array
     {
         return $this->page;
+    }
+
+    /**
+     * Opened for templateFirstPageOnly: each kind's one carried part is the
+     * FIRST page's ({@see firstPageReference()}), and nothing else is carried.
+     */
+    public function firstPageOnly(): bool
+    {
+        return $this->firstPageOnly;
     }
 
     /** `w:titlePg`: the section has a distinct first-page header/footer. */

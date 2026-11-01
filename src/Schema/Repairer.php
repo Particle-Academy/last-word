@@ -46,6 +46,10 @@ final class Repairer
             }
         }
 
+        if (array_key_exists('meta', $doc)) {
+            $doc = $this->repairMeta($doc);
+        }
+
         if (!isset($doc['blocks']) || !is_array($doc['blocks']) || !array_is_list($doc['blocks'])) {
             $doc['blocks'] = [];
             $this->note('blocks', 'defaulted missing/invalid "blocks" to []');
@@ -55,7 +59,7 @@ final class Repairer
 
         if (is_array($doc['page'] ?? null)) {
             $doc['page'] = $this->repairPageDecoration($doc);
-            foreach (['header', 'footer'] as $kind) {
+            foreach (Schema::PAGE_BANDS as $kind) {
                 $band = $doc['page'][$kind] ?? null;
                 if (is_array($band) && is_array($band['blocks'] ?? null) && array_is_list($band['blocks'])) {
                     $path = "page.{$kind}.blocks";
@@ -70,6 +74,47 @@ final class Repairer
         }
 
         return ['doc' => $doc, 'notes' => $this->notes];
+    }
+
+    /**
+     * `meta` (0.16.0): `meta.title` moves to the top-level `title` when there
+     * is none (and is dropped when there is: the top-level one is the title);
+     * a non-text author is dropped; a `meta` that is not an object is dropped,
+     * each with a note.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     */
+    private function repairMeta(array $doc): array
+    {
+        $meta = $doc['meta'];
+        if (!is_array($meta) || ($meta !== [] && array_is_list($meta))) {
+            unset($doc['meta']);
+            $this->note('meta', 'dropped a meta that is not an object');
+
+            return $doc;
+        }
+        if (array_key_exists('title', $meta)) {
+            if (!array_key_exists('title', $doc) && is_string($meta['title'])) {
+                $doc = ['title' => $meta['title']] + $doc;
+                $this->note('meta.title', 'moved meta.title to the document title');
+            } else {
+                $this->note('meta.title', 'dropped meta.title: the document title is the top-level "title"');
+            }
+            unset($meta['title']);
+        }
+        if (array_key_exists('author', $meta) && !is_string($meta['author'])) {
+            if (is_scalar($meta['author'])) {
+                $meta['author'] = (string) $meta['author'];
+                $this->note('meta.author', 'coerced a non-text author to text');
+            } else {
+                unset($meta['author']);
+                $this->note('meta.author', 'dropped a non-text author');
+            }
+        }
+        $doc['meta'] = $meta;
+
+        return $doc;
     }
 
     /**

@@ -2,6 +2,105 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-01
+
+**What you must do: nothing, unless you want a first-page letterhead, first or
+even bands, the new header/footer fields or `meta.author`.** With
+`templateFirstPageOnly` absent or `false`, no variant band, no `meta` and none of
+the new tokens, every document writes exactly what 0.15.0 wrote, part for part
+(pinned by part digests taken from released 0.15.0). Two read-side changes and
+one write-side change can touch an existing document; see Changed. Release
+order: **`fancy-conformance` 0.41.0 first** (this package's dev dependency is
+pinned to it exactly; nothing at runtime depends on it).
+
+### Added
+
+- **The letterhead on the first page only: `templateFirstPageOnly`** (MOIC,
+  2026-11-01). A write option beside `templateParts`, boolean, default `false`.
+  When `true`, the template header and footer that `templateParts` takes become
+  Word's FIRST-page header and footer (`w:titlePg` on): the template's own
+  first-page part when its `w:titlePg` is on and it has one, otherwise its
+  default part; never its even part. Later pages get the document's own
+  `page.header` / `page.footer`, or nothing. A document `page.firstHeader` /
+  `page.firstFooter` still wins over the template's for that kind. The carried
+  part is `word/{kind}4.xml` (`rIdTpl{Kind}4`). A non-boolean value throws
+  `TemplateException`; ignored without a `template`.
+- **First-page and even-page bands: `page.firstHeader`, `page.firstFooter`,
+  `page.evenHeader`, `page.evenFooter`**, each the same shape as `page.header`
+  (a one-line band or a `{blocks}` band). `page.header` stays "every page"; with
+  a `firstHeader` it is every page but the first, with an `evenHeader` the odd
+  pages. A kind with no variant shows its default on those pages too. An empty
+  variant (`{"blocks": []}`) blanks that page when the kind has a default band.
+  Written as Word's `first` / `even` header references (`w:titlePg`,
+  `w:evenAndOddHeaders` in settings), parts numbered by slot: `{kind}1.xml`
+  default (unchanged), `{kind}2.xml` first, `{kind}3.xml` even. `read()` returns
+  them from any producer, so a first-page-only letterhead reads as
+  `firstHeader` with no `header`. Footnotes stay refused in every band.
+- **Field tokens in header and footer text**: `{section}`, `{sectionpages}`,
+  `{author}`, `{title}`, `{filename}`, `{date}`, `{time}`, and
+  `{date:FORMAT}` / `{time:FORMAT}` with a Word date-time picture (one or more
+  characters, none of `{`, `}`, `"` or a backslash), beside `{page}` /
+  `{pages}`. Each is a live complex field, written by the same code `{page}`
+  already used. The cached result is deterministic: `1` for page and section
+  numbers; `meta.author` and the `title` for AUTHOR and TITLE; nothing for DATE,
+  TIME and FILENAME (no clock: the same document still writes the same bytes).
+  Without a picture, DATE and TIME show in the reader's locale. Anything else in
+  braces stays literal, and every token stays literal in the body. `read()`
+  returns any producer's field as its token. `Schema::FIELD_TOKEN`,
+  `Schema::splitFieldTokens()` and `Schema::fieldTokenOf()` are the grammar.
+- **`meta.author`**: `docProps/core.xml` `dc:creator`, written after
+  `dc:title` and read back. The title stays the top-level `title`; there is no
+  `meta.title` (validation refuses it and `validateAndRepair` moves it to
+  `title`), so `dc:title` has one slot.
+- `Schema::PAGE_BANDS` / `Schema::PAGE_BAND_SLOTS`; `describe()` lists blocks
+  in every band.
+- Agent guide: the first-page band, the letterhead option and the field tokens
+  (the guide's bytes and hash changed; the Node and Python packages carry the
+  same bytes). New sha256:
+  `6d70d774cf630c0c40813d70ddd00191cc8a0b57a2cd3c603cae54f64a9501fa`.
+
+### Changed
+
+- **`read()` of a document with `w:titlePg` on, or `w:evenAndOddHeaders` on,
+  now returns `firstHeader` / `firstFooter` / `evenHeader` / `evenFooter`.**
+  Before, only the default band was read and the first/even ones were lost.
+  Consumer action: none to keep working; a document read and written back now
+  keeps its different first page. If you compared `page` keys exactly, expect
+  the new ones.
+- **`read()` of a SECTIONPAGES field now returns `{sectionpages}`** (it was
+  `{pages}`). Consumer action: none; in a one-section document both show the
+  same number, and writing `{sectionpages}` back writes SECTIONPAGES again.
+- **A header or footer whose text already contained one of the new tokens
+  literally** (say `{date}`) now writes a live field there. Consumer action:
+  only if you meant the braces literally; write `{Date}` or another
+  non-token spelling.
+
+### Fixed
+
+- A field that is not a token, in a one-line header or footer from another
+  producer (a STYLEREF, say), lost its cached result on read; it now keeps it
+  as text, as a `{blocks}` band already did.
+
+### Notes
+
+- `particle-academy/fancy-conformance` (require-dev) is pinned exactly at
+  `0.41.0`: `last-word/docx-constructs` rows 0054-0079 pin the letterhead
+  option, the band variants, the field tokens and `meta` for all three engines,
+  with new functions `bandParts`, `bandFields` and `coreProps` and a row input
+  of `{doc, template?, options?}` (the template is a document model).
+- LibreOffice 26 (build 8221e31) renders a `templateFirstPageOnly` letterhead on page one only
+  (the logo drawn on page 1 and on no other) with the document's own header
+  after it, and computes every new field on load.
+
+### PARITY
+
+- The Node (`@particle-academy/last-word`) and Python ports have none of this
+  yet. They mirror it by bumping to fancy-conformance 0.41.0, passing rows
+  0054-0079 (harness: pass `input`, write `input.template` and pass it with
+  `input.options`), implementing the three extractors, and copying the agent
+  guide bytes and hash. `doc-model/shared` 0001 and 0002 record `meta` and the
+  four variants as last-word-only.
+
 ## [0.15.0] - 2026-11-01
 
 **What you must do: nothing, unless you want footnotes or the header/footer

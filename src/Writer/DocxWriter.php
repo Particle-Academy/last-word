@@ -145,22 +145,35 @@ final class DocxWriter
     private int $contentWidth = 9360;
 
     /**
-     * The running header and footer this document asked for, as finished parts:
-     * kind ('header' | 'footer') => part XML. Empty when none were asked for, and
-     * then nothing about the package changes.
+     * The document's own running headers and footers, as finished parts: part
+     * name => part XML, the name `{kind}{n}` numbered by SLOT -- 1 the default
+     * (`page.header`), 2 the first page (`page.firstHeader`), 3 even pages
+     * (`page.evenHeader`) -- and written as `word/{name}.xml` with relationship
+     * id `rId{Kind}{n}`. Empty when none were asked for, and then nothing about
+     * the package changes.
      *
      * @var array<string, string>
      */
     private array $bands = [];
 
     /**
-     * A `{blocks}` band's OWN relationships (last-word#6), kind => rId => rel,
-     * written as `word/_rels/{kind}1.xml.rels`. Scoped to that part, so its ids
-     * (rId1, rId2 ...) cannot collide with the document's or a template part's.
+     * A `{blocks}` band's OWN relationships (last-word#6), part name => rId =>
+     * rel, written as `word/_rels/{name}.xml.rels`. Scoped to that part, so its
+     * ids (rId1, rId2 ...) cannot collide with the document's or a template
+     * part's.
      *
      * @var array<string, array<string, array{type: string, target: string}>>
      */
     private array $bandRels = [];
+
+    /** The cached result an AUTHOR field gets: `meta.author`, or "". */
+    private string $fieldAuthor = '';
+
+    /** The cached result a TITLE field gets: the document `title`, or "". */
+    private string $fieldTitle = '';
+
+    /** The slot a band part is numbered by: `{kind}1` default, `{kind}2` first, `{kind}3` even. */
+    private const SLOT_NUMBERS = ['default' => 1, 'first' => 2, 'even' => 3];
 
     /**
      * True while a `{blocks}` band renders: `{page}` / `{pages}` in run text are
@@ -308,6 +321,14 @@ final class DocxWriter
         $this->inFootnote = false;
 
         $hasTitle = array_key_exists('title', $doc);
+        // meta.author (0.16.0) is dc:creator, beside the title in the core
+        // part; a document with neither writes no core part, as before.
+        $author = is_array($doc['meta'] ?? null) && is_string($doc['meta']['author'] ?? null) && $doc['meta']['author'] !== ''
+            ? $doc['meta']['author']
+            : null;
+        $hasCore = $hasTitle || $author !== null;
+        $this->fieldAuthor = $author ?? '';
+        $this->fieldTitle = is_string($doc['title'] ?? null) ? $doc['title'] : '';
 
         // Build document.xml first — it registers hyperlink/image rels and
         // media files, and counts the ordered-list numbering instances the
@@ -331,10 +352,10 @@ final class DocxWriter
             }
 
             // Fixed entry order — part of the determinism contract.
-            $zip->addFromString('[Content_Types].xml', $this->buildContentTypes($hasTitle));
-            $zip->addFromString('_rels/.rels', $this->buildTopRels($hasTitle));
-            if ($hasTitle) {
-                $zip->addFromString('docProps/core.xml', $this->buildCoreXml((string) $doc['title']));
+            $zip->addFromString('[Content_Types].xml', $this->buildContentTypes($hasCore));
+            $zip->addFromString('_rels/.rels', $this->buildTopRels($hasCore));
+            if ($hasCore) {
+                $zip->addFromString('docProps/core.xml', $this->buildCoreXml($hasTitle ? (string) $doc['title'] : null, $author));
             }
             $zip->addFromString('word/document.xml', $documentXml);
             $zip->addFromString('word/styles.xml', $this->buildStyles($doc));
@@ -349,10 +370,10 @@ final class DocxWriter
                 // give the template's structure in the default's colours.
                 $zip->addFromString('word/theme/theme1.xml', (string) $this->template->theme());
             }
-            foreach ($this->bands as $kind => $xml) {
-                $zip->addFromString('word/' . $kind . '1.xml', $xml);
-                if (($this->bandRels[$kind] ?? []) !== []) {
-                    $zip->addFromString('word/_rels/' . $kind . '1.xml.rels', $this->relsXml($this->bandRels[$kind]));
+            foreach ($this->bands as $name => $xml) {
+                $zip->addFromString('word/' . $name . '.xml', $xml);
+                if (($this->bandRels[$name] ?? []) !== []) {
+                    $zip->addFromString('word/_rels/' . $name . '.xml.rels', $this->relsXml($this->bandRels[$name]));
                 }
             }
             // The template's letterhead parts, byte for byte, each followed by
@@ -481,11 +502,11 @@ final class DocxWriter
             . '<w:tab w:val="center" w:pos="' . intdiv($this->contentWidth, 2) . '"/>'
             . '<w:tab w:val="right" w:pos="' . $this->contentWidth . '"/>'
             . '</w:tabs><w:spacing w:before="0" w:after="0"/></w:pPr>'
-            . self::bandRuns($band['left'], $rPr)
+            . $this->bandRuns($band['left'], $rPr)
             . '<w:r>' . $rPr . '<w:tab/></w:r>'
-            . self::bandRuns($band['center'], $rPr)
+            . $this->bandRuns($band['center'], $rPr)
             . '<w:r>' . $rPr . '<w:tab/></w:r>'
-            . self::bandRuns($band['right'], $rPr)
+            . $this->bandRuns($band['right'], $rPr)
             . '</w:p>'
             . '</' . $tag . '>';
     }
@@ -503,7 +524,7 @@ final class DocxWriter
      *
      * @param  list<mixed>  $blocks
      */
-    private function blocksBandXml(string $kind, array $blocks): string
+    private function blocksBandXml(string $name, string $kind, array $blocks): string
     {
         [$rels, $counter] = [$this->rels, $this->relCounter];
         $this->rels = [];
@@ -512,7 +533,7 @@ final class DocxWriter
         try {
             $content = $this->renderBlocks($blocks);
         } finally {
-            $this->bandRels[$kind] = $this->rels;
+            $this->bandRels[$name] = $this->rels;
             $this->inBand = false;
             [$this->rels, $this->relCounter] = [$rels, $counter];
         }
@@ -541,32 +562,86 @@ final class DocxWriter
     }
 
     /**
-     * Text with `{page}` / `{pages}` as live PAGE / NUMPAGES fields.
+     * Text with its field tokens ({@see Schema::FIELD_TOKEN}) as live fields:
+     * `{page}` PAGE, `{pages}` NUMPAGES, `{date:yyyy-MM-dd}` DATE with its
+     * picture, and the rest. Anything else is literal text.
      *
      * COMPLEX fields (begin / instrText / separate / result / end), every piece a
      * run carrying the band's formatting. A `w:fldSimple` rendered its number in
      * the paragraph's default size and colour in LibreOffice -- a black 11pt "2"
      * in a grey 9pt footer -- because only the cached result run was styled.
      */
-    private static function bandRuns(string $text, string $rPr): string
+    private function bandRuns(string $text, string $rPr): string
     {
         $out = '';
-        foreach (preg_split('/(\{page\}|\{pages\})/', $text, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [] as $piece) {
-            $instr = match ($piece) {
-                '{page}' => 'PAGE',
-                '{pages}' => 'NUMPAGES',
-                default => null,
-            };
-            $out .= $instr === null
-                ? '<w:r>' . $rPr . '<w:t xml:space="preserve">' . Xml::text($piece) . '</w:t></w:r>'
-                : '<w:r>' . $rPr . '<w:fldChar w:fldCharType="begin"/></w:r>'
-                    . '<w:r>' . $rPr . '<w:instrText xml:space="preserve"> ' . $instr . ' </w:instrText></w:r>'
-                    . '<w:r>' . $rPr . '<w:fldChar w:fldCharType="separate"/></w:r>'
-                    . '<w:r>' . $rPr . '<w:t>1</w:t></w:r>'
-                    . '<w:r>' . $rPr . '<w:fldChar w:fldCharType="end"/></w:r>';
+        foreach (Schema::splitFieldTokens($text) as $piece) {
+            $out .= is_array($piece)
+                ? $this->fieldRuns($piece, '<w:r>' . $rPr)
+                : '<w:r>' . $rPr . '<w:t xml:space="preserve">' . Xml::text($piece) . '</w:t></w:r>';
         }
 
         return $out;
+    }
+
+    /**
+     * One field token as a complex field, every piece opened with `$open`
+     * (`<w:r>` and the run's properties): begin, the instruction between single
+     * spaces (` DATE \@ "yyyy-MM-dd" `), separate, the cached result, end.
+     *
+     * The cached result is what a viewer, and LibreOffice for the fields it does
+     * not compute, show before the fields update, so it is the value when the
+     * writer knows it and nothing when it does not -- never a guess, and never
+     * the clock, which would make the same document write different bytes:
+     * `1` for PAGE, NUMPAGES, SECTION and SECTIONPAGES (Word lays them out);
+     * the author and the title for AUTHOR and TITLE (`meta.author`, `title`;
+     * empty without one); and no result run at all for DATE, TIME and FILENAME.
+     *
+     * @param  array{name: string, instruction: string}  $field
+     */
+    private function fieldRuns(array $field, string $open): string
+    {
+        $result = match ($field['name']) {
+            'page', 'pages', 'section', 'sectionpages' => '1',
+            'author' => $this->fieldAuthor,
+            'title' => $this->fieldTitle,
+            default => '',
+        };
+        $preserve = $result !== trim($result) ? ' xml:space="preserve"' : '';
+
+        return $open . '<w:fldChar w:fldCharType="begin"/></w:r>'
+            . $open . '<w:instrText xml:space="preserve"> ' . Xml::text($field['instruction']) . ' </w:instrText></w:r>'
+            . $open . '<w:fldChar w:fldCharType="separate"/></w:r>'
+            . ($result !== '' ? $open . '<w:t' . $preserve . '>' . Xml::text($result) . '</w:t></w:r>' : '')
+            . $open . '<w:fldChar w:fldCharType="end"/></w:r>';
+    }
+
+    /**
+     * One of the document's own band slots as a finished part, or null when it
+     * asks for nothing: the `{blocks}` form, or the one-line form.
+     */
+    private function slotXml(string $name, string $kind, mixed $spec): ?string
+    {
+        if (is_array($spec) && array_key_exists('blocks', $spec)) {
+            // last-word#6: the blocks form. An empty list asks for nothing,
+            // exactly as an empty band does.
+            $blocks = is_array($spec['blocks']) ? array_values($spec['blocks']) : [];
+
+            return $blocks !== [] ? $this->blocksBandXml($name, $kind, $blocks) : null;
+        }
+        $band = self::band($spec);
+
+        return $band !== null ? $this->bandXml($kind, $band) : null;
+    }
+
+    /**
+     * An empty header or footer part: a first or even page with no band, when
+     * the document's own band would otherwise show there.
+     */
+    private static function blankBandXml(string $kind): string
+    {
+        $tag = $kind === 'header' ? 'w:hdr' : 'w:ftr';
+
+        return Xml::declaration() . '<' . $tag . ' xmlns:w="' . self::NS_W . '"><w:p/></' . $tag . '>';
     }
 
     // ─── Template section (letterhead) ───────────────────────────────────
@@ -609,7 +684,7 @@ final class DocxWriter
 
     // ─── Parts ───────────────────────────────────────────────────────────
 
-    private function buildContentTypes(bool $hasTitle): string
+    private function buildContentTypes(bool $hasCore): string
     {
         $xml = Xml::declaration();
         $xml .= '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">';
@@ -645,8 +720,9 @@ final class DocxWriter
             // reports it as "unreadable content" without naming the part.
             $xml .= '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>';
         }
-        foreach (array_keys($this->bands) as $kind) {
-            $xml .= '<Override PartName="/word/' . $kind . '1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
+        foreach (array_keys($this->bands) as $name) {
+            $kind = str_starts_with($name, 'header') ? 'header' : 'footer';
+            $xml .= '<Override PartName="/word/' . $name . '.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.' . $kind . '+xml"/>';
         }
         foreach (array_keys($this->templateParts()) as $name) {
             $kind = str_starts_with($name, 'word/header') ? 'header' : 'footer';
@@ -658,7 +734,7 @@ final class DocxWriter
         foreach (array_keys($this->charts) as $n) {
             $xml .= '<Override PartName="/word/charts/chart' . $n . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>';
         }
-        if ($hasTitle) {
+        if ($hasCore) {
             $xml .= '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>';
         }
         $xml .= '</Types>';
@@ -666,12 +742,12 @@ final class DocxWriter
         return $xml;
     }
 
-    private function buildTopRels(bool $hasTitle): string
+    private function buildTopRels(bool $hasCore): string
     {
         $xml = Xml::declaration();
         $xml .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
         $xml .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>';
-        if ($hasTitle) {
+        if ($hasCore) {
             $xml .= '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>';
         }
         $xml .= '</Relationships>';
@@ -680,18 +756,21 @@ final class DocxWriter
     }
 
     /**
-     * docProps/core.xml carrying dc:title — the cross-language title slot.
-     * Byte-for-byte identical to the Node mirror's coreXml() output so the
-     * canonical fixtures match across engines. Deterministic: no dcterms
-     * created/modified timestamps.
+     * docProps/core.xml carrying dc:title — the cross-language title slot —
+     * and, from 0.16.0, dc:creator for `meta.author`, title first. Each only
+     * when there is one, so a title-only document's part is byte-for-byte what
+     * it always was. Byte-for-byte identical to the Node mirror's coreXml()
+     * output so the canonical fixtures match across engines. Deterministic: no
+     * dcterms created/modified timestamps.
      */
-    private function buildCoreXml(string $title): string
+    private function buildCoreXml(?string $title, ?string $author): string
     {
         return Xml::declaration()
             . '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
             . 'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
             . 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-            . '<dc:title>' . Xml::text($title) . '</dc:title>'
+            . ($title !== null ? '<dc:title>' . Xml::text($title) . '</dc:title>' : '')
+            . ($author !== null ? '<dc:creator>' . Xml::text($author) . '</dc:creator>' : '')
             . '</cp:coreProperties>';
     }
 
@@ -710,8 +789,9 @@ final class DocxWriter
         if ($this->footnotes !== []) {
             $xml .= '<Relationship Id="rIdFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>';
         }
-        foreach (array_keys($this->bands) as $kind) {
-            $xml .= '<Relationship Id="rId' . ucfirst($kind) . '1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . $kind . '1.xml"/>';
+        foreach (array_keys($this->bands) as $name) {
+            $kind = str_starts_with($name, 'header') ? 'header' : 'footer';
+            $xml .= '<Relationship Id="rId' . ucfirst($name) . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' . $kind . '" Target="' . $name . '.xml"/>';
         }
         foreach ($this->templateParts() as $name => $part) {
             $kind = str_starts_with($name, 'word/header') ? 'header' : 'footer';
@@ -776,62 +856,99 @@ final class DocxWriter
 
         // Header/footer references come FIRST in w:sectPr; the schema orders them
         // before w:pgSz, and Word drops a reference it finds after it.
-        //
-        // Precedence (last-word#5): a kind the document gives its own band is
-        // the document's, ALL of it -- the template's default, first and even
-        // parts of that kind are dropped. A kind it leaves unset comes from the
-        // template's section, when that was asked for and has one.
         $this->bands = [];
         $this->bandRels = [];
         $this->templateKinds = [];
         $pageSpec = is_array($doc['page'] ?? null) ? $doc['page'] : [];
+        $firstPageOnly = $section !== null && $section->firstPageOnly();
+
+        // The document's own slots, kind => reference type => rId: `header`
+        // (default), `firstHeader` (first), `evenHeader` (even), and the same
+        // for footers. Rendered in that order, header before footer, so the
+        // media numbering of a document with only `header` / `footer` is what
+        // it always was. An empty first or even band blanks that page when the
+        // document's own default band would otherwise show there, and is
+        // nothing otherwise.
         $own = [];
         foreach (['header', 'footer'] as $kind) {
-            $spec = $pageSpec[$kind] ?? null;
-            if (is_array($spec) && array_key_exists('blocks', $spec)) {
-                // last-word#6: the blocks form. An empty list asks for nothing,
-                // exactly as an empty band does.
-                $blocks = is_array($spec['blocks']) ? array_values($spec['blocks']) : [];
-                if ($blocks !== []) {
-                    $this->bands[$kind] = $this->blocksBandXml($kind, $blocks);
-                    $own[] = $kind;
-                } elseif ($section !== null && $section->has($kind)) {
-                    $this->templateKinds[] = $kind;
+            foreach (self::SLOT_NUMBERS as $type => $n) {
+                $key = $type === 'default' ? $kind : $type . ucfirst($kind);
+                $spec = $pageSpec[$key] ?? null;
+                $name = $kind . $n;
+                $xml = $this->slotXml($name, $kind, $spec);
+                if ($xml === null && $type !== 'default' && is_array($spec) && isset($own[$kind]['default'])) {
+                    $xml = self::blankBandXml($kind);
                 }
-
-                continue;
+                if ($xml !== null) {
+                    $this->bands[$name] = $xml;
+                    $own[$kind][$type] = 'rId' . ucfirst($name);
+                }
             }
-            $band = self::band($spec);
-            if ($band !== null) {
-                $this->bands[$kind] = $this->bandXml($kind, $band);
-                $own[] = $kind;
-            } elseif ($section !== null && $section->has($kind)) {
+
+            // Precedence (last-word#5): a kind the document gives a band of its
+            // own is the document's, ALL of it -- the template's default, first
+            // and even parts of that kind are dropped. A kind it leaves unset
+            // comes from the template's section, when that was asked for and has
+            // one. Under templateFirstPageOnly the template's part is only ever
+            // the first page's, so it gives way to a `firstHeader` of the
+            // document's own and to nothing else.
+            if ($section !== null && $section->has($kind)
+                && ($firstPageOnly ? !isset($own[$kind]['first']) : !isset($own[$kind]))) {
                 $this->templateKinds[] = $kind;
             }
         }
 
-        // A first-page / even-page switch is carried only when a carried part
-        // needs it; when it is on, the document's own band is referenced for
-        // those pages too, so it is still on every page.
+        // `w:titlePg` / `w:evenAndOddHeaders`: on when the document has a first
+        // (even) band of its own, or a carried template part needs it.
         $carried = [];
         foreach ($this->templateKinds as $kind) {
             foreach ($section?->references($kind) ?? [] as $reference) {
                 $carried[$reference['type']] = true;
             }
         }
-        $this->titlePg = $section !== null && $section->titlePg() && isset($carried['first']);
-        $this->evenAndOdd = $section !== null && $section->evenAndOdd() && isset($carried['even']);
+        $ownTypes = [];
+        foreach ($own as $slots) {
+            $ownTypes += $slots;
+        }
+        $this->titlePg = ($section !== null && $section->titlePg() && isset($carried['first'])) || isset($ownTypes['first']);
+        $this->evenAndOdd = ($section !== null && $section->evenAndOdd() && isset($carried['even'])) || isset($ownTypes['even']);
 
+        // With a switch on, a kind with no part for those pages shows its
+        // default there: the document's own band is on every page unless it
+        // says otherwise. A template's own kind keeps its own references, in its
+        // own order, byte for byte -- and is filled only when the switch is not
+        // the template's (then the template never meant page one to be blank).
         $references = '';
         foreach (['header', 'footer'] as $kind) {
-            if (in_array($kind, $own, true)) {
-                $types = array_merge(['default'], $this->titlePg ? ['first'] : [], $this->evenAndOdd ? ['even'] : []);
-                foreach ($types as $type) {
-                    $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="rId' . ucfirst($kind) . '1"/>';
-                }
-            } elseif (in_array($kind, $this->templateKinds, true)) {
+            if (in_array($kind, $this->templateKinds, true) && !$firstPageOnly) {
+                $types = [];
                 foreach ($section?->references($kind) ?? [] as $reference) {
                     $references .= '<w:' . $kind . 'Reference w:type="' . $reference['type'] . '" r:id="' . $reference['rId'] . '"/>';
+                    $types[$reference['type']] = $reference['rId'];
+                }
+                foreach (['first' => [$this->titlePg, $section?->titlePg()], 'even' => [$this->evenAndOdd, $section?->evenAndOdd()]] as $type => [$on, $theirs]) {
+                    if ($on && !$theirs && !isset($types[$type]) && isset($types['default'])) {
+                        $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $types['default'] . '"/>';
+                    }
+                }
+
+                continue;
+            }
+            $slots = $own[$kind] ?? [];
+            if (in_array($kind, $this->templateKinds, true)) {
+                foreach ($section?->references($kind) ?? [] as $reference) {
+                    $slots[$reference['type']] ??= $reference['rId'];
+                }
+            }
+            if ($this->titlePg && !isset($slots['first']) && isset($slots['default'])) {
+                $slots['first'] = $slots['default'];
+            }
+            if ($this->evenAndOdd && !isset($slots['even']) && isset($slots['default'])) {
+                $slots['even'] = $slots['default'];
+            }
+            foreach (array_keys(self::SLOT_NUMBERS) as $type) {
+                if (isset($slots[$type])) {
+                    $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $slots[$type] . '"/>';
                 }
             }
         }
@@ -1667,20 +1784,13 @@ final class DocxWriter
         $text = (string) ($run['text'] ?? '');
         $open = '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '');
 
-        // In a `{blocks}` band (last-word#6) `{page}` and `{pages}` are live
-        // fields, as in a band's slots: complex fields, every piece in this
-        // run's formatting. In the body they are literal text, as always.
-        if ($this->inBand && preg_match('/\{pages?\}/', $text) === 1) {
+        // In a `{blocks}` band (last-word#6) the field tokens are live fields,
+        // as in a band's slots: complex fields, every piece in this run's
+        // formatting. In the body they are literal text, as always.
+        if ($this->inBand && preg_match(Schema::FIELD_TOKEN, $text) === 1) {
             $out = '';
-            foreach (preg_split('/(\{page\}|\{pages\})/', $text, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [] as $piece) {
-                $out .= match ($piece) {
-                    '{page}', '{pages}' => $open . '<w:fldChar w:fldCharType="begin"/></w:r>'
-                        . $open . '<w:instrText xml:space="preserve"> ' . ($piece === '{page}' ? 'PAGE' : 'NUMPAGES') . ' </w:instrText></w:r>'
-                        . $open . '<w:fldChar w:fldCharType="separate"/></w:r>'
-                        . $open . '<w:t>1</w:t></w:r>'
-                        . $open . '<w:fldChar w:fldCharType="end"/></w:r>',
-                    default => $open . self::runBody($piece) . '</w:r>',
-                };
+            foreach (Schema::splitFieldTokens($text) as $piece) {
+                $out .= is_array($piece) ? $this->fieldRuns($piece, $open) : $open . self::runBody($piece) . '</w:r>';
             }
 
             return $out;

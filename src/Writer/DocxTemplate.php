@@ -80,12 +80,16 @@ final class DocxTemplate
      * SECTION, its letterhead (last-word#5, see {@see TemplateSection}). The
      * template's body is never taken, whichever parts are named.
      *
+     * `$firstPageOnly` (templateFirstPageOnly, 0.16.0) carries the template's
+     * header and footer as the FIRST-page parts only: its first-page part when
+     * it has one in force, else its default; never its even part.
+     *
      * @param  list<string>  $parts  untyped in the signature so a caller's wrong
      *                               shape is a TemplateException, not a TypeError
      *
      * @throws TemplateException
      */
-    public static function open(string $pathOrBytes, mixed $parts = self::DEFAULT_PARTS): self
+    public static function open(string $pathOrBytes, mixed $parts = self::DEFAULT_PARTS, bool $firstPageOnly = false): self
     {
         $parts = self::parts($parts);
         try {
@@ -99,7 +103,7 @@ final class DocxTemplate
             static fn (string $kind): bool => in_array($kind . 's', $parts, true),
         ));
         $section = $kinds !== [] || in_array('page', $parts, true)
-            ? TemplateSection::from($zip, $kinds, in_array('page', $parts, true))
+            ? TemplateSection::from($zip, $kinds, in_array('page', $parts, true), $firstPageOnly)
             : null;
 
         if (! in_array('styles', $parts, true)) {

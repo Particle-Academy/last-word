@@ -26,7 +26,7 @@ use ParticleAcademy\Conformance\Conformance;
  * exactly that difference. The implementation accepts both decodings; the
  * object one is the one that can tell the two apart, so it is the one tested.
  */
-const LWX_PINNED_SUITE_VERSION = '0.40.0';
+const LWX_PINNED_SUITE_VERSION = '0.41.0';
 
 /** The suites this package is named an implementation of, with a vacuity floor each. */
 const LWX_SUITES = [

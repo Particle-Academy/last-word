@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use ParticleAcademy\Conformance\Conformance;
 use LastWord\Agent;
+use LastWord\Tests\Support\ConformanceExtract;
 
 /**
  * The shared construct table — `last-word/docx-constructs` in
@@ -201,7 +202,35 @@ function footnotesPart(array $doc): array
     ];
 }
 
+/**
+ * The extractor for a function, taking the row's whole INPUT. `input.doc` is
+ * the document; since fancy-conformance 0.41.0 a row may also carry
+ * `input.template` (a document model, written and passed as the template) and
+ * `input.options` (further write options) -- see {@see ConformanceExtract}. The
+ * functions that predate that convention project `input.doc` alone, as before.
+ */
 function extractorFor(string $fn): callable
+{
+    $doc = static fn (callable $f): callable => static fn (array $input): mixed => $f($input['doc']);
+
+    return match ($fn) {
+        'bandParts' => static fn (array $input): array => ConformanceExtract::bandParts($input),
+        'bandFields' => static fn (array $input): array => ConformanceExtract::bandFields($input),
+        'coreProps' => static fn (array $input): ?array => ConformanceExtract::coreProps($input),
+
+        'readBack' => static fn (array $input): array => Agent::read(ConformanceExtract::write($input)),
+
+        // The comparator is the suite's own, so "equal" means the same thing
+        // here as it does for every other row.
+        'roundTripFixpoint' => static fn (array $input): array => [
+            'fixpoint' => Conformance::equals(Agent::read(ConformanceExtract::write($input)), $input['doc']),
+        ],
+
+        default => $doc(docExtractorFor($fn)),
+    };
+}
+
+function docExtractorFor(string $fn): callable
 {
     return match ($fn) {
         'runProps' => static fn (array $doc): array => array_map(
@@ -244,14 +273,6 @@ function extractorFor(string $fn): callable
 
         'footnotesPart' => static fn (array $doc): array => footnotesPart($doc),
 
-        'readBack' => static fn (array $doc): array => Agent::read(Agent::toBytes($doc)),
-
-        // The comparator is the suite's own, so "equal" means the same thing
-        // here as it does for every other row.
-        'roundTripFixpoint' => static fn (array $doc): array => [
-            'fixpoint' => Conformance::equals(Agent::read(Agent::toBytes($doc)), $doc),
-        ],
-
         default => throw new RuntimeException("no extractor for fn \"{$fn}\""),
     };
 }
@@ -259,7 +280,7 @@ function extractorFor(string $fn): callable
 it('runs every row in the shared table', function (): void {
     $summary = Conformance::runTable(
         SUITE,
-        static fn (array $case): mixed => extractorFor((string) $case['fn'])($case['input']['doc']),
+        static fn (array $case): mixed => extractorFor((string) $case['fn'])($case['input']),
         'php',
     );
 
@@ -285,10 +306,10 @@ it('the extractors discriminate — a wrong document fails its own row', functio
     // The control. Every extractor is a projection, and a projection that
     // returns a constant passes every row it is given.
     $shaded = extractorFor('cellProps')(
-        ['blocks' => [['type' => 'table', 'rows' => [['cells' => [['blocks' => [], 'shading' => '#123456']]]]]]],
+        ['doc' => ['blocks' => [['type' => 'table', 'rows' => [['cells' => [['blocks' => [], 'shading' => '#123456']]]]]]]],
     );
     $plain = extractorFor('cellProps')(
-        ['blocks' => [['type' => 'table', 'rows' => [['cells' => [['blocks' => []]]]]]]],
+        ['doc' => ['blocks' => [['type' => 'table', 'rows' => [['cells' => [['blocks' => []]]]]]]]],
     );
 
     expect($shaded)->not->toEqual($plain);
