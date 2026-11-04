@@ -134,6 +134,23 @@ final class DocxReader
      */
     private int $contentWidth = 9360;
 
+    /**
+     * What ending each section does to the blocks, in order: the second section's
+     * first. Worked out before the body is read, because a band part is read with
+     * the same machinery as the body.
+     *
+     * @var list<array{break: ?array<string, mixed>, width: int, dropped: int, notes: list<array{where: string, kind: string, count: int}>}>
+     */
+    private array $sectionPlan = [];
+
+    private int $sectionCursor = 0;
+
+    /** The band part a section's reference types name, inherited from the section before: kind => type => part. */
+    private array $sectionTargets = [];
+
+    /** A band part once read, by part and model key: a part several sections share is read, and reported, once. */
+    private array $bandCache = [];
+
     /** docProps/core.xml contents, when the archive has one. */
     private ?string $coreXml = null;
 
@@ -170,6 +187,10 @@ final class DocxReader
         $this->inBand = false;
         $this->inFootnote = false;
         $this->footnoteCache = [];
+        $this->sectionPlan = [];
+        $this->sectionCursor = 0;
+        $this->sectionTargets = [];
+        $this->bandCache = [];
 
         $dom = new DOMDocument();
         $prev = libxml_use_internal_errors(true);
@@ -187,7 +208,13 @@ final class DocxReader
         // top-level Title-styled paragraph — is consumed instead (see
         // parseBlockContainer()).
         $this->title = $this->parseCoreTitle();
-        $this->contentWidth = $this->contentWidthOf($body !== null ? $this->firstChildByName($body, 'sectPr') : null);
+        // Top-level `page` is the first section, and every later one a break holding
+        // what differs from the page before it.
+        [$sections, $dropped] = $body !== null ? $this->sections($body) : [[null], 0];
+        $this->contentWidth = $this->contentWidthOf($sections[0]);
+        $page = $this->parsePage($sections[0], $dom->documentElement);
+        $this->planSections($sections, $page ?? []);
+        $dropped += $this->droppedByFirstSection($sections[0]);
         $blocks = $body !== null ? $this->parseBlockContainer($body, true) : [];
 
         $doc = [];
@@ -204,13 +231,11 @@ final class DocxReader
         // differ from what the writer produces unasked, for the same reason
         // table options are: a Letter portrait page at one-inch margins is
         // what every document written before `page` existed contains.
-        $page = $body !== null ? $this->parsePage($this->firstChildByName($body, 'sectPr'), $dom->documentElement) : null;
         if ($page !== null) {
             $doc['page'] = $page;
         }
-        $sectionBreaks = $body !== null ? $this->sectionBreaks($body) : 0;
-        if ($sectionBreaks > 0) {
-            $this->unrepresented[] = ['where' => '/page', 'kind' => 'layout-not-preserved', 'count' => $sectionBreaks];
+        if ($dropped > 0) {
+            $this->unrepresented[] = ['where' => '/page', 'kind' => 'layout-not-preserved', 'count' => $dropped];
         }
         foreach ($this->parseDocDefaults() as $key => $value) {
             $doc[$key] = $value;
@@ -230,17 +255,39 @@ final class DocxReader
     }
 
     /**
-     * How many section breaks the body holds: paragraphs whose `w:pPr` carries a
-     * `w:sectPr`, at the levels the reader takes blocks from. The model has one
-     * page setup, so `page` is the last section's and every other section is lost;
-     * a count of them is reported instead of the loss going unsaid. The body's own
-     * final `w:sectPr` is not a break. A walk, not a recursion: this nesting is
-     * attacker-supplied, and the Node and Python ports walk it the same way.
+     * The body's sections in order, each by the `w:sectPr` that describes it: the
+     * ones carried by a paragraph, at the level the reader takes blocks from, then
+     * the body's own, which is the last section's (null when the file has none).
+     * Also how many sit inside a code or quote block: those are not read, because
+     * nothing in the model can break there.
+     *
+     * @return array{0: list<?DOMElement>, 1: int}
      */
-    private function sectionBreaks(DOMElement $body): int
+    private function sections(DOMElement $body): array
+    {
+        $sections = [];
+        $nested = 0;
+        foreach ($this->blockChildren($body) as $node) {
+            if ($node->localName === 'p') {
+                $sectPr = $this->firstChildByName($this->firstChildByName($node, 'pPr'), 'sectPr');
+                if ($sectPr !== null) {
+                    $sections[] = $sectPr;
+                }
+            } elseif ($node->localName === 'sdt') {
+                $content = $this->firstChildByName($node, 'sdtContent');
+                $nested += $content !== null ? $this->sectionsIn($content) : 0;
+            }
+        }
+        $sections[] = $this->firstChildByName($body, 'sectPr');
+
+        return [$sections, $nested];
+    }
+
+    /** Section breaks at any block level under a node. A walk: this nesting is attacker-supplied. */
+    private function sectionsIn(DOMElement $root): int
     {
         $count = 0;
-        $stack = [$body];
+        $stack = [$root];
         while ($stack !== []) {
             foreach (array_pop($stack)->childNodes as $node) {
                 if (!($node instanceof DOMElement)) {
@@ -262,6 +309,215 @@ final class DocxReader
         }
 
         return $count;
+    }
+
+    /**
+     * Word's `w:type` says how a section STARTS, relative to the one before it, so
+     * the break between sections k-1 and k is decided by section k's type. Absent is
+     * nextPage. The first section's type therefore means nothing here.
+     *
+     * | Section k                                      | Result                                  |
+     * |---|---|
+     * | nextPage                                       | break, `page` holding what differs      |
+     * | oddPage, evenPage                              | the same, plus a report                 |
+     * | continuous, same size and orientation          | no break, plus a report                 |
+     * | continuous, other size or orientation          | break (Word has to start a page)        |
+     * | w:cols above 1, a page-number restart          | dropped, plus a report                  |
+     * | a paper size the model has no name for         | dropped, plus a report                  |
+     *
+     * A continuous section that does not break leaves the model's page as it was, so
+     * the next section is compared with the page it actually follows.
+     *
+     * @param  list<?DOMElement>  $sections
+     * @param  array<string, mixed>  $page  the first section's page, as read
+     */
+    private function planSections(array $sections, array $page): void
+    {
+        $current = $page;
+        foreach ($sections as $k => $sectPr) {
+            if ($k === 0) {
+                continue;
+            }
+            $mark = count($this->unrepresented);
+            $next = $this->parsePage($sectPr) ?? [];
+            $notes = array_splice($this->unrepresented, $mark);
+            $knownPaper = $this->paperKnown($sectPr);
+
+            $change = self::pageChange($current, $next, $knownPaper);
+            $reshaped = isset($change['orientation']) || isset($change['size']);
+            $typeEl = $sectPr !== null ? $this->firstChildByName($sectPr, 'type') : null;
+            $type = $typeEl !== null ? $this->wAttr($typeEl, 'val') : null;
+            $breaks = $type !== 'continuous' || $reshaped;
+
+            $dropped = 0;
+            if (!$breaks) {
+                $dropped++;
+            } else {
+                $dropped += $type === null || in_array($type, ['nextPage', 'continuous'], true) ? 0 : 1;
+                $dropped += $this->columns($sectPr) > 1 ? 1 : 0;
+                $next = $knownPaper ? $next : self::withSize($next, $current);
+                $current = $next;
+            }
+            $dropped += $this->restarts($sectPr, true) ? 1 : 0;
+            $dropped += $knownPaper ? 0 : 1;
+
+            $this->sectionPlan[] = [
+                'break' => $breaks ? $change : null,
+                'width' => $this->contentWidthOf($sectPr),
+                'dropped' => $dropped,
+                'notes' => $notes,
+            ];
+        }
+    }
+
+    /**
+     * What a section changes from the page before it, in the schema's order. A side
+     * is compared with defaults filled in, so a margin returning to one inch says so.
+     * A band a section no longer shows is `{"blocks": []}`, and a frame `{"style":
+     * "none"}`: without them the model's own inheritance would bring the old one back.
+     * The first-page bands are never inherited, so they are never compared.
+     *
+     * @param  array<string, mixed>  $from
+     * @param  array<string, mixed>  $to
+     * @return array<string, mixed>
+     */
+    private static function pageChange(array $from, array $to, bool $knownPaper): array
+    {
+        $out = [];
+        $orientation = static fn (array $p): string => $p['orientation'] ?? 'portrait';
+        if ($orientation($from) !== $orientation($to)) {
+            $out['orientation'] = $orientation($to);
+        }
+        $size = static fn (array $p): string => $p['size'] ?? 'letter';
+        if ($knownPaper && $size($from) !== $size($to)) {
+            $out['size'] = $size($to);
+        }
+        $margins = [];
+        foreach ([...self::BOX_EDGES, 'header', 'footer'] as $side) {
+            $default = $side === 'header' || $side === 'footer' ? 36 : 72;
+            $value = $to['margins'][$side] ?? $default;
+            if ((float) ($from['margins'][$side] ?? $default) !== (float) $value) {
+                $margins[$side] = $value;
+            }
+        }
+        if ($margins !== []) {
+            $out['margins'] = $margins;
+        }
+        foreach (Schema::PAGE_BANDS as $key) {
+            $first = $key === 'firstHeader' || $key === 'firstFooter';
+            $was = $first ? null : ($from[$key] ?? null);
+            $now = $to[$key] ?? null;
+            if ($now !== null && $now !== $was) {
+                $out[$key] = $now;
+            } elseif ($now === null && $was !== null && self::bandShows($was)) {
+                $out[$key] = ['blocks' => []];
+            }
+        }
+        $border = $to['border'] ?? null;
+        $before = $from['border'] ?? null;
+        if ($border !== $before) {
+            $out['border'] = $border ?? ['style' => 'none'];
+        }
+
+        return $out;
+    }
+
+    /** @param  array<string, mixed>  $band */
+    private static function bandShows(array $band): bool
+    {
+        return ($band['blocks'] ?? null) !== [];
+    }
+
+    /**
+     * A page keeping the paper of the page before it, when its own has no name here.
+     *
+     * @param  array<string, mixed>  $page
+     * @param  array<string, mixed>  $before
+     * @return array<string, mixed>
+     */
+    private static function withSize(array $page, array $before): array
+    {
+        unset($page['size']);
+        if (isset($before['size'])) {
+            $page['size'] = $before['size'];
+        }
+
+        return $page;
+    }
+
+    /** What the first section asks for that the model cannot hold. */
+    private function droppedByFirstSection(?DOMElement $sectPr): int
+    {
+        return ($this->columns($sectPr) > 1 ? 1 : 0)
+            + ($this->restarts($sectPr, false) ? 1 : 0)
+            + ($this->paperKnown($sectPr) ? 0 : 1);
+    }
+
+    /** `w:cols w:num`, 1 when absent. */
+    private function columns(?DOMElement $sectPr): int
+    {
+        $cols = $sectPr !== null ? $this->firstChildByName($sectPr, 'cols') : null;
+        $num = $cols !== null ? $this->wAttr($cols, 'num') : null;
+
+        return is_numeric($num) ? (int) $num : 1;
+    }
+
+    /**
+     * `w:pgNumType w:start`: the model's page number runs through the whole document.
+     * A first section starting at 1 changes nothing; any later start is a restart.
+     */
+    private function restarts(?DOMElement $sectPr, bool $later): bool
+    {
+        $type = $sectPr !== null ? $this->firstChildByName($sectPr, 'pgNumType') : null;
+        $start = $type !== null ? $this->wAttr($type, 'start') : null;
+
+        return is_numeric($start) && ($later || (int) $start !== 1);
+    }
+
+    /** Whether the section's paper is one the model names. No `w:pgSz` is the default, so it is. */
+    private function paperKnown(?DOMElement $sectPr): bool
+    {
+        $pgSz = $sectPr !== null ? $this->firstChildByName($sectPr, 'pgSz') : null;
+        if ($pgSz === null) {
+            return true;
+        }
+        $w = is_numeric($this->wAttr($pgSz, 'w')) ? (int) $this->wAttr($pgSz, 'w') : 12240;
+        $h = is_numeric($this->wAttr($pgSz, 'h')) ? (int) $this->wAttr($pgSz, 'h') : 15840;
+        if ($this->wAttr($pgSz, 'orient') === 'landscape') {
+            [$w, $h] = [$h, $w];
+        }
+        foreach (self::PAGE_SIZES as [$pw, $ph]) {
+            if ($pw === $w && $ph === $h) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The section the top-level walk has just passed the end of: the width the next
+     * blocks measure against, what was dropped, and the break, if it is one.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     */
+    private function endSection(array &$blocks): void
+    {
+        $plan = $this->sectionPlan[$this->sectionCursor++] ?? null;
+        if ($plan === null) {
+            return;
+        }
+        $this->contentWidth = $plan['width'];
+        $at = '/blocks/' . count($blocks);
+        foreach ($plan['notes'] as $note) {
+            $this->unrepresented[] = ['where' => $at . $note['where'], 'kind' => $note['kind'], 'count' => $note['count']];
+        }
+        if ($plan['dropped'] > 0) {
+            $this->unrepresented[] = ['where' => $at, 'kind' => 'layout-not-preserved', 'count' => $plan['dropped']];
+        }
+        if ($plan['break'] !== null) {
+            $blocks[] = ['type' => 'pageBreak', 'page' => $plan['break']];
+        }
     }
 
     /** Twips between the margins: page width (landscape-aware) less left and right. */
@@ -437,10 +693,19 @@ final class DocxReader
         if ($el !== null) {
             $titlePg = $this->toggleOn($this->wAttr($el, 'val'));
         }
+        // A reference a section leaves out is inherited from the section before.
+        foreach (['header', 'footer'] as $kind) {
+            foreach (['default', 'first', 'even'] as $type) {
+                $target = $this->bandTarget($sectPr, $kind, $type);
+                if ($target !== null) {
+                    $this->sectionTargets[$kind][$type] = $target;
+                }
+            }
+        }
         $found = [];
         foreach (['header', 'footer'] as $kind) {
-            $default = $this->bandTarget($sectPr, $kind, 'default');
-            $band = $default !== null ? $this->parseBandPart($default, $kind) : null;
+            $default = $this->sectionTargets[$kind]['default'] ?? null;
+            $band = $default !== null ? $this->bandPartOnce($default, $kind) : null;
             if ($band !== null) {
                 $found[$kind] = $band;
             }
@@ -449,11 +714,11 @@ final class DocxReader
                     continue;
                 }
                 $key = $type . ucfirst($kind);
-                $target = $this->bandTarget($sectPr, $kind, $type);
+                $target = $this->sectionTargets[$kind][$type] ?? null;
                 if ($target !== null && $target === $default) {
                     continue;
                 }
-                $variant = $target !== null ? $this->parseBandPart($target, $key) : null;
+                $variant = $target !== null ? $this->bandPartOnce($target, $key) : null;
                 if ($variant === null && $band !== null) {
                     $variant = ['blocks' => []];
                 }
@@ -471,6 +736,21 @@ final class DocxReader
         }
 
         return $out;
+    }
+
+    /**
+     * {@see parseBandPart()}, once per part and key.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function bandPartOnce(string $name, string $key): ?array
+    {
+        $at = $name . '|' . $key;
+        if (!array_key_exists($at, $this->bandCache)) {
+            $this->bandCache[$at] = $this->parseBandPart($name, $key);
+        }
+
+        return $this->bandCache[$at];
     }
 
     /**
@@ -1142,7 +1422,16 @@ final class DocxReader
             $flushQuote();
         };
 
+        $sectionEnded = false;
         foreach ($this->blockChildren($container) as $node) {
+            if ($sectionEnded) {
+                $flushAll();
+                $this->endSection($blocks);
+                $sectionEnded = false;
+            }
+            if ($topLevel && $node->localName === 'p' && $this->firstChildByName($this->firstChildByName($node, 'pPr'), 'sectPr') !== null) {
+                $sectionEnded = true; // after this paragraph, whatever it turns out to hold
+            }
             if ($node->localName === 'tbl') {
                 $flushAll();
                 $blocks[] = $this->parseTable($node, $insideQuote);
@@ -1263,6 +1552,9 @@ final class DocxReader
         }
 
         $flushAll();
+        if ($sectionEnded) {
+            $this->endSection($blocks);
+        }
 
         return $blocks;
     }

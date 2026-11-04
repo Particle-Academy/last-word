@@ -76,7 +76,8 @@ final class Schema
      * The page object's own keys, which an agent writes straight on a
      * `pageBreak` when it means `pageBreak.page`. Each is refused by name rather
      * than ignored as a decoration: ignored, the document comes out all portrait
-     * and looks fine. In validation order, shared with the Node and Python ports.
+     * and looks fine; repair moves it into `page`. In validation order, shared
+     * with the Node and Python ports.
      *
      * @var list<string>
      */
@@ -262,6 +263,29 @@ final class Schema
             'properties' => array_fill_keys(['top', 'right', 'bottom', 'left'], $points),
         ];
         $bandSlot = ['type' => 'string', 'description' => 'Text with live Word fields: {page} and {pages} ("Page {page} of {pages}"), {section}, {sectionpages}, {author} (meta.author), {title} (the document title), {filename}, {date} and {time} in the reader\'s locale, or {date:FORMAT} / {time:FORMAT} with a Word picture such as {date:d MMMM yyyy} or {time:HH:mm}. Anything else in braces is literal text.'];
+        $pageProps = [
+        'size' => ['enum' => self::PAGE_SIZES],
+        'orientation' => ['enum' => ['portrait', 'landscape']],
+        'margins' => ['$ref' => '#/$defs/pageMargins'],
+        'header' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running header on every page: a one-line band, or blocks (a letterhead with a logo). With a firstHeader, every page but the first; with an evenHeader, the odd pages.'],
+        'footer' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.'],
+        'firstHeader' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a letterhead on page one, a plainer header after. {"blocks": []} leaves page one with no header when header is set.'],
+        'firstFooter' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.'],
+        'evenHeader' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.'],
+        'evenFooter' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The footer of even pages; footer is then the odd pages\'. Without it the footer is on even pages too.'],
+        'background' => $hex + ['description' => 'Page colour on every page, under everything else, e.g. "#FDFAF3". White (none) by default. Word shows it on screen and prints it only when "Print background colors" is on.'],
+        'border' => [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'description' => 'A frame around every page, measured from the page edge, so it is the same whatever the page holds (a certificate border). e.g. {"style": "double", "width": 6, "color": "#B08D57", "inset": 18}. Margins are separate: keep them wider than inset + width so text clears the frame.',
+            'properties' => [
+                'style' => ['enum' => self::BORDER_STYLES, 'description' => 'single by default; double draws two rules with a gap, each a third of the width; none draws nothing.'],
+                'width' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Points, the whole frame (both rules and the gap, for double). 0.5 by default. Word draws at most 12pt per rule.'],
+                'color' => $hex + ['description' => 'Black by default.'],
+                'inset' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points from the page edge to the outside of the frame. '.self::PAGE_FRAME_INSET.' by default.'],
+            ],
+        ],
+        ];
         $band = [
             'type' => 'object',
             'additionalProperties' => false,
@@ -451,7 +475,15 @@ final class Schema
             'pageBreak' => [
                 'type' => 'object',
                 'required' => ['type'],
-                'properties' => ['type' => ['const' => 'pageBreak']],
+                'properties' => [
+                    'type' => ['const' => 'pageBreak'],
+                    'page' => [
+                        'type' => 'object',
+                        'additionalProperties' => false,
+                        'description' => 'Change the page from here on: {"type": "pageBreak", "page": {"orientation": "landscape", "margins": {"left": 28.8, "right": 28.8}}}. Pages after the break keep every setting until another break names a change; portrait does not come back by itself. margins merge side by side, every other key is replaced whole. firstHeader and firstFooter are never inherited: here they mean the first page after this break. {} starts a new stretch with nothing changed. Only on a top-level break, not one in a quote or a table cell. Word: a section break.',
+                        'properties' => array_diff_key($pageProps, ['background' => true]),
+                    ],
+                ],
             ],
             'hr' => [
                 'type' => 'object',
@@ -481,29 +513,7 @@ final class Schema
                     'type' => 'object',
                     'additionalProperties' => false,
                     'description' => 'Section geometry. A one-page business document does not fit inside the default one-inch margins.',
-                    'properties' => [
-                        'size' => ['enum' => self::PAGE_SIZES],
-                        'orientation' => ['enum' => ['portrait', 'landscape']],
-                        'margins' => ['$ref' => '#/$defs/pageMargins'],
-                        'header' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running header on every page: a one-line band, or blocks (a letterhead with a logo). With a firstHeader, every page but the first; with an evenHeader, the odd pages.'],
-                        'footer' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.'],
-                        'firstHeader' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a letterhead on page one, a plainer header after. {"blocks": []} leaves page one with no header when header is set.'],
-                        'firstFooter' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.'],
-                        'evenHeader' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.'],
-                        'evenFooter' => ['oneOf' => [['$ref' => '#/$defs/band'], ['$ref' => '#/$defs/blocksBand']], 'description' => 'The footer of even pages; footer is then the odd pages\'. Without it the footer is on even pages too.'],
-                        'background' => $hex + ['description' => 'Page colour on every page, under everything else, e.g. "#FDFAF3". White (none) by default. Word shows it on screen and prints it only when "Print background colors" is on.'],
-                        'border' => [
-                            'type' => 'object',
-                            'additionalProperties' => false,
-                            'description' => 'A frame around every page, measured from the page edge, so it is the same whatever the page holds (a certificate border). e.g. {"style": "double", "width": 6, "color": "#B08D57", "inset": 18}. Margins are separate: keep them wider than inset + width so text clears the frame.',
-                            'properties' => [
-                                'style' => ['enum' => self::BORDER_STYLES, 'description' => 'single by default; double draws two rules with a gap, each a third of the width; none draws nothing.'],
-                                'width' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Points, the whole frame (both rules and the gap, for double). 0.5 by default. Word draws at most 12pt per rule.'],
-                                'color' => $hex + ['description' => 'Black by default.'],
-                                'inset' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points from the page edge to the outside of the frame. '.self::PAGE_FRAME_INSET.' by default.'],
-                            ],
-                        ],
-                    ],
+                    'properties' => $pageProps,
                 ],
                 'defaultFont' => ['type' => 'string', 'description' => 'Font every run inherits unless it names its own.'],
                 'defaultSize' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Size in points every run inherits unless it names its own.'],
@@ -716,6 +726,104 @@ final class Schema
             'header' => $value('header', self::PAGE_BAND_DISTANCE_DEFAULT),
             'footer' => $value('footer', self::PAGE_BAND_DISTANCE_DEFAULT),
         ];
+    }
+
+    /**
+     * The document's runs of pages of one setup, in order: what is before the
+     * first `pageBreak` carrying a `page`, then what follows each one. Word calls
+     * each a section; the model has no such word. A plain break, or one nested in
+     * a quote or a table cell, starts no stretch. The same reading as fine-print's
+     * `Schema::stretches()`.
+     *
+     * Each has `doc`, the document as that stretch sees it (`page` merged, no
+     * `blocks`), `blocks` (keyed by their index in the document), `break` (the
+     * index of the break that starts it, null for the first) and `origins`: a band
+     * key => the path it was set at, so two stretches holding the same band can be
+     * told from two that were merely given equal ones.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return list<array{doc: array<string, mixed>, blocks: array<int, mixed>, break: ?int, origins: array<string, string>}>
+     */
+    public static function stretches(array $doc): array
+    {
+        $blocks = is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [];
+        $page = is_array($doc['page'] ?? null) ? $doc['page'] : null;
+        $origins = array_combine(self::PAGE_BANDS, array_map(static fn (string $k): string => "page.{$k}", self::PAGE_BANDS));
+
+        $out = [];
+        $current = [];
+        $at = null;
+        foreach ($blocks as $i => $block) {
+            if (! is_array($block) || ($block['type'] ?? null) !== 'pageBreak' || ! self::isPageObject($block['page'] ?? null)) {
+                $current[$i] = $block;
+
+                continue;
+            }
+            $out[] = self::stretch($doc, $page, $current, $at, $origins);
+            $current = [];
+            $at = is_int($i) ? $i : null;
+            unset($origins['firstHeader'], $origins['firstFooter']);
+            $page = self::mergePage($page ?? [], $block['page']);
+            foreach (self::PAGE_BANDS as $key) {
+                if (isset($block['page'][$key])) {
+                    $origins[$key] = "blocks[{$i}].page.{$key}";
+                }
+            }
+        }
+        $out[] = self::stretch($doc, $page, $current, $at, $origins);
+
+        return $out;
+    }
+
+    /** Whether a break's `page` is a page object: `{}` decodes to `[]`, and a non-empty list is not one. */
+    public static function isPageObject(mixed $page): bool
+    {
+        return is_array($page) && ($page === [] || ! array_is_list($page));
+    }
+
+    /**
+     * A break's `page` over the page before it: margins side by side, every other
+     * key replaced whole, the first-page bands never carried over. A background
+     * has no place on a break (validation refuses it) and is ignored here.
+     *
+     * @param  array<string, mixed>  $page
+     * @param  array<string, mixed>  $change
+     * @return array<string, mixed>
+     */
+    private static function mergePage(array $page, array $change): array
+    {
+        unset($page['firstHeader'], $page['firstFooter']);
+        foreach ($change as $key => $value) {
+            if ($value === null || $key === 'background') {
+                continue;
+            }
+            if ($key === 'margins' && is_array($value) && is_array($page['margins'] ?? null)) {
+                $page['margins'] = array_replace($page['margins'], array_filter($value, static fn ($v): bool => $v !== null));
+
+                continue;
+            }
+            $page[$key] = $value;
+        }
+
+        return $page;
+    }
+
+    /**
+     * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>|null  $page
+     * @param  array<int, mixed>  $blocks
+     * @param  array<string, string>  $origins
+     * @return array{doc: array<string, mixed>, blocks: array<int, mixed>, break: ?int, origins: array<string, string>}
+     */
+    private static function stretch(array $doc, ?array $page, array $blocks, ?int $break, array $origins): array
+    {
+        $view = $doc;
+        unset($view['blocks']);
+        if ($page !== null) {
+            $view['page'] = $page;
+        }
+
+        return ['doc' => $view, 'blocks' => $blocks, 'break' => $break, 'origins' => $origins];
     }
 
     /**

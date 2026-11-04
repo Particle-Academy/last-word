@@ -14,7 +14,11 @@ namespace LastWord\Layout;
  *   ['type' => 'block', 'height' => float, 'breakpoints' => list<float>, 'keepNext' => bool,
  *    'footnotes' => list<array{id: int, at: float, height: float}>]
  *   ['type' => 'table', 'rows' => list<array{height: float, joinPrevious?: bool, footnotes?: list<array{id: int, height: float}>}>, 'headerRows' => int]
- *   ['type' => 'break']
+ *   ['type' => 'break', 'stretch'?: array{pageHeight: float, firstPageHeight?: ?float, firstEvenPageHeight?: ?float, evenPageHeight?: ?float}]
+ *
+ * A break with `stretch` starts a run of pages of another shape, and those are its
+ * heights: `firstPageHeight` its first page when that page is odd and
+ * `firstEvenPageHeight` when even, whichever the pages before it make it.
  */
 final class Packer
 {
@@ -28,6 +32,14 @@ final class Packer
     private ?float $firstHeight;
 
     private ?float $evenHeight;
+
+    private ?float $firstEvenHeight;
+
+    /** The index of the first page of the stretch being filled. */
+    private int $stretchStart = 0;
+
+    /** Which stretch is being filled, 0-based. */
+    private int $stretch = 0;
 
     private float $sep;
 
@@ -54,6 +66,7 @@ final class Packer
         $p->pageHeight = (float) $options['pageHeight'];
         $p->firstHeight = isset($options['firstPageHeight']) ? (float) $options['firstPageHeight'] : null;
         $p->evenHeight = isset($options['evenPageHeight']) ? (float) $options['evenPageHeight'] : null;
+        $p->firstEvenHeight = isset($options['firstEvenPageHeight']) ? (float) $options['firstEvenPageHeight'] : null;
         $p->sep = max(0.0, (float) ($options['footnoteSeparator'] ?? 0.0));
 
         return $p->run();
@@ -67,10 +80,14 @@ final class Packer
     public function capacity(int $index): float
     {
         $base = max(1.0, self::positive($this->pageHeight) ? $this->pageHeight : 1.0);
-        if ($index === 0) {
-            return self::positive($this->firstHeight) ? max(1.0, (float) $this->firstHeight) : $base;
+        $even = $index % 2 === 1;
+        if ($index === $this->stretchStart) {
+            $first = $even ? $this->firstEvenHeight : $this->firstHeight;
+            if (self::positive($first)) {
+                return max(1.0, (float) $first);
+            }
         }
-        if ($index % 2 === 1) {
+        if ($even) {
             return self::positive($this->evenHeight) ? max(1.0, (float) $this->evenHeight) : $base;
         }
 
@@ -83,6 +100,14 @@ final class Packer
         $this->newPage();
         foreach ($this->items as $index => $item) {
             if ($item['type'] === 'break') {
+                if (isset($item['stretch'])) {
+                    $this->pageHeight = (float) $item['stretch']['pageHeight'];
+                    $this->firstHeight = isset($item['stretch']['firstPageHeight']) ? (float) $item['stretch']['firstPageHeight'] : null;
+                    $this->firstEvenHeight = isset($item['stretch']['firstEvenPageHeight']) ? (float) $item['stretch']['firstEvenPageHeight'] : null;
+                    $this->evenHeight = isset($item['stretch']['evenPageHeight']) ? (float) $item['stretch']['evenPageHeight'] : null;
+                    $this->stretchStart = count($this->pages);
+                    $this->stretch++;
+                }
                 $this->newPage();
 
                 continue;
@@ -101,7 +126,7 @@ final class Packer
     private function newPage(): void
     {
         $this->cap = $this->capacity(count($this->pages));
-        $this->pages[] = ['index' => count($this->pages), 'fragments' => [], 'footnotes' => [], 'used' => 0.0, 'capacity' => $this->cap];
+        $this->pages[] = ['index' => count($this->pages), 'fragments' => [], 'footnotes' => [], 'used' => 0.0, 'capacity' => $this->cap, 'stretch' => $this->stretch];
         $this->cur = count($this->pages) - 1;
         $this->content = 0.0;
         $this->noteHeights = 0.0;

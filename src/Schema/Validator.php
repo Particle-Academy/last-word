@@ -32,6 +32,17 @@ final class Validator
      */
     private string $context = 'body';
 
+    /** Band image bytes so far, across the document's page and every break's: the limit is the document's. */
+    private int $bandMedia = 0;
+
+    /**
+     * A top-level break's path => the document as its stretch sees it. Holding the
+     * paths is also what tells a top-level break from a nested one.
+     *
+     * @var array<string, array<string, mixed>>
+     */
+    private array $stretchAt = [];
+
     /**
      * @param  array<string, mixed>  $doc
      * @return list<array{path: string, message: string}>
@@ -57,49 +68,13 @@ final class Validator
         }
         $this->validateNumber($doc['defaultSize'] ?? null, 'defaultSize', 'defaultSize', $errors, true);
 
+        $this->bandMedia = 0;
+        $this->stretchAt = [];
         if (isset($doc['page'])) {
             if (!is_array($doc['page'])) {
                 $errors[] = self::error('page', 'page must be an object ({size?, orientation?, margins?})');
             } else {
-                $this->validateEnum($doc['page']['size'] ?? null, 'page.size', 'page size', ['letter', 'legal', 'a4'], $errors);
-                $this->validateEnum($doc['page']['orientation'] ?? null, 'page.orientation', 'page orientation', ['portrait', 'landscape'], $errors);
-                $this->validateSides($doc['page']['margins'] ?? null, 'page.margins', 'page margins', $errors);
-                $margins = $doc['page']['margins'] ?? null;
-                foreach (['header', 'footer'] as $distance) {
-                    $value = is_array($margins) ? ($margins[$distance] ?? null) : null;
-                    if ($value !== null && (!(is_int($value) || is_float($value)) || !is_finite((float) $value) || $value < 0)) {
-                        $errors[] = self::error("page.margins.{$distance}", "page margins {$distance} is the distance from the page edge to the {$distance}: a number of points, 0 or more (36 by default)");
-                    }
-                }
-                $bandMedia = 0;
-                foreach (Schema::PAGE_BANDS as $kind) {
-                    $band = $doc['page'][$kind] ?? null;
-                    if ($band === null) {
-                        continue;
-                    }
-                    if (!is_array($band)) {
-                        $errors[] = self::error("page.{$kind}", "page {$kind} must be an object ({left?, center?, right?, size?, color?} or {blocks})");
-
-                        continue;
-                    }
-                    if (array_key_exists('blocks', $band)) {
-                        $this->validateBlocksBand($band, $kind, $bandMedia, $errors);
-
-                        continue;
-                    }
-                    foreach (['left', 'center', 'right'] as $slot) {
-                        if (isset($band[$slot]) && !is_string($band[$slot])) {
-                            $errors[] = self::error("page.{$kind}.{$slot}", "page {$kind} {$slot} must be text");
-                        }
-                    }
-                    if (isset($band['size']) && (!is_numeric($band['size']) || (float) $band['size'] <= 0)) {
-                        $errors[] = self::error("page.{$kind}.size", "page {$kind} size must be a positive number of points");
-                    }
-                    if (isset($band['color']) && (!is_string($band['color']) || preg_match('/^#[0-9A-Fa-f]{6}$/', $band['color']) !== 1)) {
-                        $errors[] = self::error("page.{$kind}.color", "page {$kind} color must be #RRGGBB");
-                    }
-                }
-                $this->validatePageDecoration($doc, $errors);
+                $this->validatePage($doc['page'], $doc, 'page', $errors);
             }
         }
 
@@ -114,9 +89,66 @@ final class Validator
             return $errors;
         }
 
+        // Each break is judged against the document as its stretch sees it: margins
+        // it inherits, on the paper it turns to.
+        foreach (Schema::stretches($doc) as $stretch) {
+            if ($stretch['break'] !== null) {
+                $this->stretchAt["blocks[{$stretch['break']}]"] = $stretch['doc'];
+            }
+        }
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
 
         return $errors;
+    }
+
+    /**
+     * A page object, wherever it sits: the document's or a break's. `$view` is the
+     * document as this page sees it, so what is judged is what would be drawn.
+     *
+     * @param  array<string, mixed>  $page
+     * @param  array<string, mixed>  $view
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validatePage(array $page, array $view, string $at, array &$errors): void
+    {
+        $this->validateEnum($page['size'] ?? null, "{$at}.size", 'page size', ['letter', 'legal', 'a4'], $errors);
+        $this->validateEnum($page['orientation'] ?? null, "{$at}.orientation", 'page orientation', ['portrait', 'landscape'], $errors);
+        $this->validateSides($page['margins'] ?? null, "{$at}.margins", 'page margins', $errors);
+        $margins = $page['margins'] ?? null;
+        foreach (['header', 'footer'] as $distance) {
+            $value = is_array($margins) ? ($margins[$distance] ?? null) : null;
+            if ($value !== null && (!(is_int($value) || is_float($value)) || !is_finite((float) $value) || $value < 0)) {
+                $errors[] = self::error("{$at}.margins.{$distance}", "page margins {$distance} is the distance from the page edge to the {$distance}: a number of points, 0 or more (36 by default)");
+            }
+        }
+        foreach (Schema::PAGE_BANDS as $kind) {
+            $band = $page[$kind] ?? null;
+            if ($band === null) {
+                continue;
+            }
+            if (!is_array($band)) {
+                $errors[] = self::error("{$at}.{$kind}", "page {$kind} must be an object ({left?, center?, right?, size?, color?} or {blocks})");
+
+                continue;
+            }
+            if (array_key_exists('blocks', $band)) {
+                $this->validateBlocksBand($band, $kind, $at, $errors);
+
+                continue;
+            }
+            foreach (['left', 'center', 'right'] as $slot) {
+                if (isset($band[$slot]) && !is_string($band[$slot])) {
+                    $errors[] = self::error("{$at}.{$kind}.{$slot}", "page {$kind} {$slot} must be text");
+                }
+            }
+            if (isset($band['size']) && (!is_numeric($band['size']) || (float) $band['size'] <= 0)) {
+                $errors[] = self::error("{$at}.{$kind}.size", "page {$kind} size must be a positive number of points");
+            }
+            if (isset($band['color']) && (!is_string($band['color']) || preg_match('/^#[0-9A-Fa-f]{6}$/', $band['color']) !== 1)) {
+                $errors[] = self::error("{$at}.{$kind}.color", "page {$kind} color must be #RRGGBB");
+            }
+        }
+        $this->validatePageDecoration($page, $view, $at, $errors);
     }
 
     /**
@@ -153,19 +185,19 @@ final class Validator
      * @param  array<string, mixed>  $band
      * @param  list<array{path: string, message: string}>  $errors
      */
-    private function validateBlocksBand(array $band, string $kind, int &$mediaTotal, array &$errors): void
+    private function validateBlocksBand(array $band, string $kind, string $at, array &$errors): void
     {
         $mixed = array_values(array_intersect(['left', 'center', 'right', 'size', 'color'], array_keys($band)));
         if ($mixed !== []) {
-            $errors[] = self::error("page.{$kind}", "page {$kind} is either {left, center, right, size, color} or {blocks}, never both (found blocks with " . implode(', ', $mixed) . ')');
+            $errors[] = self::error("{$at}.{$kind}", "page {$kind} is either {left, center, right, size, color} or {blocks}, never both (found blocks with " . implode(', ', $mixed) . ')');
         }
         $blocks = $band['blocks'];
         if (!is_array($blocks) || !array_is_list($blocks)) {
-            $errors[] = self::error("page.{$kind}.blocks", "page {$kind} blocks must be a list of block objects");
+            $errors[] = self::error("{$at}.{$kind}.blocks", "page {$kind} blocks must be a list of block objects");
 
             return;
         }
-        $path = "page.{$kind}.blocks";
+        $path = "{$at}.{$kind}.blocks";
         [$outer, $this->context] = [$this->context, 'band'];
         try {
             foreach ($blocks as $i => $block) {
@@ -177,7 +209,7 @@ final class Validator
         } finally {
             $this->context = $outer;
         }
-        $this->validateBandContent($blocks, $path, $mediaTotal, $errors);
+        $this->validateBandContent($blocks, $path, $this->bandMedia, $errors);
     }
 
     /**
@@ -231,32 +263,32 @@ final class Validator
      * colours, a known style, a positive width, a non-negative inset, and a
      * frame that leaves room inside it on both axes.
      *
-     * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>  $page
+     * @param  array<string, mixed>  $view
      * @param  list<array{path: string, message: string}>  $errors
      */
-    private function validatePageDecoration(array $doc, array &$errors): void
+    private function validatePageDecoration(array $page, array $view, string $at, array &$errors): void
     {
-        $page = $doc['page'];
-        $this->validateHex($page['background'] ?? null, 'page.background', 'page background', $errors);
+        $this->validateHex($page['background'] ?? null, "{$at}.background", 'page background', $errors);
         if (!isset($page['border'])) {
             return;
         }
         $border = $page['border'];
         if (!is_array($border) || ($border !== [] && array_is_list($border))) {
-            $errors[] = self::error('page.border', 'page border must be an object ({style?, width?, color?, inset?})');
+            $errors[] = self::error("{$at}.border", 'page border must be an object ({style?, width?, color?, inset?})');
 
             return;
         }
         $before = count($errors);
-        $this->validateEnum($border['style'] ?? null, 'page.border.style', 'page border style', self::BORDER_STYLES, $errors);
-        $this->validateFrameNumber($border['width'] ?? null, 'page.border.width', 'page border width', true, $errors);
-        $this->validateHex($border['color'] ?? null, 'page.border.color', 'page border color', $errors);
-        $this->validateFrameNumber($border['inset'] ?? null, 'page.border.inset', 'page border inset', false, $errors);
-        $frame = Schema::pageFrame($doc);
+        $this->validateEnum($border['style'] ?? null, "{$at}.border.style", 'page border style', self::BORDER_STYLES, $errors);
+        $this->validateFrameNumber($border['width'] ?? null, "{$at}.border.width", 'page border width', true, $errors);
+        $this->validateHex($border['color'] ?? null, "{$at}.border.color", 'page border color', $errors);
+        $this->validateFrameNumber($border['inset'] ?? null, "{$at}.border.inset", 'page border inset', false, $errors);
+        $frame = Schema::pageFrame($view);
         if (count($errors) === $before && $frame !== null) {
-            [$w, $h] = Schema::pageSize($doc);
+            [$w, $h] = Schema::pageSize($view);
             if (2 * ($frame['inset'] + $frame['width']) >= min($w, $h)) {
-                $errors[] = self::error('page.border', 'page border inset + width must leave room inside the frame on both axes');
+                $errors[] = self::error("{$at}.border", 'page border inset + width must leave room inside the frame on both axes');
             }
         }
     }
@@ -336,25 +368,42 @@ final class Validator
     }
 
     /**
-     * A break asking for a different page. A .docx has one page setup until the
-     * writer implements `page`, so it is refused rather than ignored: a document
-     * that silently comes out all portrait looks fine. Repair leaves these keys
-     * in place, so `validateAndRepair` stays `ok: false`. The words are the same
-     * bytes in the Node and Python ports.
+     * A page break, and what it may carry. A page key sitting on the break itself is
+     * a near-miss: ignored, the agent would think it had turned the page. `page` is
+     * a page object, on a top-level break, with no background: Word has one page
+     * colour per document. The words are fine-print's, and the same bytes in the
+     * Node and Python ports.
      *
      * @param  array<string, mixed>  $block
      * @param  list<array{path: string, message: string}>  $errors
      */
     private function validatePageBreak(array $block, string $path, array &$errors): void
     {
-        if (array_key_exists('page', $block)) {
-            $errors[] = self::error("{$path}.page", 'pageBreak.page is not implemented in last-word yet; remove page to keep one page setup, or write this document as a PDF with fine-print');
-        }
         foreach (Schema::PAGE_BREAK_NEAR_MISS_KEYS as $key) {
             if (array_key_exists($key, $block)) {
                 $errors[] = self::error("{$path}.{$key}", "a pageBreak has no {$key} key; use pageBreak.page");
             }
         }
+        if (!isset($block['page'])) {
+            return;
+        }
+        $page = $block['page'];
+        if (!Schema::isPageObject($page)) {
+            $errors[] = self::error("{$path}.page", 'page on a break must be an object of page settings, {} for a new stretch with nothing changed');
+
+            return;
+        }
+        $view = $this->stretchAt[$path] ?? null;
+        if ($view === null) {
+            $errors[] = self::error("{$path}.page", 'page settings go on a top-level page break; a break nested in a quote or a table cell cannot change the page');
+
+            return;
+        }
+        if (array_key_exists('background', $page)) {
+            $errors[] = self::error("{$path}.page.background", 'a document has one page colour: set background on the top-level page, not on a break');
+            unset($page['background']);
+        }
+        $this->validatePage($page, $view, "{$path}.page", $errors);
     }
 
     /**

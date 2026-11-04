@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 /*
  * Regenerates tests/fixtures/formats/two-sections.docx and two-sections.read.json:
- * a portrait section, then a landscape one, as Word lays the XML out. The
- * writer cannot produce this yet (stage 2 of mixed page orientation), so the
- * body is the writer's own, with the first section's w:sectPr placed on the last
- * paragraph of that section and the body's own turned landscape.
+ * a portrait section, then a landscape one, as Word lays the XML out, the first
+ * section's w:sectPr on the last paragraph of that section rather than the dedicated
+ * paragraph this writer uses, and no w:type. The body is the writer's own, with the
+ * section properties placed by hand, so it stays a file the writer does not produce.
  *
  *   php tests/Support/build-two-sections.php
  *

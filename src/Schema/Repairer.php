@@ -58,22 +58,35 @@ final class Repairer
         $doc['blocks'] = $this->repairBlocks($doc['blocks'], 'blocks');
 
         if (is_array($doc['page'] ?? null)) {
-            $doc['page'] = $this->repairPageDecoration($doc);
-            foreach (Schema::PAGE_BANDS as $kind) {
-                $band = $doc['page'][$kind] ?? null;
-                if (is_array($band) && is_array($band['blocks'] ?? null) && array_is_list($band['blocks'])) {
-                    $path = "page.{$kind}.blocks";
-                    $this->context = 'band';
-                    try {
-                        $doc['page'][$kind]['blocks'] = $this->dropRefusedInBand($this->repairBlocks($band['blocks'], $path), $path);
-                    } finally {
-                        $this->context = 'body';
-                    }
+            $doc['page'] = $this->repairPage($doc['page'], 'page');
+        }
+
+        return ['doc' => $doc, 'notes' => $this->notes];
+    }
+
+    /**
+     * A page object, wherever it sits: its decoration, and the blocks of its bands.
+     *
+     * @param  array<string, mixed>  $page
+     * @return array<string, mixed>
+     */
+    private function repairPage(array $page, string $at): array
+    {
+        $page = $this->repairPageDecoration($page, $at);
+        foreach (Schema::PAGE_BANDS as $kind) {
+            $band = $page[$kind] ?? null;
+            if (is_array($band) && is_array($band['blocks'] ?? null) && array_is_list($band['blocks'])) {
+                $path = "{$at}.{$kind}.blocks";
+                [$outer, $this->context] = [$this->context, 'band'];
+                try {
+                    $page[$kind]['blocks'] = $this->dropRefusedInBand($this->repairBlocks($band['blocks'], $path), $path);
+                } finally {
+                    $this->context = $outer;
                 }
             }
         }
 
-        return ['doc' => $doc, 'notes' => $this->notes];
+        return $page;
     }
 
     /**
@@ -159,12 +172,11 @@ final class Repairer
      * as fine-print's repair does: a page drawn without its decoration is
      * better than no document, and guessing a colour or a frame is not repair.
      *
-     * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>  $page
      * @return array<string, mixed>
      */
-    private function repairPageDecoration(array $doc): array
+    private function repairPageDecoration(array $page, string $at): array
     {
-        $page = $doc['page'];
         foreach (['background', 'border'] as $key) {
             if (!array_key_exists($key, $page)) {
                 continue;
@@ -176,7 +188,7 @@ final class Repairer
             );
             if ($bad !== []) {
                 unset($page[$key]);
-                $this->note("page.{$key}", "removed an invalid page {$key}: " . reset($bad)['message']);
+                $this->note("{$at}.{$key}", "removed an invalid page {$key}: " . reset($bad)['message']);
             }
         }
 
@@ -252,30 +264,59 @@ final class Repairer
             'quote' => $this->repairQuote($block, $path),
             'image' => $this->repairImage($block, $path),
             'chart' => $this->repairChart($block, $path),
-            'pageBreak' => self::repairPageBreak($block),
+            'pageBreak' => $this->repairPageBreak($block, $path),
             'hr' => ['type' => 'hr'],
         };
     }
 
     /**
-     * A break is rewritten to the bare break, EXCEPT what validation refuses on
-     * one: `page` and the near-miss keys stay, so the document stays `ok: false`.
-     * Stripped, any unrelated repair elsewhere would turn a refused landscape
-     * section into `ok: true` and an all-portrait document.
+     * A page break. `page` stays, and page keys typed on the break itself move into
+     * it, each with a note: rewriting a break to the bare break would silently undo
+     * an orientation change and still report success. A background goes, also with
+     * a note: Word has one page colour per document. Anything else on the break is
+     * dropped, as it always was. As fine-print's repair does.
      *
      * @param  array<string, mixed>  $block
      * @return array<string, mixed>
      */
-    private static function repairPageBreak(array $block): array
+    private function repairPageBreak(array $block, string $path): array
     {
-        $out = ['type' => 'pageBreak'];
-        foreach (['page', ...Schema::PAGE_BREAK_NEAR_MISS_KEYS] as $key) {
-            if (array_key_exists($key, $block)) {
-                $out[$key] = $block[$key];
+        $page = $block['page'] ?? null;
+        $moved = [];
+        foreach (Schema::PAGE_BREAK_NEAR_MISS_KEYS as $key) {
+            if (!array_key_exists($key, $block)) {
+                continue;
             }
+            if (is_array($page) && array_key_exists($key, $page)) {
+                $this->note("{$path}.{$key}", "dropped {$key} from the break: its page already says what it is");
+
+                continue;
+            }
+            $moved[$key] = $block[$key];
+            $this->note("{$path}.{$key}", "moved {$key} into the break's \"page\": a break's page settings go there");
+        }
+        if ($moved !== []) {
+            $page = is_array($page) ? $page + $moved : $moved;
+        }
+        if ($page === null) {
+            return ['type' => 'pageBreak'];
+        }
+        if (!Schema::isPageObject($page)) {
+            $this->note("{$path}.page", 'removed: page on a break must be an object of page settings, {} for a new stretch with nothing changed');
+
+            return ['type' => 'pageBreak'];
+        }
+        if (preg_match('/^blocks\[\d+\]$/', $path) !== 1) {
+            $this->note("{$path}.page", 'removed: page settings go on a top-level page break; a break nested in a quote or a table cell cannot change the page');
+
+            return ['type' => 'pageBreak'];
+        }
+        if (array_key_exists('background', $page)) {
+            unset($page['background']);
+            $this->note("{$path}.page.background", 'removed background from the break: a document has one page colour');
         }
 
-        return $out;
+        return ['type' => 'pageBreak', 'page' => $this->repairPage($page, "{$path}.page")];
     }
 
     /** @param  array<string, mixed>  $block */

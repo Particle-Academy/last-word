@@ -132,7 +132,7 @@ Blocks, discriminated by `type`:
 | `quote` | `{ blocks }` |
 | `image` | `{ src: "data:image/png;base64,…", widthPx?, heightPx?, alt? }` |
 | `chart` | `{ option: <ECharts option>, widthPx?, heightPx?, width? (% of column), numberFormat?, alt? }` — a native, editable Word chart (bar / column / line / pie) with an embedded workbook; `option` is the same field dark-slide's chart takes |
-| `pageBreak` | `{ }` |
+| `pageBreak` | `{ page? }` — with `page`, the page changes from here on (see [Mixed pages](#mixed-pages)) |
 | `hr` | `{ }` |
 
 Image dimensions are optional — the writer sniffs intrinsic size straight
@@ -283,7 +283,7 @@ band.
 | token | Word field | cached result written |
 |---|---|---|
 | `{page}` / `{pages}` | `PAGE` / `NUMPAGES` | `1` |
-| `{section}` / `{sectionpages}` | `SECTION` / `SECTIONPAGES` | `1` |
+| `{section}` / `{sectionpages}` | `SECTION` / `SECTIONPAGES` | the section's number / `1` |
 | `{author}` | `AUTHOR` | `meta.author`, or nothing |
 | `{title}` | `TITLE` | the document `title`, or nothing |
 | `{filename}` | `FILENAME` | nothing |
@@ -580,15 +580,47 @@ and footnotes (any ids; Word's own separators skipped).
 Unknown constructs degrade to plain paragraphs — the reader never throws
 on strange XML.
 
-**A document has one page setup, for now.** A file with section breaks reads
-with the last section's page and the rest flattened into it, and says so:
-`"unrepresented": [{"where": "/page", "kind": "layout-not-preserved", "count": 1}]`,
-where `count` is the section breaks lost. On the way in, `pageBreak.page` is
-refused until a later release writes it, `validateAndRepair` included: repair
-leaves it in place and the result is `ok: false`. The same goes for page keys
-written straight on a break (`pageBreak.orientation`, `.margins`, ...) and for a
-top-level `sections`, neither of which exists. `fine-print` honours
-`pageBreak.page` for PDFs today.
+### Mixed pages
+
+A `pageBreak` carrying `page` changes the page from there on. It is the same
+vocabulary as `fine-print`, and there is no other element and no `sections` key.
+
+```json
+{"type": "pageBreak", "page": {"orientation": "landscape", "margins": {"left": 28.8, "right": 28.8}}}
+```
+
+- `page` uses the page object's own keys. Pages after the break keep every setting
+  until another break names a change: portrait does not return by itself.
+- `margins` merge side by side. Every other key, such as a band or `border`, is
+  replaced whole.
+- `firstHeader` and `firstFooter` are never inherited. At the top level they mean page
+  1; on a break they mean the first page after it. `evenHeader` and `evenFooter` follow
+  the page number, which runs through the whole document, and inherit like `header`.
+- `{"type": "pageBreak", "page": {}}` starts a new stretch with nothing changed.
+- `page.background` on a break is refused: Word has one page colour per document. So is
+  `page` on a break in a quote or a table cell. So are page keys written straight on a
+  break (`pageBreak.orientation`, `.margins`, ...) and a top-level `sections`; repair
+  moves the first into `page`, with a note.
+- `{section}` counts the stretches and `{sectionpages}` is the page count of the current
+  one.
+
+In the file each stretch is a Word section. Reading works the other way round:
+top-level `page` is the **first** section, and each later one a break holding only what
+differs from the page before it. (Before 0.20.0, `page` was the last section's.)
+
+| The file has | `read()` gives |
+|---|---|
+| a `nextPage` section (the default) | `pageBreak` with `page` |
+| `oddPage` or `evenPage` | `pageBreak` with `page`, and a report |
+| `continuous`, same size and orientation | no break, and a report |
+| `continuous`, other size or orientation | `pageBreak` with `page`: Word has to start a page |
+| `w:cols` above 1, a page-number restart | dropped, and a report |
+| a paper size other than letter, legal or A4 | dropped, and a report |
+
+A report is `"unrepresented": [{"where": "/blocks/2", "kind": "layout-not-preserved",
+"count": 1}]`, at `/page` for the first section. Reading a section's type comes from
+checking files against LibreOffice; Word itself was not available to check against.
+A section break inside a code or quote block is not read, and reported at `/page`.
 
 ## Reading .doc, .odt and .rtf
 

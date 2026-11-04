@@ -46,6 +46,9 @@ final class GeneratedLetterhead
 
     public const PAGE_W = 11000;
 
+    /** What reading this page reports: 11000 x 15000 twips is no paper the model names. */
+    public const PAPER_NOTE = ['where' => '/page', 'kind' => 'layout-not-preserved', 'count' => 1];
+
     public const PAGE_H = 15000;
 
     public const MARGIN_TOP = 2600;

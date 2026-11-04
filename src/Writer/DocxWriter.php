@@ -62,8 +62,16 @@ use ZipArchive;
  *                from the block's ECharts `option` (see Helpers\Chart and
  *                ChartPart); sized from widthPx/heightPx or `width` (% of the
  *                text column), the full column by default
- *   pageBreak  — w:br w:type="page"
+ *   pageBreak  — w:br w:type="page"; with `page`, a new section (below)
  *   hr         — empty paragraph with a bottom border
+ *
+ * Mixed pages: each stretch (Schema::stretches()) is a Word section. A section's
+ * w:sectPr goes in a dedicated empty paragraph after its last block, and the body's
+ * own w:sectPr is the last stretch's. No w:type is written: absent is nextPage, so
+ * the section break is the page break and no w:br goes with it. A one-line band has
+ * tab stops at the text width and a table band a grid against it, so each width
+ * gets its own part. The first stretch keeps the parts a document of one stretch
+ * has, by slot; later ones number from {@see LATER_PART_NUMBER}.
  */
 final class DocxWriter
 {
@@ -169,11 +177,33 @@ final class DocxWriter
     /** The cached result an AUTHOR field gets: `meta.author`, or "". */
     private string $fieldAuthor = '';
 
+    /** The cached result a SECTION field gets: the number of the stretch the part is written for. */
+    private string $fieldSection = '1';
+
     /** The cached result a TITLE field gets: the document `title`, or "". */
     private string $fieldTitle = '';
 
     /** The slot a band part is numbered by: `{kind}1` default, `{kind}2` first, `{kind}3` even. */
     private const SLOT_NUMBERS = ['default' => 1, 'first' => 2, 'even' => 3];
+
+    /**
+     * The number the first part of a later stretch takes: past the first stretch's
+     * slots, and past {@see TemplateSection::FIRST_PAGE_ONLY_NUMBER}. A template's
+     * parts number 1 up, and at most 3 (default, first, even).
+     */
+    private const LATER_PART_NUMBER = 5;
+
+    /** Where a band was set and the text width it was drawn at => its part: one part per width, not per stretch. */
+    private array $bandPartAt = [];
+
+    /** The empty part a kind's later stretches share, kind => part name. */
+    private array $blankPart = [];
+
+    /** The next part number for a later stretch, kind => number. */
+    private array $nextPart = [];
+
+    /** A section break's dedicated paragraph takes as little of the page it ends as Word allows. */
+    private const SECTION_PARAGRAPH = '<w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr>';
 
     /**
      * True while a `{blocks}` band renders: `{page}` / `{pages}` in run text are
@@ -219,9 +249,6 @@ final class DocxWriter
      * @var list<string>
      */
     private array $templateKinds = [];
-
-    /** `w:titlePg` carried from the template, because a first-page part it carries needs it. */
-    private bool $titlePg = false;
 
     /** `w:evenAndOddHeaders` carried from the template, because an even-page part it carries needs it. */
     private bool $evenAndOdd = false;
@@ -592,7 +619,8 @@ final class DocxWriter
      * not compute, show before the fields update, so it is the value when the
      * writer knows it and nothing when it does not -- never a guess, and never
      * the clock, which would make the same document write different bytes:
-     * `1` for PAGE, NUMPAGES, SECTION and SECTIONPAGES (Word lays them out);
+     * the section's number for SECTION, `1` for PAGE, NUMPAGES and SECTIONPAGES
+     * (Word lays them out);
      * the author and the title for AUTHOR and TITLE (`meta.author`, `title`;
      * empty without one); and no result run at all for DATE, TIME and FILENAME.
      *
@@ -601,7 +629,8 @@ final class DocxWriter
     private function fieldRuns(array $field, string $open): string
     {
         $result = match ($field['name']) {
-            'page', 'pages', 'section', 'sectionpages' => '1',
+            'page', 'pages', 'sectionpages' => '1',
+            'section' => $this->fieldSection,
             'author' => $this->fieldAuthor,
             'title' => $this->fieldTitle,
             default => '',
@@ -843,128 +872,93 @@ final class DocxWriter
     private function buildDocumentXml(array $doc): string
     {
         $section = $this->template?->section();
-        $page = self::pageGeometry($doc['page'] ?? null, $section?->page());
+        $stretches = Schema::stretches($doc);
+
         // Table grids are laid out against the section's content width, so it
         // has to be known before any block renders. Carrying 9360 as a literal
         // — which all three engines did — silently gives a document with
         // narrowed margins a table that no longer matches its own page.
-        $this->contentWidth = $page['w'] - $page['left'] - $page['right'];
-
+        //
         // The title lives in docProps/core.xml (dc:title) — the cross-language
         // slot shared with the Node mirror — not in a body paragraph.
-        $body = $this->renderBlocks($doc['blocks'] ?? []);
+        $geometry = [];
+        $bodies = [];
+        foreach ($stretches as $k => $stretch) {
+            $geometry[$k] = self::pageGeometry($stretch['doc']['page'] ?? null, $section?->page());
+            $this->contentWidth = $geometry[$k]['w'] - $geometry[$k]['left'] - $geometry[$k]['right'];
+            $bodies[$k] = $this->renderBlocks(array_values($stretch['blocks']));
+        }
 
         // Header/footer references come FIRST in w:sectPr; the schema orders them
         // before w:pgSz, and Word drops a reference it finds after it.
         $this->bands = [];
         $this->bandRels = [];
         $this->templateKinds = [];
-        $pageSpec = is_array($doc['page'] ?? null) ? $doc['page'] : [];
+        $this->bandPartAt = [];
+        $this->blankPart = [];
+        $this->nextPart = ['header' => self::LATER_PART_NUMBER, 'footer' => self::LATER_PART_NUMBER];
         $firstPageOnly = $section !== null && $section->firstPageOnly();
 
-        // The document's own slots, kind => reference type => rId: `header`
-        // (default), `firstHeader` (first), `evenHeader` (even), and the same
-        // for footers. Rendered in that order, header before footer, so the
-        // media numbering of a document with only `header` / `footer` is what
-        // it always was. An empty first or even band blanks that page when the
-        // document's own default band would otherwise show there, and is
-        // nothing otherwise.
+        // Every stretch's own parts before any w:sectPr is written: a later
+        // stretch's even band turns even-and-odd on for the whole document.
         $own = [];
-        foreach (['header', 'footer'] as $kind) {
-            foreach (self::SLOT_NUMBERS as $type => $n) {
-                $key = $type === 'default' ? $kind : $type . ucfirst($kind);
-                $spec = $pageSpec[$key] ?? null;
-                $name = $kind . $n;
-                $xml = $this->slotXml($name, $kind, $spec);
-                if ($xml === null && $type !== 'default' && is_array($spec) && isset($own[$kind]['default'])) {
-                    $xml = self::blankBandXml($kind);
-                }
-                if ($xml !== null) {
-                    $this->bands[$name] = $xml;
-                    $own[$kind][$type] = 'rId' . ucfirst($name);
-                }
-            }
-
-            // Precedence (last-word#5): a kind the document gives a band of its
-            // own is the document's, ALL of it -- the template's default, first
-            // and even parts of that kind are dropped. A kind it leaves unset
-            // comes from the template's section, when that was asked for and has
-            // one. Under templateFirstPageOnly the template's part is only ever
-            // the first page's, so it gives way to a `firstHeader` of the
-            // document's own and to nothing else.
-            if ($section !== null && $section->has($kind)
-                && ($firstPageOnly ? !isset($own[$kind]['first']) : !isset($own[$kind]))) {
-                $this->templateKinds[] = $kind;
+        $kinds = [];
+        foreach ($stretches as $k => $stretch) {
+            $this->contentWidth = $geometry[$k]['w'] - $geometry[$k]['left'] - $geometry[$k]['right'];
+            $this->fieldSection = (string) ($k + 1);
+            [$own[$k], $kinds[$k]] = $this->stretchBands($stretch, $k, $section, $firstPageOnly);
+            if ($k === 0) {
+                $this->templateKinds = $kinds[0];
             }
         }
 
         // `w:titlePg` / `w:evenAndOddHeaders`: on when the document has a first
-        // (even) band of its own, or a carried template part needs it.
-        $carried = [];
-        foreach ($this->templateKinds as $kind) {
-            foreach ($section?->references($kind) ?? [] as $reference) {
-                $carried[$reference['type']] = true;
-            }
-        }
-        $ownTypes = [];
-        foreach ($own as $slots) {
-            $ownTypes += $slots;
-        }
-        $this->titlePg = ($section !== null && $section->titlePg() && isset($carried['first'])) || isset($ownTypes['first']);
-        $this->evenAndOdd = ($section !== null && $section->evenAndOdd() && isset($carried['even'])) || isset($ownTypes['even']);
-
-        // With a switch on, a kind with no part for those pages shows its
-        // default there: the document's own band is on every page unless it
-        // says otherwise. A template's own kind keeps its own references, in its
-        // own order, byte for byte -- and is filled only when the switch is not
-        // the template's (then the template never meant page one to be blank).
-        $references = '';
-        foreach (['header', 'footer'] as $kind) {
-            if (in_array($kind, $this->templateKinds, true) && !$firstPageOnly) {
-                $types = [];
+        // (even) band of its own, or a carried template part needs it. A section
+        // has its own w:titlePg; even-and-odd is the document's.
+        $titlePg = [];
+        $this->evenAndOdd = false;
+        foreach ($stretches as $k => $stretch) {
+            $carried = [];
+            foreach ($kinds[$k] as $kind) {
                 foreach ($section?->references($kind) ?? [] as $reference) {
-                    $references .= '<w:' . $kind . 'Reference w:type="' . $reference['type'] . '" r:id="' . $reference['rId'] . '"/>';
-                    $types[$reference['type']] = $reference['rId'];
+                    $carried[$reference['type']] = true;
                 }
-                foreach (['first' => [$this->titlePg, $section?->titlePg()], 'even' => [$this->evenAndOdd, $section?->evenAndOdd()]] as $type => [$on, $theirs]) {
-                    if ($on && !$theirs && !isset($types[$type]) && isset($types['default'])) {
-                        $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $types['default'] . '"/>';
-                    }
-                }
+            }
+            $ownTypes = [];
+            foreach ($own[$k] as $slots) {
+                $ownTypes += $slots;
+            }
+            $titlePg[$k] = ($k === 0 && $section !== null && $section->titlePg() && isset($carried['first'])) || isset($ownTypes['first']);
+            $this->evenAndOdd = $this->evenAndOdd || ($section !== null && $section->evenAndOdd() && isset($carried['even'])) || isset($ownTypes['even']);
+        }
 
-                continue;
-            }
-            $slots = $own[$kind] ?? [];
-            if (in_array($kind, $this->templateKinds, true)) {
-                foreach ($section?->references($kind) ?? [] as $reference) {
-                    $slots[$reference['type']] ??= $reference['rId'];
-                }
-            }
-            if ($this->titlePg && !isset($slots['first']) && isset($slots['default'])) {
-                $slots['first'] = $slots['default'];
-            }
-            if ($this->evenAndOdd && !isset($slots['even']) && isset($slots['default'])) {
-                $slots['even'] = $slots['default'];
-            }
-            foreach (array_keys(self::SLOT_NUMBERS) as $type) {
-                if (isset($slots[$type])) {
-                    $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $slots[$type] . '"/>';
-                }
+        $seen = [];
+        $body = '';
+        $last = count($stretches) - 1;
+        foreach ($stretches as $k => $stretch) {
+            $references = $this->sectionReferences($k, $own[$k], $kinds[$k], $titlePg[$k], $seen, $section, $firstPageOnly);
+            $page = $geometry[$k];
+            $orient = $page['orientation'] === 'landscape' ? ' w:orient="landscape"' : '';
+            $sectPr = '<w:sectPr>'
+                . $references
+                . '<w:pgSz w:w="' . $page['w'] . '" w:h="' . $page['h'] . '"' . $orient . '/>'
+                . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
+                . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'
+                . ' w:header="' . $page['header'] . '" w:footer="' . $page['footer'] . '" w:gutter="' . $page['gutter'] . '"/>'
+                // CT_SectPr is a sequence: pgBorders follows pgMar (and paperSrc),
+                // and titlePg comes after both.
+                . self::pageBordersXml($stretch['doc'], $page)
+                . ($titlePg[$k] ? '<w:titlePg/>' : '')
+                . '</w:sectPr>';
+            if ($k < $last) {
+                $body .= $bodies[$k] . '<w:p><w:pPr>' . self::SECTION_PARAGRAPH . $sectPr . '</w:pPr></w:p>';
+            } else {
+                // A last section with nothing in it still needs a paragraph to be a page.
+                $body .= ($k > 0 && $bodies[$k] === '' ? '<w:p/>' : $bodies[$k]) . $sectPr;
             }
         }
 
-        $orient = $page['orientation'] === 'landscape' ? ' w:orient="landscape"' : '';
-        $body .= '<w:sectPr>'
-            . $references
-            . '<w:pgSz w:w="' . $page['w'] . '" w:h="' . $page['h'] . '"' . $orient . '/>'
-            . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
-            . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'
-            . ' w:header="' . $page['header'] . '" w:footer="' . $page['footer'] . '" w:gutter="' . $page['gutter'] . '"/>'
-            // CT_SectPr is a sequence: pgBorders follows pgMar (and paperSrc),
-            // and titlePg comes after both.
-            . self::pageBordersXml($doc, $page)
-            . ($this->titlePg ? '<w:titlePg/>' : '')
-            . '</w:sectPr>';
+        $pageSpec = is_array($doc['page'] ?? null) ? $doc['page'] : [];
 
         // The page colour is the document's first child, before the body. Word
         // and LibreOffice show it only when settings carry
@@ -984,6 +978,182 @@ final class DocxWriter
             . ($background !== null ? '<w:background w:color="' . $background . '"/>' : '')
             . '<w:body>' . $body . '</w:body>'
             . '</w:document>';
+    }
+
+    /**
+     * One stretch's own header and footer parts, kind => reference type => rId,
+     * and the kinds it takes from the template's section.
+     *
+     * Rendered in that order, header before footer, so the media numbering of a
+     * document with only `header` / `footer` is what it always was. An empty first
+     * or even band blanks that page when the document's own default band would
+     * otherwise show there, and is nothing otherwise.
+     *
+     * Precedence (last-word#5): a kind the document gives a band of its own is the
+     * document's, ALL of it -- the template's default, first and even parts of that
+     * kind are dropped. A kind it leaves unset comes from the template's section,
+     * when that was asked for and has one. Under templateFirstPageOnly the
+     * template's part is only ever the first page's, so it gives way to a
+     * `firstHeader` of the document's own and to nothing else.
+     *
+     * A later stretch keeps the template's kind only while nothing has named that
+     * band. Naming it, even empty, leaves the template behind for good, and that is
+     * what keeps a kind's numbers wholly the template's or wholly the document's.
+     *
+     * @param  array{doc: array<string, mixed>, blocks: array<int, mixed>, break: ?int, origins: array<string, string>}  $stretch
+     * @return array{0: array<string, array<string, string>>, 1: list<string>}
+     */
+    private function stretchBands(array $stretch, int $k, ?TemplateSection $section, bool $firstPageOnly): array
+    {
+        $pageSpec = is_array($stretch['doc']['page'] ?? null) ? $stretch['doc']['page'] : [];
+        $own = [];
+        $kinds = [];
+        foreach (['header', 'footer'] as $kind) {
+            foreach (self::SLOT_NUMBERS as $type => $n) {
+                $key = $type === 'default' ? $kind : $type . ucfirst($kind);
+                $name = $this->bandPart($k, $kind, $n, $type, $pageSpec[$key] ?? null, $stretch['origins'][$key] ?? $key, isset($own[$kind]['default']));
+                if ($name !== null) {
+                    $own[$kind][$type] = 'rId' . ucfirst($name);
+                }
+            }
+            if ($section === null || !$section->has($kind)) {
+                continue;
+            }
+            if ($k === 0) {
+                if ($firstPageOnly ? !isset($own[$kind]['first']) : !isset($own[$kind])) {
+                    $kinds[] = $kind;
+                }
+            } elseif (!$firstPageOnly && in_array($kind, $this->templateKinds, true) && !isset($own[$kind]) && !isset($pageSpec[$kind])) {
+                $kinds[] = $kind;
+            }
+        }
+
+        return [$own, $kinds];
+    }
+
+    /**
+     * The part a stretch's band slot is written to, or null when it asks for
+     * nothing. The first stretch's are numbered by slot, as a document of one
+     * stretch has always had them. A later stretch shares a part only with a
+     * stretch whose band was set in the same place and whose text is the same
+     * width, because the part holds tab stops or a table grid at that width. A band
+     * with a `{section}` token shares with nothing: its cached result is its number,
+     * and LibreOffice shows that rather than computing the field.
+     */
+    private function bandPart(int $k, string $kind, int $n, string $type, mixed $spec, string $origin, bool $hasDefault): ?string
+    {
+        $at = $origin . '|' . $this->contentWidth . (str_contains((string) json_encode($spec), '{section}') ? '|' . $k : '');
+        if ($k > 0 && isset($this->bandPartAt[$at])) {
+            return $this->bandPartAt[$at];
+        }
+        $name = $kind . ($k === 0 ? $n : $this->nextPart[$kind]);
+        $xml = $this->slotXml($name, $kind, $spec);
+        if ($xml === null) {
+            if ($type === 'default' || !is_array($spec) || !$hasDefault) {
+                return null;
+            }
+            if ($k > 0) {
+                return $this->blankPart($kind);
+            }
+            $xml = self::blankBandXml($kind);
+        }
+        if ($k > 0) {
+            $this->nextPart[$kind]++;
+        }
+        $this->bands[$name] = $xml;
+
+        return $this->bandPartAt[$at] = $name;
+    }
+
+    /** The part a later stretch points at when it shows no band of this kind. */
+    private function blankPart(string $kind): string
+    {
+        if (!isset($this->blankPart[$kind])) {
+            $name = $kind . $this->nextPart[$kind]++;
+            $this->bands[$name] = self::blankBandXml($kind);
+            $this->blankPart[$kind] = $name;
+        }
+
+        return $this->blankPart[$kind];
+    }
+
+    /**
+     * One w:sectPr's header and footer references.
+     *
+     * With a switch on, a kind with no part for those pages shows its default
+     * there: the document's own band is on every page unless it says otherwise. A
+     * template's own kind keeps its own references, in its own order, byte for byte
+     * -- and is filled only when the switch is not the template's (then the template
+     * never meant page one to be blank).
+     *
+     * In a later section Word inherits any reference it leaves out from the section
+     * before, so a band that stretch does not show has to be blanked out loud.
+     *
+     * @param  array<string, array<string, string>>  $own
+     * @param  list<string>  $kinds
+     * @param  array<string, array<string, true>>  $seen  references of the sections before
+     */
+    private function sectionReferences(int $k, array $own, array $kinds, bool $titlePg, array &$seen, ?TemplateSection $section, bool $firstPageOnly): string
+    {
+        $active = ['default' => true, 'first' => $titlePg, 'even' => $this->evenAndOdd];
+        $blank = function (string $kind, array $has) use ($k, $active, &$seen): array {
+            $out = [];
+            foreach ($active as $type => $on) {
+                if ($k > 0 && $on && !isset($has[$type]) && isset($seen[$kind][$type])) {
+                    $out[$type] = 'rId' . ucfirst($this->blankPart($kind));
+                }
+            }
+
+            return $out;
+        };
+
+        $references = '';
+        foreach (['header', 'footer'] as $kind) {
+            if (in_array($kind, $kinds, true) && !$firstPageOnly) {
+                $types = [];
+                foreach ($section?->references($kind) ?? [] as $reference) {
+                    if ($k > 0 && $reference['type'] === 'first') {
+                        continue; // never inherited, a template's included
+                    }
+                    $references .= '<w:' . $kind . 'Reference w:type="' . $reference['type'] . '" r:id="' . $reference['rId'] . '"/>';
+                    $types[$reference['type']] = $reference['rId'];
+                }
+                foreach (['first' => [$titlePg, $k === 0 && $section?->titlePg()], 'even' => [$this->evenAndOdd, $section?->evenAndOdd()]] as $type => [$on, $theirs]) {
+                    if ($on && !$theirs && !isset($types[$type]) && isset($types['default'])) {
+                        $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $types['default'] . '"/>';
+                        $types[$type] = $types['default'];
+                    }
+                }
+                foreach ($blank($kind, $types) as $type => $rId) {
+                    $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $rId . '"/>';
+                    $types[$type] = $rId;
+                }
+                $seen[$kind] = array_fill_keys(array_keys($types), true) + ($seen[$kind] ?? []);
+
+                continue;
+            }
+            $slots = $own[$kind] ?? [];
+            if (in_array($kind, $kinds, true)) {
+                foreach ($section?->references($kind) ?? [] as $reference) {
+                    $slots[$reference['type']] ??= $reference['rId'];
+                }
+            }
+            if ($titlePg && !isset($slots['first']) && isset($slots['default'])) {
+                $slots['first'] = $slots['default'];
+            }
+            if ($this->evenAndOdd && !isset($slots['even']) && isset($slots['default'])) {
+                $slots['even'] = $slots['default'];
+            }
+            $slots += $blank($kind, $slots);
+            foreach (array_keys(self::SLOT_NUMBERS) as $type) {
+                if (isset($slots[$type])) {
+                    $references .= '<w:' . $kind . 'Reference w:type="' . $type . '" r:id="' . $slots[$type] . '"/>';
+                }
+            }
+            $seen[$kind] = array_fill_keys(array_keys($slots), true) + ($seen[$kind] ?? []);
+        }
+
+        return $references;
     }
 
     /**

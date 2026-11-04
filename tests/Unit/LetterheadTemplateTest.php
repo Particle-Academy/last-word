@@ -153,7 +153,7 @@ it('opens: the output reads back, the carried header as blocks with its logo', f
     // last-word#6: the logo is read, not reported lost.
     expect(array_column($read['page']['header']['blocks'], 'type'))->toBe(['image', 'paragraph']);
     expect($read['page']['header']['blocks'][1]['runs'][0]['text'])->toContain(Letterhead::HEADER_TEXT);
-    expect($read)->not->toHaveKey('unrepresented');
+    expect($read['unrepresented'])->toBe([Letterhead::PAPER_NOTE]);
 });
 
 it('is deterministic with a letterhead', function (): void {
@@ -292,7 +292,7 @@ it('reports a header image it cannot represent, instead of dropping it silently'
     // cannot hold it. A PNG logo is read; see BlocksBandTest.
     $read = Agent::read(Letterhead::bytes(['gifLogo' => true]));
 
-    expect($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1]]);
+    expect($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1], Letterhead::PAPER_NOTE]);
     expect(Agent::describe($read))->toContain('/page/header: 1 image');
 });
 

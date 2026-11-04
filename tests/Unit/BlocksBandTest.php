@@ -64,7 +64,7 @@ it('reads a letterhead header with a logo as blocks: the logo, then the text', f
         bbPara(' ' . Letterhead::HEADER_TEXT),
     ]]);
     // The logo is represented now, so nothing is reported about it.
-    expect($read)->not->toHaveKey('unrepresented');
+    expect($read['unrepresented'])->toBe([Letterhead::PAPER_NOTE]);
 });
 
 it('reads a letterhead whose address sits in paragraphs under the logo', function (): void {
@@ -99,7 +99,7 @@ it('reports only what even blocks cannot hold', function (array $variant, array 
     $read = Agent::read(Letterhead::bytes($variant));
 
     expect($read['page']['header']['blocks'] ?? null)->toBe($blocks);
-    expect($read['unrepresented'] ?? [])->toBe($unrepresented);
+    expect($read['unrepresented'] ?? [])->toBe([...$unrepresented, Letterhead::PAPER_NOTE]);
 })->with([
     'a GIF logo (outside the image block)' => [['gifLogo' => true], [bbPara(' ' . Letterhead::HEADER_TEXT)], [['where' => '/page/header', 'kind' => 'image', 'count' => 1]]],
     'an SVG named .png (fails the magic bytes)' => [['pngNamedSvg' => true], [bbPara(' ' . Letterhead::HEADER_TEXT)], [['where' => '/page/header', 'kind' => 'image', 'count' => 1]]],
@@ -115,7 +115,7 @@ it('does not read a header image over the media cap', function (): void {
     $read = Agent::read(Letterhead::bytes(['oversizedLogo' => true]));
 
     expect($read['page']['header']['blocks'])->toBe([bbPara(' ' . Letterhead::HEADER_TEXT)]);
-    expect($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1]]);
+    expect($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1], Letterhead::PAPER_NOTE]);
 });
 
 it('never reads a header part with a DOCTYPE, or over the part cap, as blocks', function (array $variant): void {
@@ -123,7 +123,7 @@ it('never reads a header part with a DOCTYPE, or over the part cap, as blocks', 
 
     // The band reading and the report, exactly as before last-word#6.
     expect($read['page']['header'])->toBe(['left' => ' ' . Letterhead::HEADER_TEXT])
-        ->and($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1]]);
+        ->and($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1], Letterhead::PAPER_NOTE]);
 })->with([
     'a DOCTYPE' => [['doctypeHeader' => true]],
     'over 2 MiB' => [['oversizedHeader' => true]],

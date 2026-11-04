@@ -71,16 +71,24 @@ final class Approximations
             }
         };
         $walk($doc['blocks'] ?? null);
-        $page = is_array($doc['page'] ?? null) ? $doc['page'] : [];
-        foreach (['header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter'] as $key) {
-            $band = $page[$key] ?? null;
-            if (! is_array($band)) {
-                continue;
+        // The document's page, and every page a break names.
+        $pages = [is_array($doc['page'] ?? null) ? $doc['page'] : []];
+        foreach (is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [] as $b) {
+            if (is_array($b) && ($b['type'] ?? null) === 'pageBreak' && is_array($b['page'] ?? null)) {
+                $pages[] = $b['page'];
             }
-            $walk($band['blocks'] ?? null);
-            foreach (['left', 'center', 'right'] as $s) {
-                if (is_string($band[$s] ?? null) && preg_match('/\{(date|time)(:[^{}]*)?\}/', $band[$s]) === 1) {
-                    $found['date or time field'] = true;
+        }
+        foreach ($pages as $page) {
+            foreach (['header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter'] as $key) {
+                $band = $page[$key] ?? null;
+                if (! is_array($band)) {
+                    continue;
+                }
+                $walk($band['blocks'] ?? null);
+                foreach (['left', 'center', 'right'] as $s) {
+                    if (is_string($band[$s] ?? null) && preg_match('/\{(date|time)(:[^{}]*)?\}/', $band[$s]) === 1) {
+                        $found['date or time field'] = true;
+                    }
                 }
             }
         }

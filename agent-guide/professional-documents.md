@@ -71,6 +71,15 @@ genre, lead with what the reader must know or decide, and analyse rather than re
   one too, and `firstFooter:{blocks:[]}` leaves page one without it. `evenHeader` /
   `evenFooter` do the same for even pages of a two-sided document. To keep a house
   letterhead template on page one only, write with the option `templateFirstPageOnly: true`.
+- Mixed page shapes, for a table too wide for portrait: `{type:"pageBreak",
+  page:{orientation:"landscape", margins:{left:28.8, right:28.8}}}`. The pages after it keep
+  those settings until another break names a change, so turn back with
+  `page:{orientation:"portrait"}`. `margins` merge side by side and every other key is
+  replaced whole. `firstHeader` / `firstFooter` are never inherited: on a break they mean the
+  first page after it. `page:{}` starts a new stretch with nothing changed. Only on a
+  top-level break, and never `background`. Header and footer tab stops follow each page's
+  width on their own. `{section}` counts the stretches and `{sectionpages}` is the page
+  count of the current one.
 - Header and footer text also takes `{date}`, `{date:d MMMM yyyy}`, `{time}`, `{author}`,
   `{title}`, `{filename}`, `{section}` and `{sectionpages}`: live Word fields, not typed
   values. `{title}` shows the document `title`; `{author}` shows `meta:{author:"..."}`. In

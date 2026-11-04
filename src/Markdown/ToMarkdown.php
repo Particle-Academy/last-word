@@ -122,6 +122,20 @@ final class ToMarkdown
         }
     }
 
+    /**
+     * Markdown has a break and no page: a break's `page` is reported as lost.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private function pageBreak(array $block, ?string $p): string
+    {
+        if (array_key_exists('page', $block)) {
+            $this->note('layout-not-preserved', $p);
+        }
+
+        return '<!-- pagebreak -->';
+    }
+
     /** @param  array<string, mixed>  $block */
     private function block(array $block, ?string $p = null): ?string
     {
@@ -142,7 +156,7 @@ final class ToMarkdown
             'quote' => $this->quote($block, $p),
             'image' => $this->image($block),
             'chart' => $this->chart($block, $p),
-            'pageBreak' => '<!-- pagebreak -->',
+            'pageBreak' => $this->pageBreak($block, $p),
             'hr' => '---',
             default => null,
         };

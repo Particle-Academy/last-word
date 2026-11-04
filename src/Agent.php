@@ -397,10 +397,14 @@ final class Agent
 
         $words = self::countWords($doc);
 
-        $lines = [
-            "Document: {$title}",
-            'Blocks: ' . count($blocks),
-        ];
+        $lines = ["Document: {$title}"];
+        // A document whose page setup changes partway, as fine-print's describe() says it.
+        $stretches = Schema::stretches(['blocks' => $blocks] + $doc);
+        if (count($stretches) > 1) {
+            $shapes = array_map(static fn (array $s): string => ($s['doc']['page']['orientation'] ?? null) === 'landscape' ? 'landscape' : 'portrait', $stretches);
+            $lines[] = 'Stretches: ' . count($stretches) . ' (' . implode(', ', $shapes) . ')';
+        }
+        $lines[] = 'Blocks: ' . count($blocks);
         if (!empty($counts)) {
             $parts = [];
             foreach ($counts as $type => $n) {
@@ -432,14 +436,14 @@ final class Agent
         // What read() found in a header or footer and could not represent
         // (last-word#5), so an agent knows a letterhead logo is there before it
         // writes the document back without one.
-        // Sections get their own line: a template carries only its last section,
-        // so "kept by writing onto the original" would not be true of them.
+        // Section settings get their own line: writing onto the original as a
+        // template carries only its last section, so that would not be true of them.
         $notes = [];
-        $sectionBreaks = 0;
+        $sectionNotes = 0;
         foreach (is_array($doc['unrepresented'] ?? null) ? $doc['unrepresented'] : [] as $note) {
             if (is_array($note) && is_string($note['where'] ?? null) && is_string($note['kind'] ?? null) && is_int($note['count'] ?? null)) {
                 if ($note['kind'] === 'layout-not-preserved') {
-                    $sectionBreaks += $note['count'];
+                    $sectionNotes += $note['count'];
 
                     continue;
                 }
@@ -449,8 +453,8 @@ final class Agent
         if ($notes !== []) {
             $lines[] = 'Not represented (kept only by writing onto the original as a template): ' . implode(', ', $notes);
         }
-        if ($sectionBreaks > 0) {
-            $lines[] = 'Layout not preserved: ' . $sectionBreaks . ' section break' . ($sectionBreaks === 1 ? '' : 's') . " flattened into the last section's page setup";
+        if ($sectionNotes > 0) {
+            $lines[] = 'Layout not preserved: ' . $sectionNotes . ' section setting' . ($sectionNotes === 1 ? '' : 's') . ' dropped (columns, odd or even starts, continuous breaks, page-number restarts, unknown paper)';
         }
 
         return implode("\n", $lines);
