@@ -1282,7 +1282,7 @@ final class DocxWriter
 
                 if ($next < count($authored)) {
                     $cell = $authored[$next++];
-                    $span = max(1, (int) ($cell['colSpan'] ?? 1));
+                    $span = max(1, min(Schema::MAX_COL_SPAN, (int) ($cell['colSpan'] ?? 1)));
                     $rowSpan = max(1, (int) ($cell['rowSpan'] ?? 1));
                     $line[] = [
                         'cell' => $cell,

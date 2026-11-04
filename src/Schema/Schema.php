@@ -211,6 +211,16 @@ final class Schema
     public const MAX_HEADING_LEVEL = 6;
 
     /**
+     * The most columns one table cell may span. Columns are what a span costs:
+     * the writer and the layout make work per grid column, so without a ceiling
+     * a few bytes of JSON could ask for any amount of it. 1000 is the limit HTML
+     * puts on `colspan` and the one this package's `.odt` reader and fine-print
+     * already use. `rowSpan` has no ceiling because nothing costs more than the
+     * rows that exist.
+     */
+    public const MAX_COL_SPAN = 1000;
+
+    /**
      * JSON Schema for the Doc model — pass to LLM tool registration so the
      * model gets typed field hints up front.
      *
@@ -378,7 +388,7 @@ final class Schema
                                             'borders' => ['$ref' => '#/$defs/boxBorders'],
                                             'padding' => ['$ref' => '#/$defs/boxSides'],
                                             'valign' => ['enum' => ['top', 'center', 'bottom']],
-                                            'colSpan' => ['type' => 'integer', 'minimum' => 1],
+                                            'colSpan' => ['type' => 'integer', 'minimum' => 1, 'maximum' => self::MAX_COL_SPAN],
                                             'rowSpan' => [
                                                 'type' => 'integer',
                                                 'minimum' => 1,

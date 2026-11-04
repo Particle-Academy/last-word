@@ -10,6 +10,7 @@ use DOMNode;
 use DOMText;
 use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\SourceArchive;
+use LastWord\Schema\Schema;
 use RuntimeException;
 
 /**
@@ -370,7 +371,7 @@ final class OdtReader
                     $colSpan = (int) $cell->getAttribute('table:number-columns-spanned');
                     $rowSpan = (int) $cell->getAttribute('table:number-rows-spanned');
                     if ($colSpan > 1) {
-                        $out['colSpan'] = min($colSpan, self::MAX_REPEAT);
+                        $out['colSpan'] = min($colSpan, Schema::MAX_COL_SPAN);
                     }
                     if ($rowSpan > 1) {
                         $out['rowSpan'] = min($rowSpan, self::MAX_REPEAT);

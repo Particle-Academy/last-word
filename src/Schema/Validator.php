@@ -706,6 +706,8 @@ final class Validator
                     $value = $cell[$span] ?? null;
                     if ($value !== null && (!is_int($value) || $value < 1)) {
                         $errors[] = self::error("{$cellPath}.{$span}", "{$span} must be an integer of 1 or more");
+                    } elseif ($span === 'colSpan' && $value !== null && $value > Schema::MAX_COL_SPAN) {
+                        $errors[] = self::error("{$cellPath}.colSpan", 'colSpan must be at most '.Schema::MAX_COL_SPAN);
                     }
                 }
                 $this->validateBlocks($cell['blocks'], "{$cellPath}.blocks", $errors);

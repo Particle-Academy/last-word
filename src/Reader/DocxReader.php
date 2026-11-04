@@ -2075,7 +2075,7 @@ final class DocxReader
                 if ($tcPr !== null) {
                     $gridSpan = $this->firstChildByName($tcPr, 'gridSpan');
                     if ($gridSpan !== null && is_numeric($this->wAttr($gridSpan, 'val'))) {
-                        $span = max(1, (int) $this->wAttr($gridSpan, 'val'));
+                        $span = max(1, min(Schema::MAX_COL_SPAN, (int) $this->wAttr($gridSpan, 'val')));
                     }
                     $vMergeNode = $this->firstChildByName($tcPr, 'vMerge');
                     if ($vMergeNode !== null) {

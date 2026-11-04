@@ -410,6 +410,10 @@ final class Repairer
                     }
                 }
                 $cell['blocks'] = $this->repairBlocks($cellBlocks, "{$cellPath}.blocks");
+                if (is_int($cell['colSpan'] ?? null) && $cell['colSpan'] > Schema::MAX_COL_SPAN) {
+                    $this->note("{$cellPath}.colSpan", "clamped colSpan {$cell['colSpan']} to ".Schema::MAX_COL_SPAN);
+                    $cell['colSpan'] = Schema::MAX_COL_SPAN;
+                }
                 $outCells[] = $cell;
             }
             $row['cells'] = $outCells;

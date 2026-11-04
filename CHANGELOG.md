@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+**What you must do: only if you write a table cell with a `colSpan` above 1000.**
+That is far past what Word itself makes (Microsoft documents 63 columns). `validate()`
+now refuses it and ``validateAndRepair()`` clamps it to 1000 with a note and keeps the text. Every other
+document writes exactly what it did, byte for byte.
+
+### Added
+
+- `Schema::MAX_COL_SPAN` (1000), also the `maximum` of `colSpan` in `jsonSchema()`.
+
+### Changed
+
+- **BREAKING: `colSpan` above 1000 is a validation error**
+  (`colSpan must be at most 1000`). **Consumer action:** none unless you write such
+  a span; `validateAndRepair()` clamps it. `rowSpan` has no ceiling: nothing costs
+  more than the rows that exist.
+
+### Fixed
+
+- `Layout\TableGrid` no longer spends memory on each slot a span covers, so a
+  table's layout cost does not grow with its spans. Placement is unchanged.
+- `toPortable()` / `extract()` refuse a table over the `columns` limit before
+  padding its short rows, not after. The refusal is the same
+  `content_too_many_columns`; on a table that was also malformed it now reports
+  this code rather than `content_invalid`.
+
+### Security
+
+- A table cell's column span had no upper limit, so a very small document could
+  cost memory out of proportion to its size in `toBytes()`, `write()`, `layout()`,
+  `toPortable()` and `extract()`. The validator, the repairer, the writer, the
+  layout and the `.docx` reader now all hold it to 1000. Reading a `.docx` clamps
+  and keeps the text; it never refuses for this. **Consumer action:** upgrade,
+  especially if you accept documents or `.docx` files from users or agents.
+
 ## [0.18.0] - 2026-11-03
 
 **What you must do: only if your documents carry `pageBreak.orientation`,

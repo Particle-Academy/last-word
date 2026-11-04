@@ -46,7 +46,10 @@ final class ToPortable
 
     private int $cellBytes;
 
-    private function __construct(int $cellBytes)
+    /** A table was wider than `columns` allows, so it was left unpadded: the result is a refusal. */
+    private bool $overWide = false;
+
+    private function __construct(int $cellBytes, private readonly int $maxColumns = PHP_INT_MAX)
     {
         $this->guard = new Guard;
         $this->report = new Report;
@@ -70,7 +73,7 @@ final class ToPortable
             return ['ok' => false, 'refused' => $picked['refused']];
         }
 
-        $x = new self($limits['cellBytes']);
+        $x = new self($limits['cellBytes'], $limits['columns']);
         foreach ($picked['indexes'] as $i) {
             if (is_array($blocks[$i])) {
                 $x->block($blocks[$i], '/blocks/'.$i);
@@ -89,6 +92,10 @@ final class ToPortable
             $content['images'] = $x->images;
         }
         $content['report'] = $x->report->toArray();
+
+        if ($x->overWide) {
+            return ['ok' => false, 'refused' => ['reason' => self::overWideReason($x->items, $limits)]];
+        }
 
         // A reader whose output is over a limit refuses with the code; it never cuts.
         $check = Content::validate($content, ['limits' => $limits]);
@@ -381,6 +388,12 @@ final class ToPortable
         // Short rows are padded with empty cells: nothing is lost, so nothing is reported.
         $widths = self::rowWidths($rows);
         $grid = max($widths);
+        if ($grid > $this->maxColumns) {
+            // Padding costs rows x width, and a span sets the width: judge it first.
+            $this->overWide = true;
+
+            return ['type' => 'table', 'headerRows' => $headerRows, 'rows' => $rows];
+        }
         foreach ($rows as $r => $row) {
             for ($k = $widths[$r]; $k < $grid; $k++) {
                 $rows[$r]['cells'][] = ['t' => 'empty'];
@@ -462,6 +475,27 @@ final class ToPortable
         }
 
         return $cell;
+    }
+
+    /**
+     * The limit an over-wide result breaks first, in the order Content checks
+     * them (SPEC 9): items, then rows, then columns.
+     *
+     * @param  list<array<string, mixed>>  $items
+     * @param  array<string, int>  $limits
+     */
+    private static function overWideReason(array $items, array $limits): string
+    {
+        if (count($items) > $limits['items']) {
+            return 'content_too_many_items';
+        }
+        foreach ($items as $item) {
+            if (($item['type'] ?? null) === 'table' && count($item['rows']) > $limits['rows']) {
+                return 'content_too_many_rows';
+            }
+        }
+
+        return 'content_too_many_columns';
     }
 
     /**
