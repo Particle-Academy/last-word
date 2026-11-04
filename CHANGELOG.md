@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-03
+
 **What you must do: only if your documents carry `pageBreak.orientation`,
 `pageBreak.margins` (or any page key straight on a break) or a top-level
 `sections`.** Those were silently ignored and are now errors. Remove them, or
