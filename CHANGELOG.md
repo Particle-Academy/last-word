@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-04
+
 **What you must do: only if you read a `.docx` with more than one section, or wrote a page key straight on a break.** Otherwise a document writes exactly what it did, byte for byte, and reads what it did.
 
 ### Added
