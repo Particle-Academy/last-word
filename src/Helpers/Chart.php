@@ -321,7 +321,7 @@ final class Chart
     public static function parseNum(string $text): int|float
     {
         $text = trim($text);
-        $value = preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/', $text) === 1 ? (float) $text : 0.0;
+        $value = preg_match('/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/', $text) === 1 ? (float) $text : 0.0;
         if ($value == floor($value) && abs($value) < 1.0e15) {
             return (int) $value;
         }
