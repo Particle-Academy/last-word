@@ -159,7 +159,7 @@ function lwxSchemaDef(string $def): array
         'pageBorder' => $s['properties']['page']['properties']['border'] ?? ['properties' => []],
         'band' => $s['$defs']['band'],
         'run' => $s['$defs']['run'],
-        'paragraph', 'heading', 'table', 'image' => $blocks[$def],
+        'paragraph', 'heading', 'table', 'image', 'pageBreak' => $blocks[$def],
         'listItem' => $s['$defs']['listItem'],
         'tableRow' => $table['rows']['items'],
         'tableCell' => $table['rows']['items']['properties']['cells']['items'],
@@ -222,4 +222,31 @@ it('satisfies the last-word half of every doc-model/shared row', function (): vo
     expect($failed)->toBe([])
         ->and($passed)->toBe(count($cases))
         ->and($passed)->toBeGreaterThanOrEqual(20);
+});
+
+/*
+ * doc-model/page-refusal: last-word's half. A key it cannot honour is refused with
+ * the same message in all three runtimes, and repair must not make it look fine.
+ * Messages only: paths differ by runtime, and the suite says so.
+ */
+it('satisfies the last-word half of every doc-model/page-refusal row', function (): void {
+    $cases = Conformance::cases('doc-model/page-refusal');
+    $failed = [];
+    foreach ($cases as $case) {
+        $doc = $case['input']['doc'];
+        $want = $case['expected']['lastWord'];
+        $got = ['repairOk' => Agent::validateAndRepair($doc)['ok']];
+        if (array_key_exists('messages', $want)) {
+            $got['messages'] = array_column(Agent::validate($doc), 'message');
+        }
+        if (! Conformance::equals($got, $want)) {
+            $failed[] = $case['id'].' expected '.json_encode($want).' got '.json_encode($got);
+        }
+    }
+
+    echo "\ndoc-model/page-refusal [php, last-word half] - fancy-conformance ".Conformance::version()
+        ."\n  ".(count($cases) - count($failed)).' passed, '.count($failed).' failed, 0 skipped (of '.count($cases).")\n";
+
+    expect($failed)->toBe([])
+        ->and(count($cases))->toBeGreaterThanOrEqual(18);
 });
