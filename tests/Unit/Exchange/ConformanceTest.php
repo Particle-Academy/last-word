@@ -158,6 +158,7 @@ function lwxSchemaDef(string $def): array
         'page' => $s['properties']['page'],
         'pageBorder' => $s['properties']['page']['properties']['border'] ?? ['properties' => []],
         'band' => $s['$defs']['band'],
+        'pageMargins' => $s['$defs']['pageMargins'],
         'run' => $s['$defs']['run'],
         'paragraph', 'heading', 'table', 'image', 'pageBreak' => $blocks[$def],
         'listItem' => $s['$defs']['listItem'],
@@ -225,9 +226,9 @@ it('satisfies the last-word half of every doc-model/shared row', function (): vo
 });
 
 /*
- * doc-model/page-refusal: last-word's half. A key it cannot honour is refused with
- * the same message in all three runtimes, and repair must not make it look fine.
- * Messages only: paths differ by runtime, and the suite says so.
+ * doc-model/page-refusal: last-word's half, which since DOCX stage 2 is what
+ * fine-print's says, in all three runtimes. Repair must not make a refusal look fine,
+ * or lose a page. Messages only: paths differ by runtime, and the suite says so.
  */
 it('satisfies the last-word half of every doc-model/page-refusal row', function (): void {
     $cases = Conformance::cases('doc-model/page-refusal');
@@ -235,7 +236,12 @@ it('satisfies the last-word half of every doc-model/page-refusal row', function 
     foreach ($cases as $case) {
         $doc = $case['input']['doc'];
         $want = $case['expected']['lastWord'];
-        $got = ['repairOk' => Agent::validateAndRepair($doc)['ok']];
+        $repaired = Agent::validateAndRepair($doc);
+        $got = ['repairOk' => $repaired['ok']];
+        if (array_key_exists('pageKept', $want)) {
+            $kept = static fn (array $b): bool => ($b['type'] ?? null) === 'pageBreak' && array_key_exists('page', $b);
+            $got['pageKept'] = count(array_filter($repaired['schema']['blocks'], $kept)) === count(array_filter($doc['blocks'], $kept));
+        }
         if (array_key_exists('messages', $want)) {
             $got['messages'] = array_column(Agent::validate($doc), 'message');
         }

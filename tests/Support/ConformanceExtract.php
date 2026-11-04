@@ -96,6 +96,63 @@ final class ConformanceExtract
     }
 
     /**
+     * `sections`: every w:sectPr of word/document.xml in document order, each as
+     * {props, references}: its ordered properties without its header and footer
+     * references, and those references as {kind, type, target, tabs}, `tabs` the
+     * w:pos of each tab stop in the part's first w:tabs.
+     *
+     * @param  array<string, mixed>  $input
+     * @return list<array{props: list<mixed>, references: list<array<string, mixed>>}>
+     */
+    public static function sections(array $input): array
+    {
+        $parts = self::parts(self::write($input));
+        $targets = self::bandTargets($parts);
+        $root = self::root($parts['word/document.xml'] ?? null);
+        $found = [];
+        foreach ($root?->getElementsByTagNameNS(self::W, 'sectPr') ?? [] as $sectPr) {
+            $found[] = $sectPr;
+        }
+        $out = [];
+        foreach ($found as $sectPr) {
+            $references = [];
+            $props = [];
+            foreach ($sectPr->childNodes as $node) {
+                if (!$node instanceof DOMElement) {
+                    continue;
+                }
+                if (in_array($node->localName, ['headerReference', 'footerReference'], true)) {
+                    $target = $targets[$node->getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id')] ?? null;
+                    $part = self::root($parts['word/' . $target] ?? null);
+                    $tabs = [];
+                    $stops = $part?->getElementsByTagNameNS(self::W, 'tabs')->item(0);
+                    foreach ($stops?->childNodes ?? [] as $tab) {
+                        if ($tab instanceof DOMElement) {
+                            $tabs[] = $tab->getAttributeNS(self::W, 'pos');
+                        }
+                    }
+                    $references[] = [
+                        'kind' => $node->localName === 'headerReference' ? 'header' : 'footer',
+                        'type' => $node->getAttributeNS(self::W, 'type'),
+                        'target' => $target,
+                        'tabs' => $tabs,
+                    ];
+
+                    continue;
+                }
+                $attrs = [];
+                foreach ($node->attributes as $attr) {
+                    $attrs[$attr->localName] = $attr->value;
+                }
+                $props[] = [$node->localName, $attrs === [] ? true : $attrs];
+            }
+            $out[] = ['props' => $props, 'references' => $references];
+        }
+
+        return $out;
+    }
+
+    /**
      * `bandFields`: for each header/footer part the section references, in
      * reference order and once each, {target, fields}: every complex field in
      * the part as {instruction, result}.

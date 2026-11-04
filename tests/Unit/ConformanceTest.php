@@ -218,6 +218,8 @@ function extractorFor(string $fn): callable
         'bandFields' => static fn (array $input): array => ConformanceExtract::bandFields($input),
         'coreProps' => static fn (array $input): ?array => ConformanceExtract::coreProps($input),
 
+        'sections' => static fn (array $input): array => ConformanceExtract::sections($input),
+        'readFile' => static fn (array $input): array => Agent::read(Conformance::fixtureBytes(SUITE, $input['file'])),
         'readBack' => static fn (array $input): array => Agent::read(ConformanceExtract::write($input)),
 
         // The comparator is the suite's own, so "equal" means the same thing
