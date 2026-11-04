@@ -20,7 +20,7 @@ use LastWord\Tests\Support\GeneratedLetterhead;
  * The same bytes are in last-word-ui (tests/fixtures/viewer-agreement.json);
  * both pin this hash over LF-normalised content.
  */
-const LAYOUT_AGREEMENT_SHA256 = 'c262515fc734b352f4d074e0f8238951f6a3a7b32fb7eed1b2dcd5256ca18131';
+const LAYOUT_AGREEMENT_SHA256 = '6d1ea6f675d289ddc927fd8d27ae509373ef4fe10c10ab03eafec58c0a5eaa53';
 
 function lw_agreement(): array
 {
@@ -50,7 +50,10 @@ function lw_canonical(array $item, bool $withMarkPositions): array
 {
     $r = static fn ($v): float => round((float) $v, 6);
     if ($item['type'] === 'break') {
-        return ['type' => 'break'];
+        $stretch = array_map($r, $item['stretch'] ?? []);
+        ksort($stretch);
+
+        return ['type' => 'break'] + ($stretch !== [] ? ['stretch' => $stretch] : []);
     }
     if ($item['type'] === 'table') {
         return ['type' => 'table', 'headerRows' => (int) ($item['headerRows'] ?? 0), 'rows' => array_map(static fn (array $row): array => [
