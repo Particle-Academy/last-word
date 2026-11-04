@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use LastWord\Agent;
 use LastWord\Archive\PartXml;
+use LastWord\Exceptions\OfficeTemplateRefused;
 use LastWord\Exceptions\TemplateException;
 use LastWord\Tests\Support\GeneratedLetterhead;
 
@@ -216,6 +217,50 @@ it('refuses a DOCTYPE in a template part it reads or carries', function (string 
     expect(fn () => Agent::toBytes(['blocks' => []], ['template' => pxZip($template), 'templateParts' => ['styles', 'headers', 'footers', 'page']]))
         ->toThrow(TemplateException::class);
 })->with(['word/styles.xml', 'word/document.xml', 'word/header1.xml'])->with(['plain UTF-8', 'UTF-16LE with a BOM', 'past a long comment']);
+
+/* ---------------- the package's own declaration ---------------- */
+
+function pxDeclaringMacros(): array
+{
+    $parts = pxDocx();
+    $parts['[Content_Types].xml'] = str_replace(
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
+        'application/vnd.ms-word.template.macroEnabledTemplate.main+xml',
+        $parts['[Content_Types].xml'],
+    );
+
+    return $parts;
+}
+
+it('refuses a macro template as it always did, so the case below is the same package', function (): void {
+    expect(fn () => Agent::read(pxZip(pxDeclaringMacros())))->toThrow(OfficeTemplateRefused::class);
+});
+
+it('refuses the package when its declaration carries a DOCTYPE, in every encoding', function (string $encoding): void {
+    $parts = pxDeclaringMacros();
+    $parts['[Content_Types].xml'] = pxEncodings()[$encoding](pxWithDoctype($parts['[Content_Types].xml']));
+
+    try {
+        Agent::read(pxZip($parts));
+        $this->fail('expected a refusal');
+    } catch (OfficeTemplateRefused $e) {
+        expect($e->reason)->toBe('refused_declaration');
+    }
+})->with(array_keys(pxEncodings()));
+
+it('refuses it when converting too', function (): void {
+    $parts = pxDocx();
+    $parts['[Content_Types].xml'] = pxWithDoctype($parts['[Content_Types].xml']);
+
+    expect(fn () => Agent::convertTemplate(pxZip($parts)))->toThrow(OfficeTemplateRefused::class);
+});
+
+it('leaves a merely malformed declaration as it was', function (): void {
+    $parts = pxDocx();
+    $parts['[Content_Types].xml'] = '<Types>';
+
+    expect(substr_count(pxRead($parts), PX_MARKER))->toBe(6);
+});
 
 /* ---------------- the gate on its own ---------------- */
 

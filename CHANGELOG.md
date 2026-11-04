@@ -27,6 +27,10 @@
   throws as it did, a template part throws `TemplateException`, and any other part reads
   as absent. **Consumer action:** none; no Word or ODF file has a DOCTYPE. A header part
   with one used to read as a one-line band and now reads as no header.
+- A package whose `[Content_Types].xml` declares a DOCTYPE is refused whole, with
+  `OfficeTemplateRefused` reason `refused_declaration`, as a macro-enabled template is.
+  **Consumer action:** none, unless you branch on `reason`. A merely malformed one reads
+  as it did.
 
 ### Removed
 

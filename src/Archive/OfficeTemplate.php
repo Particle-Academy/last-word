@@ -175,6 +175,12 @@ final class OfficeTemplate
     {
         $declared = self::declarations($types);
         if ($declared === null) {
+            // Refused rather than read as unparsable: a package that declares
+            // nothing is a plain document, and its declarations go unchecked.
+            if (PartXml::declaresDoctype($types)) {
+                throw new OfficeTemplateRefused('refused_declaration');
+            }
+
             // Unparsable content types were never looked at before; the
             // reader's own handling of the package is unchanged.
             return self::DOCUMENT;
