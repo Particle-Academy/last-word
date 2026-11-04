@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LastWord\Writer;
 
+use LastWord\Archive\PartXml;
 use LastWord\Archive\SourceArchive;
 use LastWord\Exceptions\ArchiveRefused;
 use LastWord\Exceptions\TemplateException;
@@ -120,7 +121,7 @@ final class DocxTemplate
         // refusal as the section: a Word package never legitimately carries a
         // DOCTYPE, and an internal subset is the entry point for entity expansion.
         foreach (['styles' => $styles, 'theme' => $theme] as $what => $xml) {
-            if ($xml !== null && preg_match('/<!DOCTYPE/i', $xml) === 1) {
+            if ($xml !== null && PartXml::declaresDoctype($xml)) {
                 throw new TemplateException("The template's {$what} part declares a DOCTYPE, which is refused.");
             }
         }
@@ -218,8 +219,7 @@ final class DocxTemplate
      *
      * Read with a regex on purpose: the question is only "is this id already
      * taken", the input is a part Word wrote, and a wrong answer costs a
-     * duplicate definition rather than a wrong document. A full parse would be a
-     * DOCTYPE surface on an uploaded file for no extra certainty.
+     * duplicate definition rather than a wrong document.
      *
      * @return list<string>
      */

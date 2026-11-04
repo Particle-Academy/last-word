@@ -19,6 +19,15 @@
 - `read()` reports more through `unrepresented`, kind `layout-not-preserved`: `w:cols` above 1, a page-number restart and a paper size other than letter, legal or A4 are dropped, as they always were, and now say so, in a one-section file too. `oddPage` / `evenPage` starts read as a break and a report; `continuous` with the same size and orientation reads as no break and a report. **Consumer action:** none; if you treat any report as a failure, a custom paper size now is one.
 - `{section}` caches its section's number rather than 1 in each later section's part. Word computes it; LibreOffice shows the cached one.
 
+### Security
+
+- Every XML part of a file, read or carried, now goes through one gate
+  (`Archive\PartXml`), which refuses a part declaring a DOCTYPE. A refused part reads as
+  an unparsable one: `word/document.xml` throws as it does when malformed, an ODT part
+  throws as it did, a template part throws `TemplateException`, and any other part reads
+  as absent. **Consumer action:** none; no Word or ODF file has a DOCTYPE. A header part
+  with one used to read as a one-line band and now reads as no header.
+
 ### Removed
 
 - The refusal `pageBreak.page is not implemented in last-word yet`, and the `/page` report counting flattened section breaks. **Consumer action:** none. `/page` still reports what the first section drops.

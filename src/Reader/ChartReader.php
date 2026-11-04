@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace LastWord\Reader;
 
-use DOMDocument;
 use DOMElement;
+use LastWord\Archive\PartXml;
 use LastWord\Helpers\Chart;
 
 /**
@@ -38,15 +38,8 @@ final class ChartReader
      */
     public static function read(string $xml): ?array
     {
-        if (stripos($xml, '<!DOCTYPE') !== false) {
-            return null;
-        }
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($xml);
+        if ($dom === null || $dom->documentElement === null) {
             return null;
         }
 

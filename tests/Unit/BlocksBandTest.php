@@ -118,14 +118,20 @@ it('does not read a header image over the media cap', function (): void {
     expect($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1], Letterhead::PAPER_NOTE]);
 });
 
-it('never reads a header part with a DOCTYPE, or over the part cap, as blocks', function (array $variant): void {
+it('reads nothing from a header part with a DOCTYPE', function (): void {
+    $read = Agent::read(Letterhead::bytes(['doctypeHeader' => true]));
+
+    expect($read['page'] ?? [])->not->toHaveKey('header')
+        ->and($read['unrepresented'])->toBe([Letterhead::PAPER_NOTE]);
+});
+
+it('never reads a header part over the part cap as blocks', function (array $variant): void {
     $read = Agent::read(Letterhead::bytes($variant));
 
     // The band reading and the report, exactly as before last-word#6.
     expect($read['page']['header'])->toBe(['left' => ' ' . Letterhead::HEADER_TEXT])
         ->and($read['unrepresented'])->toBe([['where' => '/page/header', 'kind' => 'image', 'count' => 1], Letterhead::PAPER_NOTE]);
 })->with([
-    'a DOCTYPE' => [['doctypeHeader' => true]],
     'over 2 MiB' => [['oversizedHeader' => true]],
 ]);
 

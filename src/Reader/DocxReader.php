@@ -8,6 +8,7 @@ use DOMDocument;
 use DOMElement;
 use DOMNode;
 use LastWord\Archive\OfficeTemplate;
+use LastWord\Archive\PartXml;
 use LastWord\Archive\SourceArchive;
 use LastWord\Schema\Schema;
 use LastWord\Writer\DocxWriter;
@@ -192,12 +193,8 @@ final class DocxReader
         $this->sectionTargets = [];
         $this->bandCache = [];
 
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $loaded = $dom->loadXML($documentXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$loaded) {
+        $dom = PartXml::dom($documentXml);
+        if ($dom === null) {
             throw new RuntimeException('Could not parse word/document.xml.');
         }
 
@@ -793,12 +790,8 @@ final class DocxReader
         }
         $kind = $key;
 
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($part, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($part);
+        if ($dom === null || $dom->documentElement === null) {
             return null;
         }
 
@@ -807,7 +800,7 @@ final class DocxReader
         // richer, which the band could only report as lost, is read as blocks,
         // unless the part fails the checks a template letterhead's must pass.
         [$images, $extra] = $this->bandOverflow($dom->documentElement);
-        if (($images > 0 || $extra > 0) && strlen($part) <= TemplateSection::PART_LIMIT && stripos($part, '<!DOCTYPE') === false) {
+        if (($images > 0 || $extra > 0) && strlen($part) <= TemplateSection::PART_LIMIT) {
             return $this->parseBlocksBand($dom->documentElement, $name, $kind, $images);
         }
         $this->noteUnrepresented($kind, $images, $extra);
@@ -1049,12 +1042,8 @@ final class DocxReader
         if ($this->stylesXml === null) {
             return [];
         }
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $loaded = $dom->loadXML($this->stylesXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$loaded || $dom->documentElement === null) {
+        $dom = PartXml::dom($this->stylesXml);
+        if ($dom === null || $dom->documentElement === null) {
             return [];
         }
 
@@ -1106,9 +1095,8 @@ final class DocxReader
         foreach ($zip->names() as $name) {
             if (preg_match('#^word/_rels/((?:header|footer)\d*\.xml)\.rels$#', $name, $m) === 1) {
                 $xml = (string) $zip->read($name);
-                // A DOCTYPE is refused in a template's rels (last-word#5); here it
-                // leaves the part with no relationships, so nothing resolves.
-                $this->bandRels[$m[1]] = stripos($xml, '<!DOCTYPE') === false ? $this->parseRels($xml) : [];
+                // A DOCTYPE leaves the part with no relationships, so nothing resolves.
+                $this->bandRels[$m[1]] = $this->parseRels($xml);
             }
             if (preg_match('#^word/charts/[^/]+\.xml$#', $name) === 1) {
                 $this->chartParts[substr($name, strlen('word/'))] = $zip->read($name);
@@ -1130,15 +1118,8 @@ final class DocxReader
     /** Whether a settings part turns on even/odd headers. A DOCTYPE leaves it off. */
     private function settingsEvenAndOdd(string $xml): bool
     {
-        if (stripos($xml, '<!DOCTYPE') !== false) {
-            return false;
-        }
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($xml);
+        if ($dom === null || $dom->documentElement === null) {
             return false;
         }
         $el = $this->firstChildByName($dom->documentElement, 'evenAndOddHeaders');
@@ -1169,15 +1150,11 @@ final class DocxReader
             $name = ltrim($target, '/');
         }
         $xml = $zip->read($name);
-        if ($xml === null || stripos($xml, '<!DOCTYPE') !== false) {
+        if ($xml === null) {
             return;
         }
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($xml);
+        if ($dom === null || $dom->documentElement === null) {
             return;
         }
         foreach ($dom->documentElement->childNodes as $node) {
@@ -1193,18 +1170,14 @@ final class DocxReader
 
         $relsName = 'word/_rels/' . basename($name) . '.rels';
         $partRels = $zip->read($relsName);
-        $this->footnoteRels = $partRels !== null && stripos($partRels, '<!DOCTYPE') === false ? $this->parseRels($partRels) : [];
+        $this->footnoteRels = $partRels !== null ? $this->parseRels($partRels) : [];
     }
 
     /** The target of the first relationship whose type ends `/{$type}`, or null. */
     private function relTargetOfType(string $relsXml, string $type): ?string
     {
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($relsXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($relsXml);
+        if ($dom === null || $dom->documentElement === null) {
             return null;
         }
         foreach ($dom->documentElement->childNodes as $node) {
@@ -1264,16 +1237,12 @@ final class DocxReader
      */
     private function parseCoreElement(string $localName): ?string
     {
-        if ($this->coreXml === null || stripos($this->coreXml, '<!DOCTYPE') !== false) {
+        if ($this->coreXml === null) {
             return null;
         }
 
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($this->coreXml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($this->coreXml);
+        if ($dom === null || $dom->documentElement === null) {
             return null;
         }
 
@@ -1290,12 +1259,8 @@ final class DocxReader
      */
     private function parseRels(string $xml): array
     {
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($xml);
+        if ($dom === null || $dom->documentElement === null) {
             return [];
         }
 
@@ -1323,12 +1288,8 @@ final class DocxReader
      */
     private function parseNumbering(string $xml): array
     {
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $ok = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (!$ok || $dom->documentElement === null) {
+        $dom = PartXml::dom($xml);
+        if ($dom === null || $dom->documentElement === null) {
             return [];
         }
 

@@ -6,6 +6,7 @@ namespace LastWord\Writer;
 
 use DOMDocument;
 use DOMElement;
+use LastWord\Archive\PartXml;
 use LastWord\Archive\SourceArchive;
 use LastWord\Exceptions\TemplateException;
 
@@ -621,17 +622,11 @@ final class TemplateSection
     /** @throws TemplateException */
     private static function dom(string $xml, string $what): DOMDocument
     {
-        // Checked on the bytes as well as the tree: a DOCTYPE is refused before
-        // libxml is asked to do anything with it.
-        if (preg_match('/<!DOCTYPE/i', $xml) === 1) {
+        if (PartXml::declaresDoctype($xml)) {
             throw new TemplateException("The template's {$what} part declares a DOCTYPE, which is refused.");
         }
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $loaded = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
-        if (! $loaded || $dom->doctype !== null || $dom->documentElement === null) {
+        $dom = PartXml::dom($xml);
+        if ($dom === null || $dom->documentElement === null) {
             throw new TemplateException("The template's {$what} part is not well-formed XML.");
         }
 

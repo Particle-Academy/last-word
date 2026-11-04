@@ -425,16 +425,9 @@ final class OfficeTemplate
 
     private static function dom(?string $xml): ?DOMDocument
     {
-        if ($xml === null || $xml === '') {
-            return null;
-        }
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $loaded = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
+        $dom = PartXml::dom($xml);
 
-        return $loaded && $dom->doctype === null ? $dom : null;
+        return $dom;
     }
 
     private static function firstByLocalName(DOMDocument $dom, string $local): ?DOMElement

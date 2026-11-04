@@ -9,6 +9,7 @@ use DOMElement;
 use DOMNode;
 use DOMText;
 use LastWord\Archive\OfficeTemplate;
+use LastWord\Archive\PartXml;
 use LastWord\Archive\SourceArchive;
 use LastWord\Schema\Schema;
 use RuntimeException;
@@ -130,17 +131,13 @@ final class OdtReader
         if ($xml === null) {
             return null;
         }
-        if (stripos($xml, '<!DOCTYPE') !== false) {
+        if (PartXml::declaresDoctype($xml)) {
             throw new RuntimeException("ODT part {$name} carries a DOCTYPE, which an ODT never does; refusing to parse it.");
         }
 
-        $dom = new DOMDocument();
-        $prev = libxml_use_internal_errors(true);
-        $loaded = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        libxml_use_internal_errors($prev);
+        $dom = PartXml::dom($xml);
 
-        if (! $loaded || $dom->documentElement === null) {
+        if ($dom === null || $dom->documentElement === null) {
             if ($required) {
                 throw new RuntimeException("Could not parse {$name}.");
             }
