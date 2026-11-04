@@ -580,6 +580,16 @@ and footnotes (any ids; Word's own separators skipped).
 Unknown constructs degrade to plain paragraphs — the reader never throws
 on strange XML.
 
+**A document has one page setup, for now.** A file with section breaks reads
+with the last section's page and the rest flattened into it, and says so:
+`"unrepresented": [{"where": "/page", "kind": "layout-not-preserved", "count": 1}]`,
+where `count` is the section breaks lost. On the way in, `pageBreak.page` is
+refused until a later release writes it, `validateAndRepair` included: repair
+leaves it in place and the result is `ok: false`. The same goes for page keys
+written straight on a break (`pageBreak.orientation`, `.margins`, ...) and for a
+top-level `sections`, neither of which exists. `fine-print` honours
+`pageBreak.page` for PDFs today.
+
 ## Reading .doc, .odt and .rtf
 
 `Agent::read()` decides the format from the bytes, never the file name, and

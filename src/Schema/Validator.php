@@ -40,6 +40,10 @@ final class Validator
     {
         $errors = [];
 
+        if (array_key_exists('sections', $doc)) {
+            $errors[] = self::error('sections', 'there is no sections key; use pageBreak.page');
+        }
+
         if (array_key_exists('title', $doc) && !is_string($doc['title'])) {
             $errors[] = self::error('title', 'title must be a string when present');
         }
@@ -326,8 +330,31 @@ final class Validator
             'quote' => $this->validateQuote($block, $path, $errors),
             'image' => $this->validateImage($block, $path, $errors),
             'chart' => $this->validateChart($block, $path, $errors),
-            'pageBreak', 'hr' => null,
+            'pageBreak' => $this->validatePageBreak($block, $path, $errors),
+            'hr' => null,
         };
+    }
+
+    /**
+     * A break asking for a different page. A .docx has one page setup until the
+     * writer implements `page`, so it is refused rather than ignored: a document
+     * that silently comes out all portrait looks fine. Repair leaves these keys
+     * in place, so `validateAndRepair` stays `ok: false`. The words are the same
+     * bytes in the Node and Python ports.
+     *
+     * @param  array<string, mixed>  $block
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validatePageBreak(array $block, string $path, array &$errors): void
+    {
+        if (array_key_exists('page', $block)) {
+            $errors[] = self::error("{$path}.page", 'pageBreak.page is not implemented in last-word yet; remove page to keep one page setup, or write this document as a PDF with fine-print');
+        }
+        foreach (Schema::PAGE_BREAK_NEAR_MISS_KEYS as $key) {
+            if (array_key_exists($key, $block)) {
+                $errors[] = self::error("{$path}.{$key}", "a pageBreak has no {$key} key; use pageBreak.page");
+            }
+        }
     }
 
     /**

@@ -432,14 +432,25 @@ final class Agent
         // What read() found in a header or footer and could not represent
         // (last-word#5), so an agent knows a letterhead logo is there before it
         // writes the document back without one.
+        // Sections get their own line: a template carries only its last section,
+        // so "kept by writing onto the original" would not be true of them.
         $notes = [];
+        $sectionBreaks = 0;
         foreach (is_array($doc['unrepresented'] ?? null) ? $doc['unrepresented'] : [] as $note) {
             if (is_array($note) && is_string($note['where'] ?? null) && is_string($note['kind'] ?? null) && is_int($note['count'] ?? null)) {
+                if ($note['kind'] === 'layout-not-preserved') {
+                    $sectionBreaks += $note['count'];
+
+                    continue;
+                }
                 $notes[] = $note['where'] . ': ' . $note['count'] . ' ' . $note['kind'];
             }
         }
         if ($notes !== []) {
             $lines[] = 'Not represented (kept only by writing onto the original as a template): ' . implode(', ', $notes);
+        }
+        if ($sectionBreaks > 0) {
+            $lines[] = 'Layout not preserved: ' . $sectionBreaks . ' section break' . ($sectionBreaks === 1 ? '' : 's') . " flattened into the last section's page setup";
         }
 
         return implode("\n", $lines);

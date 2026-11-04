@@ -37,6 +37,15 @@ stores save timestamps) and read identically.
 The Node and Python ports carry byte-identical copies of these four files and
 assert the same results on them.
 
+## Two sections
+
+`two-sections.docx` is a portrait section then a landscape one, the first's
+`w:sectPr` on its last paragraph as Word writes it. The writer cannot make one
+yet, so `tests/Support/build-two-sections.php` writes a document and moves that
+XML in. `two-sections.read.json` is `Agent::read()` of it. All three runtimes hold
+their reads to it, `unrepresented` report included. The two files are copied into
+the Node and Python ports; a rebuild changes the zip's timestamps, so copy after.
+
 ## What the tests hold each format to
 
 `LegacyFormatsTest` reads all four through `Agent::read()` and requires the

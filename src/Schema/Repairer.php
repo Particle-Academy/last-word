@@ -252,9 +252,30 @@ final class Repairer
             'quote' => $this->repairQuote($block, $path),
             'image' => $this->repairImage($block, $path),
             'chart' => $this->repairChart($block, $path),
-            'pageBreak' => ['type' => 'pageBreak'],
+            'pageBreak' => self::repairPageBreak($block),
             'hr' => ['type' => 'hr'],
         };
+    }
+
+    /**
+     * A break is rewritten to the bare break, EXCEPT what validation refuses on
+     * one: `page` and the near-miss keys stay, so the document stays `ok: false`.
+     * Stripped, any unrelated repair elsewhere would turn a refused landscape
+     * section into `ok: true` and an all-portrait document.
+     *
+     * @param  array<string, mixed>  $block
+     * @return array<string, mixed>
+     */
+    private static function repairPageBreak(array $block): array
+    {
+        $out = ['type' => 'pageBreak'];
+        foreach (['page', ...Schema::PAGE_BREAK_NEAR_MISS_KEYS] as $key) {
+            if (array_key_exists($key, $block)) {
+                $out[$key] = $block[$key];
+            }
+        }
+
+        return $out;
     }
 
     /** @param  array<string, mixed>  $block */

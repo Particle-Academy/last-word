@@ -73,6 +73,16 @@ final class Schema
     public const PAGE_BANDS = ['header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter'];
 
     /**
+     * The page object's own keys, which an agent writes straight on a
+     * `pageBreak` when it means `pageBreak.page`. Each is refused by name rather
+     * than ignored as a decoration: ignored, the document comes out all portrait
+     * and looks fine. In validation order, shared with the Node and Python ports.
+     *
+     * @var list<string>
+     */
+    public const PAGE_BREAK_NEAR_MISS_KEYS = ['size', 'orientation', 'margins', 'header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter', 'background', 'border'];
+
+    /**
      * A band key => [kind, Word reference type].
      *
      * @var array<string, array{0: string, 1: string}>

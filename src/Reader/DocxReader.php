@@ -208,6 +208,10 @@ final class DocxReader
         if ($page !== null) {
             $doc['page'] = $page;
         }
+        $sectionBreaks = $body !== null ? $this->sectionBreaks($body) : 0;
+        if ($sectionBreaks > 0) {
+            $this->unrepresented[] = ['where' => '/page', 'kind' => 'layout-not-preserved', 'count' => $sectionBreaks];
+        }
         foreach ($this->parseDocDefaults() as $key => $value) {
             $doc[$key] = $value;
         }
@@ -223,6 +227,41 @@ final class DocxReader
         }
 
         return $doc;
+    }
+
+    /**
+     * How many section breaks the body holds: paragraphs whose `w:pPr` carries a
+     * `w:sectPr`, at the levels the reader takes blocks from. The model has one
+     * page setup, so `page` is the last section's and every other section is lost;
+     * a count of them is reported instead of the loss going unsaid. The body's own
+     * final `w:sectPr` is not a break. A walk, not a recursion: this nesting is
+     * attacker-supplied, and the Node and Python ports walk it the same way.
+     */
+    private function sectionBreaks(DOMElement $body): int
+    {
+        $count = 0;
+        $stack = [$body];
+        while ($stack !== []) {
+            foreach (array_pop($stack)->childNodes as $node) {
+                if (!($node instanceof DOMElement)) {
+                    continue;
+                }
+                if ($node->localName === 'p') {
+                    if ($this->firstChildByName($this->firstChildByName($node, 'pPr'), 'sectPr') !== null) {
+                        $count++;
+                    }
+                } elseif ($node->localName === 'customXml') {
+                    $stack[] = $node;
+                } elseif ($node->localName === 'sdt') {
+                    $content = $this->firstChildByName($node, 'sdtContent');
+                    if ($content !== null) {
+                        $stack[] = $content;
+                    }
+                }
+            }
+        }
+
+        return $count;
     }
 
     /** Twips between the margins: page width (landscape-aware) less left and right. */
