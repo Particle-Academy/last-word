@@ -133,7 +133,7 @@ it('retains every existing fixture payload against independent native ZIP digest
 });
 
 it('refuses oversized file input before reading the archive into memory', function () {
-    $path = tempnam(sys_get_temp_dir(), 'holy_archive_limit_');
+    $path = lwTemp('holy_archive_limit_');
     $stream = fopen($path, 'r+b');
     ftruncate($stream, 67108865);
     fclose($stream);

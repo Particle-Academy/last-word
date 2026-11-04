@@ -16,7 +16,7 @@ final class Package
     /** @return array<string, string> entry name => bytes */
     public static function parts(string $bytes): array
     {
-        $path = tempnam(sys_get_temp_dir(), 'lw-pkg') . '.docx';
+        $path = \lwTemp('lw-pkg', '.docx');
         file_put_contents($path, $bytes);
         $zip = new ZipArchive();
         expect($zip->open($path, ZipArchive::RDONLY | ZipArchive::CHECKCONS))->toBeTrue();

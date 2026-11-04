@@ -54,7 +54,7 @@ function templateDoc(): array
 /** @return array<string, string> */
 function partsOf(string $bytes): array
 {
-    $path = tempnam(sys_get_temp_dir(), 'lw-out') . '.docx';
+    $path = lwTemp('lw-out', '.docx');
     file_put_contents($path, $bytes);
 
     $zip = new ZipArchive();
@@ -149,7 +149,7 @@ it('is deterministic with a template, as without one', function (): void {
 });
 
 it('accepts a template as a path as well as bytes', function (): void {
-    $path = tempnam(sys_get_temp_dir(), 'lw-tpl') . '.dotx';
+    $path = lwTemp('lw-tpl', '.dotx');
     file_put_contents($path, GeneratedTemplate::bytes());
 
     try {

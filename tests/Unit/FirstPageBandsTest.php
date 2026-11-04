@@ -230,7 +230,7 @@ it('ignores a first-page part while w:titlePg is off, as Word does', function ()
 
 function fpZip(array $parts): string
 {
-    $path = tempnam(sys_get_temp_dir(), 'lw-fp') . '.docx';
+    $path = lwTemp('lw-fp', '.docx');
     $zip = new ZipArchive();
     $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
     foreach ($parts as $name => $xml) {

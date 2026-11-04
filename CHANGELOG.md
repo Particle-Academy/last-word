@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The test suite no longer fills the temp folder: `tempnam(...) . '.docx'` left its placeholder behind, about 1,300 files a run, and each LibreOffice oracle case left its profile. Tests take paths from `lwTemp()` and `lwTempDir()`, deleted at shutdown. Nothing about the package changes.
+
 ## [0.19.0] - 2026-11-03
 
 **What you must do: only if you write a table cell with a `colSpan` above 1000.**

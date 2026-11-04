@@ -39,7 +39,7 @@ final class GeneratedTemplate
 
     public static function bytes(bool $withTheme = true): string
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'lw-gen') . '.dotx';
+        $tmp = \lwTemp('lw-gen', '.dotx');
 
         $zip = new ZipArchive();
         $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
@@ -61,7 +61,7 @@ final class GeneratedTemplate
     /** A package that opens as a zip but defines no styles. */
     public static function withoutStyles(): string
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'lw-gen') . '.dotx';
+        $tmp = \lwTemp('lw-gen', '.dotx');
 
         $zip = new ZipArchive();
         $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);

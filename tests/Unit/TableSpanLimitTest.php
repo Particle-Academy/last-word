@@ -23,7 +23,7 @@ function lwSpanDoc(array $cell): array
 
 function lwSpanDocumentXml(string $bytes): string
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-span');
+    $tmp = lwTemp('lw-span');
     file_put_contents($tmp, $bytes);
     $zip = new ZipArchive();
     expect($zip->open($tmp))->toBeTrue();
@@ -36,7 +36,7 @@ function lwSpanDocumentXml(string $bytes): string
 
 function lwSpanMinimalDocx(string $documentXml): string
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-span');
+    $tmp = lwTemp('lw-span');
     $zip = new ZipArchive();
     expect($zip->open($tmp, ZipArchive::OVERWRITE))->toBeTrue();
     $zip->addFromString('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?>'

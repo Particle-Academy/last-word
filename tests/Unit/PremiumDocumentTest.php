@@ -93,7 +93,7 @@ function premiumDoc(): array
 /** Read one part out of a written document, without leaving a file behind. */
 function lwPartOf(array $doc, string $part): string
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-premium-').'.docx';
+    $tmp = lwTemp('lw-premium-', '.docx');
 
     try {
         // Fail loudly on an invalid fixture rather than asserting against a

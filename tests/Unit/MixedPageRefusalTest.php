@@ -39,7 +39,7 @@ function lwBody(string $xml): string
 
 function lwMinimalSectionDocx(string $documentXml): string
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-sections-');
+    $tmp = lwTemp('lw-sections-');
     $zip = new ZipArchive();
     expect($zip->open($tmp, ZipArchive::OVERWRITE))->toBeTrue();
     $zip->addFromString('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?>'
@@ -173,7 +173,7 @@ it('repair still strips a decorated plain break down to the break, as it always 
 /* ---------------- what goes through writable() ---------------- */
 
 it('toBytes, write and layout all refuse it', function (array $doc, string $path, string $message): void {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-mixed-');
+    $tmp = lwTemp('lw-mixed-');
     foreach ([
         static fn () => Agent::toBytes($doc),
         static fn () => Agent::write($doc, $tmp),
@@ -222,7 +222,7 @@ it('reports a real two-section file, and otherwise reads what it read before', f
 
 it('the two-section fixture really is two sections, and the second really is landscape', function (): void {
     $zip = new ZipArchive();
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-two-');
+    $tmp = lwTemp('lw-two-');
     file_put_contents($tmp, (string) file_get_contents(__DIR__ . '/../fixtures/formats/two-sections.docx'));
     expect($zip->open($tmp))->toBeTrue();
     $xml = (string) $zip->getFromName('word/document.xml');

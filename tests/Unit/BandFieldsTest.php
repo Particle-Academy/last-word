@@ -163,7 +163,7 @@ it('keeps the cached result of a field that is not a token, in a one-line band',
 
 function bfZip(array $parts): string
 {
-    $path = tempnam(sys_get_temp_dir(), 'lw-bf') . '.docx';
+    $path = lwTemp('lw-bf', '.docx');
     $zip = new ZipArchive();
     $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
     foreach ($parts as $name => $xml) {

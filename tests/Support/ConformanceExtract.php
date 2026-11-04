@@ -40,7 +40,7 @@ final class ConformanceExtract
     /** @return array<string, string> entry name => bytes, in archive order */
     public static function parts(string $bytes): array
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'lw-conf-') . '.docx';
+        $tmp = \lwTemp('lw-conf-', '.docx');
         file_put_contents($tmp, $bytes);
         $zip = new ZipArchive();
         if ($zip->open($tmp) !== true) {

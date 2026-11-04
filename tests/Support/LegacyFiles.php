@@ -171,7 +171,7 @@ final class LegacyFiles
             .'<office:body><office:text>'.$body.'</office:text></office:body>'
             .'</office:document-content>';
 
-        $path = tempnam(sys_get_temp_dir(), 'lw_odt_');
+        $path = \lwTemp('lw_odt_');
         $zip = new ZipArchive();
         $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
         $zip->addFromString('mimetype', 'application/vnd.oasis.opendocument.text');
@@ -187,7 +187,7 @@ final class LegacyFiles
     /** A zip holding the given entries, for zips that are not documents. */
     public static function zip(array $entries): string
     {
-        $path = tempnam(sys_get_temp_dir(), 'lw_zip_');
+        $path = \lwTemp('lw_zip_');
         $zip = new ZipArchive();
         $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
         foreach ($entries as $name => $content) {

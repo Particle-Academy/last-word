@@ -329,7 +329,7 @@ final class GeneratedLetterhead
     /** @param array<string, string> $parts */
     private static function zip(array $parts): string
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'lw-lh') . '.docx';
+        $tmp = \lwTemp('lw-lh', '.docx');
         $zip = new ZipArchive();
         $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
         foreach ($parts as $name => $bytes) {

@@ -42,7 +42,7 @@ function lwtDoc(): array
 /** @return array<string, string> entry name => uncompressed bytes, in archive order */
 function lwtEntries(string $bytes): array
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lwt_');
+    $tmp = lwTemp('lwt_');
     file_put_contents($tmp, $bytes);
     $zip = new ZipArchive();
     expect($zip->open($tmp, ZipArchive::RDONLY))->toBeTrue();
@@ -59,7 +59,7 @@ function lwtEntries(string $bytes): array
 /** Compression method per entry, read from ZipArchive's own index. */
 function lwtMethods(string $bytes): array
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lwt_');
+    $tmp = lwTemp('lwt_');
     file_put_contents($tmp, $bytes);
     $zip = new ZipArchive();
     $zip->open($tmp, ZipArchive::RDONLY);
@@ -77,7 +77,7 @@ function lwtMethods(string $bytes): array
 /** Re-zip name => bytes in order; `mimetype` is written STORED as ODF requires. */
 function lwtZip(array $entries): string
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lwt_').'.zip';
+    $tmp = lwTemp('lwt_', '.zip');
     $zip = new ZipArchive();
     $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
     foreach ($entries as $name => $data) {
@@ -407,7 +407,7 @@ function lwtSoffice(): ?string
 /** Headless convert; the profile lives in a SHORT temp path (long ones crash LO on Windows). */
 function lwtLibreOffice(string $soffice, string $input, string $format, string $outDir): string
 {
-    $profile = sys_get_temp_dir().'/lwlo'.bin2hex(random_bytes(3));
+    $profile = lwTempDir('lwlo');
     $url = 'file:///'.ltrim(str_replace(chr(92), '/', $profile), '/');
     $process = proc_open([$soffice, '-env:UserInstallation='.$url, '--headless', '--norestore',
         '--convert-to', $format, '--outdir', $outDir, $input], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
@@ -427,8 +427,7 @@ it('reads what LibreOffice writes as .dotx and .ott, and LibreOffice reads our c
     if ($soffice === null) {
         $this->markTestSkipped('LibreOffice is not installed; the oracle check runs where it is.');
     }
-    $dir = sys_get_temp_dir().'/lwo'.bin2hex(random_bytes(3));
-    mkdir($dir);
+    $dir = lwTempDir('lwo');
     file_put_contents("{$dir}/src.docx", lwtDocx());
 
     foreach (['dotx' => 'docx', 'ott' => 'odt'] as $template => $document) {

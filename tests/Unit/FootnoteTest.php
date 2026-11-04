@@ -304,7 +304,7 @@ function fnPart(string $bytes, string $name): string
 
 function fnReplacePart(string $bytes, string $name, string $xml): string
 {
-    $path = tempnam(sys_get_temp_dir(), 'lw-fn').'.docx';
+    $path = lwTemp('lw-fn', '.docx');
     file_put_contents($path, $bytes);
     $zip = new ZipArchive();
     $zip->open($path);

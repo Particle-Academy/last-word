@@ -20,7 +20,7 @@ use LastWord\Agent;
 /** @return array<string, string> part name => xml */
 function lwPfParts(array $doc): array
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-pf-');
+    $tmp = lwTemp('lw-pf-');
     file_put_contents($tmp, Agent::toBytes($doc));
     $zip = new ZipArchive;
     expect($zip->open($tmp))->toBeTrue();

@@ -36,7 +36,7 @@ use LastWord\Exceptions\UnsupportedFormatException;
  */
 function lwMinimalOdt(string $text = 'Hello from ODT'): string
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw_odt_').'.odt';
+    $tmp = lwTemp('lw_odt_', '.odt');
     $zip = new ZipArchive();
     $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
     // `mimetype` first and STORED is what the ODF spec asks for; we do not
@@ -173,7 +173,7 @@ describe('what it cannot read, it refuses BY NAME', function () {
 
 describe('a PATH is sniffed too, not assumed to be docx', function () {
     it('reads an .odt from disk', function () {
-        $path = tempnam(sys_get_temp_dir(), 'lw_').'.odt';
+        $path = lwTemp('lw_', '.odt');
         file_put_contents($path, lwMinimalOdt('From a path'));
 
         try {
@@ -187,7 +187,7 @@ describe('a PATH is sniffed too, not assumed to be docx', function () {
         // The latent bug 0.4 closed: any existing path was read and handed to
         // DocxReader without checking the signature, so this failed as a corrupt
         // archive and the message named the wrong problem.
-        $path = tempnam(sys_get_temp_dir(), 'lw_').'.doc';
+        $path = lwTemp('lw_', '.doc');
         file_put_contents($path, lwRealDocBytes());
 
         try {

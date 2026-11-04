@@ -25,7 +25,7 @@ const SUITE = 'last-word/docx-constructs';
 /** Parse a written document's word/document.xml. */
 function documentXml(array $doc): DOMElement
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-conf-') . '.docx';
+    $tmp = lwTemp('lw-conf-', '.docx');
     file_put_contents($tmp, Agent::toBytes($doc));
 
     $zip = new ZipArchive();
@@ -123,7 +123,7 @@ function childNamed(?DOMElement $parent, string $name): ?DOMElement
  */
 function writtenParts(array $doc): array
 {
-    $tmp = tempnam(sys_get_temp_dir(), 'lw-conf-') . '.docx';
+    $tmp = lwTemp('lw-conf-', '.docx');
     file_put_contents($tmp, Agent::toBytes($doc));
     $zip = new ZipArchive();
     expect($zip->open($tmp))->toBeTrue();

@@ -25,7 +25,7 @@ function hfDoc(array $page = []): array
 /** @return array<string, string> */
 function hfParts(array $doc): array
 {
-    $path = tempnam(sys_get_temp_dir(), 'hf').'.docx';
+    $path = lwTemp('hf', '.docx');
     file_put_contents($path, Agent::toBytes($doc));
     $zip = new ZipArchive();
     $zip->open($path);

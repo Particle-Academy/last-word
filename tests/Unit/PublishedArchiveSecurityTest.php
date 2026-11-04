@@ -72,7 +72,7 @@ function security_refused(callable $action, string $reason): void
 }
 
 it('rejects unsafe packages at the published read boundary', function (string $attack, string $reason) {
-    $path = tempnam(sys_get_temp_dir(), 'sibling_archive_');
+    $path = lwTemp('sibling_archive_');
     file_put_contents($path, security_read_attack($attack));
     try {
         security_refused(fn () => Agent::read($path), $reason);
@@ -103,7 +103,7 @@ it('retains the typed archive cause when refusing a template', function (string 
 })->with([['bomb', 'archive_limit'], ['duplicate', 'archive_duplicate'], ['crc', 'archive_corrupt'], ['truncated', 'archive_corrupt'], ['path', 'archive_path']]);
 
 it('bounds template paths before allocating their contents', function () {
-    $path = tempnam(sys_get_temp_dir(), 'sibling_template_');
+    $path = lwTemp('sibling_template_');
     $stream = fopen($path, 'r+b');
     ftruncate($stream, 67108865);
     fclose($stream);
@@ -123,7 +123,7 @@ it('bounds template paths before allocating their contents', function () {
 });
 
 it('honours the host reader temporary directory instead of silently using the system directory', function () {
-    $file = tempnam(sys_get_temp_dir(), 'sibling_not_a_directory_');
+    $file = lwTemp('sibling_not_a_directory_');
     try {
         security_refused(fn () => (new DocxReader($file))->read(security_read_attack('valid')), 'archive_io');
     } finally {

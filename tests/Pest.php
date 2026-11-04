@@ -11,6 +11,61 @@ declare(strict_types=1);
  * test vectors explicitly allow.
  */
 
+/**
+ * A path in the temp folder that is gone by the end of the run. tempnam() makes a
+ * placeholder file, and `tempnam(...) . '.docx'` leaves it behind even when the
+ * test deletes the .docx; a full run used to leave about 1,300 files. Both the
+ * placeholder and the suffixed path are deleted at shutdown, whatever the test did.
+ */
+function lwTemp(string $prefix, string $suffix = ''): string
+{
+    static $paths = null;
+    if ($paths === null) {
+        $paths = new ArrayObject();
+        register_shutdown_function(static function () use ($paths): void {
+            foreach ($paths as $path) {
+                if (is_file($path)) {
+                    @unlink($path);
+                }
+            }
+        });
+    }
+    $base = tempnam(sys_get_temp_dir(), $prefix);
+    $paths[] = $base;
+    if ($suffix !== '') {
+        $paths[] = $base . $suffix;
+    }
+
+    return $base . $suffix;
+}
+
+/**
+ * A short-named empty directory in the temp folder, removed with everything in it
+ * at shutdown. A LibreOffice profile is the usual one: left behind, each is tens of
+ * megabytes, and its path must stay short (long ones crash LibreOffice on Windows).
+ */
+function lwTempDir(string $prefix): string
+{
+    static $dirs = null;
+    if ($dirs === null) {
+        $dirs = new ArrayObject();
+        register_shutdown_function(static function () use ($dirs): void {
+            foreach ($dirs as $dir) {
+                $items = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+                foreach ($items as $item) {
+                    $item->isDir() && ! $item->isLink() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
+                }
+                @rmdir($dir);
+            }
+        });
+    }
+    $dir = sys_get_temp_dir() . '/' . $prefix . bin2hex(random_bytes(3));
+    mkdir($dir);
+    $dirs[] = $dir;
+
+    return $dir;
+}
+
 /** Load the canonical fixture (the cross-language parity document). */
 function lwCanonical(): array
 {
