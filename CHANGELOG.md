@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The agent guide (`Agent::guide()`) covers the whole Agent surface.** It gains a "Working from an existing document" section: `read` / `fromBytes` (and how a multi-section file reads since 0.20.0, with `unrepresented` explained as the source's, not the agent's, fault), `describe`, editing by ops instead of regenerating (`opSchema`, `reduce`, `diff`, `equivalent`), the markdown bridges and `toMarkdownWithReport`, `convertTemplate`, and the exchange surface (`fromPortable`, `validateContent`, `catalog`, `extract`, `toPortable`, `export`, `exportToolDefinition`). Step 3 of the procedure now names `validateAndRepair` and what it repairs. The Node and Python packages carry the same bytes. **Consumer action:** none; a guide-only change.
+
+### Added
+
+- Dev: `AgentGuideCoversTheApiTest` fails when a public `Agent` method exists that the guide never names as code, unless it is on the test's allowlist with a reason (today `guide` and `version`).
+- Dev: `phpunit.xml` forces `DB_CONNECTION=sqlite` and `DB_DATABASE=:memory:` (env and server), so a shell pointing at a shared database can never reach it from this suite.
+
 ## [0.20.1] - 2026-11-04
 
 ### Security

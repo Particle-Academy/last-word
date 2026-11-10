@@ -9,7 +9,7 @@ declare(strict_types=1);
  * fails a build instead of telling a model one thing in PHP and another in
  * Node. Edit all three copies, then all three constants.
  */
-const AGENT_GUIDE_SHA256 = '5f897d2a73063379598a31aad83aea7935c84ffc4a23026d8ffaf3e5034aa31a';
+const AGENT_GUIDE_SHA256 = '500a257372d131951ad990aadf0269a30c7823cb6264098db69948d499e49304';
 
 it('returns the guide, and it is the shared one', function () {
     $guide = LastWord\Agent::guide();
