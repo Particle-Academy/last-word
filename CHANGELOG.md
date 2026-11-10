@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-11-10
+
 ### Changed
 
 - **The agent guide (`Agent::guide()`) covers the whole Agent surface.** It gains a "Working from an existing document" section: `read` / `fromBytes` (and how a multi-section file reads since 0.20.0, with `unrepresented` explained as the source's, not the agent's, fault), `describe`, editing by ops instead of regenerating (`opSchema`, `reduce`, `diff`, `equivalent`), the markdown bridges and `toMarkdownWithReport`, `convertTemplate`, and the exchange surface (`fromPortable`, `validateContent`, `catalog`, `extract`, `toPortable`, `export`, `exportToolDefinition`). Step 3 of the procedure now names `validateAndRepair` and what it repairs. The Node and Python packages carry the same bytes. **Consumer action:** none; a guide-only change.
