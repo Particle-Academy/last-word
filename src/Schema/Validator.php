@@ -7,6 +7,7 @@ namespace LastWord\Schema;
 use LastWord\Exchange\Content;
 use LastWord\Exchange\Portable;
 use LastWord\Helpers\Chart;
+use LastWord\Writer\NamedImages;
 use LastWord\Writer\TemplateSection;
 
 /**
@@ -44,8 +45,17 @@ final class Validator
     private array $stretchAt = [];
 
     /**
+     * @param  list<string>  $imageNames  the images the host registered (CC-fancy-0039):
+     *   an image `src` of `image:<name>` is valid for exactly these, and refused with
+     *   the code `image_unknown` for any other name -- including when there are none
+     */
+    public function __construct(private readonly array $imageNames = [])
+    {
+    }
+
+    /**
      * @param  array<string, mixed>  $doc
-     * @return list<array{path: string, message: string}>
+     * @return list<array{path: string, message: string, code?: string}>
      */
     public function validate(array $doc): array
     {
@@ -793,6 +803,12 @@ final class Validator
         $src = $block['src'] ?? null;
         if (!is_string($src)) {
             $errors[] = self::error("{$path}.src", 'image requires a string "src" data URL');
+        } elseif (str_starts_with($src, NamedImages::PREFIX)) {
+            // A registered image, by name (CC-fancy-0039); resolved at write time.
+            $name = substr($src, strlen(NamedImages::PREFIX));
+            if (!in_array($name, $this->imageNames, true)) {
+                $errors[] = NamedImages::unknownError("{$path}.src", $name, $this->imageNames);
+            }
         } elseif (preg_match('#^data:image/(png|jpe?g);base64,#', $src) !== 1) {
             $errors[] = self::error("{$path}.src", 'image src must be a PNG or JPEG data URL (data:image/png;base64,… or data:image/jpeg;base64,…)');
         }

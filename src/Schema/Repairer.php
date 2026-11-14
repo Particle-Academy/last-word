@@ -514,7 +514,11 @@ final class Repairer
      */
     private function repairImage(array $block, string $path): ?array
     {
-        if (!is_string($block['src'] ?? null) || preg_match('#^data:image/(png|jpe?g);base64,#', $block['src']) !== 1) {
+        // A named image (`image:<name>`, CC-fancy-0039) is kept: whether the name
+        // is registered is for validation to say, with `image_unknown`, rather
+        // than for repair to settle by dropping the image the model asked for.
+        $named = is_string($block['src'] ?? null) && str_starts_with($block['src'], 'image:');
+        if (!$named && (!is_string($block['src'] ?? null) || preg_match('#^data:image/(png|jpe?g);base64,#', $block['src']) !== 1)) {
             $this->note("{$path}.src", 'dropped image without a usable PNG/JPEG data URL src');
 
             return null;

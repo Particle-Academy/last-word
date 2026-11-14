@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LastWord;
 
 use InvalidArgumentException;
+use LastWord\Exceptions\ImageRefused;
 use LastWord\Exceptions\SchemaException;
 use LastWord\Exchange\Content;
 use LastWord\Exchange\Exporter;
@@ -32,6 +33,7 @@ use LastWord\Schema\Schema;
 use LastWord\Schema\Validator;
 use LastWord\Writer\DocxTemplate;
 use LastWord\Writer\DocxWriter;
+use LastWord\Writer\NamedImages;
 
 /**
  * Agent — the structured-tool surface for LastWord.
@@ -63,12 +65,25 @@ final class Agent
      * from {@see jsonSchema()} to your LLM tool registration to give the
      * agent field-level hints up front.
      *
+     * Options: `images` and `imageLimits`, as {@see toBytes()} takes them, so an
+     * `image:<name>` src is checked against the images the host registered. A
+     * name that is not registered -- or any name, with none registered -- is an
+     * error with `code: "image_unknown"`.
+     *
      * @param  array<string, mixed>  $doc
-     * @return list<array{path: string, message: string}>
+     * @param  array{images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
+     * @return list<array{path: string, message: string, code?: string}>
+     *
+     * @throws ImageRefused for an image the host registered that is refused
      */
-    public static function validate(array $doc): array
+    public static function validate(array $doc, array $options = []): array
     {
-        return (new Validator())->validate($doc);
+        return self::validator(NamedImages::fromOptions($options))->validate($doc);
+    }
+
+    private static function validator(?NamedImages $images): Validator
+    {
+        return new Validator($images?->names() ?? []);
     }
 
     /**
@@ -93,22 +108,30 @@ final class Agent
      * into the document you passed). Portable content that does not validate
      * is left in place and makes the result `ok: false`.
      *
+     * Options: `images` and `imageLimits` (see {@see validate()}). Named images
+     * stay named in `schema`: repair never drops one, so an unknown name leaves
+     * the result `ok: false` with an `image_unknown` error to correct.
+     *
      * @param  array<string, mixed>  $doc
-     * @return array{ok: bool, schema: array<string, mixed>, errors: list<array{path: string, message: string}>, report?: array<string, mixed>}
+     * @param  array{images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
+     * @return array{ok: bool, schema: array<string, mixed>, errors: list<array{path: string, message: string, code?: string}>, report?: array<string, mixed>}
+     *
+     * @throws ImageRefused for an image the host registered that is refused
      */
-    public static function validateAndRepair(array $doc): array
+    public static function validateAndRepair(array $doc, array $options = []): array
     {
+        $validator = self::validator(NamedImages::fromOptions($options));
         $x = Portable::expand($doc);
         $report = $x['expanded'] ? ['report' => $x['report']] : [];
         $doc = $x['doc'];
 
-        $errors = self::validate($doc);
+        $errors = $validator->validate($doc);
         if (empty($errors)) {
             return ['ok' => true, 'schema' => $doc, 'errors' => $x['notes']] + $report;
         }
 
         ['doc' => $repaired, 'notes' => $notes] = (new Repairer())->repair($doc);
-        $remaining = self::validate($repaired);
+        $remaining = $validator->validate($repaired);
 
         return [
             'ok' => empty($remaining),
@@ -122,20 +145,32 @@ final class Agent
      * expanded, and validated again (an expansion is ordinary blocks, which
      * still face every writer check).
      *
+     * Named images (the `images` option) are resolved last, into the data URLs
+     * the writer takes, and the result validated once more: a band's image
+     * bytes count towards its limits whether they came as a name or not.
+     *
      * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>  $options
      * @return array<string, mixed>
      *
      * @throws SchemaException
+     * @throws ImageRefused
      */
-    private static function writable(array $doc): array
+    private static function writable(array $doc, array $options = []): array
     {
-        self::assertValid($doc);
+        $images = NamedImages::fromOptions($options);
+        $validator = self::validator($images);
+        self::assertValid($doc, $validator);
         $x = Portable::expand($doc);
-        if ($x['expanded']) {
-            self::assertValid($x['doc']);
+        $doc = $x['doc'];
+        if ($images !== null) {
+            $doc = $images->resolve($doc);
+        }
+        if ($x['expanded'] || $images !== null) {
+            self::assertValid($doc, $validator);
         }
 
-        return $x['doc'];
+        return $doc;
     }
 
     /**
@@ -143,9 +178,9 @@ final class Agent
      *
      * @throws SchemaException
      */
-    private static function assertValid(array $doc): void
+    private static function assertValid(array $doc, Validator $validator): void
     {
-        $errors = self::validate($doc);
+        $errors = $validator->validate($doc);
         if (!empty($errors)) {
             throw new SchemaException(
                 'Document failed schema validation. Call Agent::validateAndRepair() for a recoverable form.',
@@ -208,16 +243,31 @@ final class Agent
      *     over the template's for that kind. False or absent is exactly the
      *     behaviour before it existed, byte for byte. Anything but a boolean
      *     throws {@see TemplateException}; ignored when `template` is absent.
+     *   - `images` (object; CC-fancy-0039): images the HOST registers by name,
+     *     `{logo: <PNG/JPEG bytes or data URL>, seal: {data, widthPx?, heightPx?,
+     *     alt?}}`, which the document places as `{"type": "image", "src":
+     *     "image:logo"}` -- in the body, a footnote, or a header or footer that
+     *     holds `blocks`, so a letterhead carries the logo. Resolved at write
+     *     time to exactly what the same image as a data URL writes. A block's own
+     *     `widthPx` / `heightPx` / `alt` win over the registered ones (either
+     *     size set on the block drops both registered sizes). An unregistered
+     *     name throws {@see SchemaException} with `code: "image_unknown"`; a
+     *     refused image throws {@see ImageRefused}. Pass the same option to
+     *     {@see guide()} and {@see jsonSchema()} so the model knows the names.
+     *   - `imageLimits` (object): `maxBytes` (default 5 MiB), `maxWidthPx` and
+     *     `maxHeightPx` (4096 each) and `maxImages` (32), positive integers,
+     *     checked as each image is registered.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool, images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
      *
      * @throws SchemaException
      * @throws TemplateException
+     * @throws ImageRefused
      */
     public static function toBytes(array $doc, array $options = []): string
     {
-        $doc = self::writable($doc);
+        $doc = self::writable($doc, $options);
 
         return (new DocxWriter($options['tempDir'] ?? null, self::templateFrom($options)))->toBytes($doc);
     }
@@ -227,7 +277,7 @@ final class Agent
      * SchemaException on validation errors. Same options as {@see toBytes()}.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool, images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
      * @return array{path: string, bytes: int, blocks: int}
      *
      * @throws SchemaException
@@ -235,7 +285,7 @@ final class Agent
      */
     public static function write(array $doc, string $path, array $options = []): array
     {
-        $doc = self::writable($doc);
+        $doc = self::writable($doc, $options);
 
         return (new DocxWriter($options['tempDir'] ?? null, self::templateFrom($options)))->write($doc, $path);
     }
@@ -488,11 +538,21 @@ final class Agent
      * JSON Schema export for LLM tool-use registration. Pass this to your
      * MCP server / agent SDK so the model gets typed field hints.
      *
+     * Options: `images` and `imageLimits`, as {@see toBytes()} takes them. With
+     * images registered, the image block's `src` names them (its pattern takes
+     * exactly those names besides a data URL); without, the schema is exactly
+     * what it was before the option existed.
+     *
+     * @param  array{images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
      * @return array<string, mixed>
+     *
+     * @throws ImageRefused for an image the host registered that is refused
      */
-    public static function jsonSchema(): array
+    public static function jsonSchema(array $options = []): array
     {
-        return Schema::jsonSchema();
+        $images = NamedImages::fromOptions($options);
+
+        return $images === null ? Schema::jsonSchema() : $images->patchSchema(Schema::jsonSchema());
     }
 
     /** Package version. */
@@ -843,7 +903,7 @@ final class Agent
      * height. PHP-first: the Node and Python packages do not have it yet.
      *
      * @param  array<string, mixed>  $doc
-     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool}  $options
+     * @param  array{tempDir?: ?string, template?: ?string, templateParts?: list<string>, templateFirstPageOnly?: bool, images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
      * @return array{pages: int, pageStarts: list<int|null>, pageList: list<array<string, mixed>>, page: array{size: string, width: float, height: float}, font: string, approximate: list<string>}
      *
      * @throws SchemaException
@@ -853,7 +913,7 @@ final class Agent
     {
         $doc = (($options['template'] ?? null) !== null && ($options['template'] ?? null) !== '')
             ? self::read(self::toBytes($doc, $options))
-            : self::writable($doc);
+            : self::writable($doc, $options);
 
         return PageLayout::of($doc);
     }
@@ -863,15 +923,25 @@ final class Agent
      * idioms that produce it, distilled from rubric-judged builds. Give it to a
      * model with the schema; it works with any agent loop. The same bytes ship in
      * the Node and Python packages (each pins the hash).
+     *
+     * Options: `images` and `imageLimits`, as {@see toBytes()} takes them. With
+     * images registered, a section listing their names, types, sizes and alt
+     * text is appended, so the model places them rather than inventing images;
+     * without, the guide is the shared bytes alone.
+     *
+     * @param  array{images?: array<string, mixed>, imageLimits?: array<string, int>}  $options
+     *
+     * @throws ImageRefused for an image the host registered that is refused
      */
-    public static function guide(): string
+    public static function guide(array $options = []): string
     {
+        $images = NamedImages::fromOptions($options);
         $path = dirname(__DIR__).'/agent-guide/professional-documents.md';
         $text = is_file($path) ? file_get_contents($path) : false;
         if ($text === false) {
             throw new \RuntimeException('[last-word] agent-guide/professional-documents.md is missing from this install.');
         }
 
-        return $text;
+        return $images === null ? $text : $text.$images->guideSection();
     }
 }

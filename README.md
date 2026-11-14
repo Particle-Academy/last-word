@@ -244,6 +244,36 @@ read, a linked (external) picture, a header part over 2 MiB or one declaring a
 DOCTYPE is never read as blocks (the part falls back to the band reading and
 the report).
 
+### Named images: the host's logo, placed by name
+
+The host registers images by name; the model places them by name, in the body,
+a footnote or a header or footer, and never carries the bytes or invents one:
+
+```php
+$images = [
+    'logo' => ['data' => file_get_contents('logo.png'), 'widthPx' => 150, 'heightPx' => 50, 'alt' => 'Acme Ltd'],
+    'seal' => 'data:image/jpeg;base64,...',
+];
+
+Agent::guide(['images' => $images]);      // the guide, plus a section listing image:logo and image:seal
+Agent::jsonSchema(['images' => $images]); // the image src takes exactly those names, or a data URL
+Agent::toBytes([
+    'page' => ['header' => ['blocks' => [['type' => 'image', 'src' => 'image:logo']]]],
+    'blocks' => $blocks,
+], ['images' => $images]);
+```
+
+Each image is PNG or JPEG bytes, a data URL, or `{data, widthPx?, heightPx?,
+alt?}`, checked as it is registered against `imageLimits` (`maxBytes` 5 MiB,
+`maxWidthPx` and `maxHeightPx` 4096, `maxImages` 32 by default, each a host
+setting); a refused one throws `ImageRefused` with a stable `reason`. A block's
+own `widthPx` / `heightPx` / `alt` win over the registered ones. An `image:`
+name nobody registered is a validation error with `code: "image_unknown"`, from
+`validate()`, `validateAndRepair()` and `toBytes()` alike. A named image writes
+exactly what the same image as a data URL writes, and the Node package does the
+same thing byte for byte. Without `images`, the guide and the schema are exactly
+what they were.
+
 ### First page and even pages (0.16.0)
 
 `page.firstHeader` / `page.firstFooter` replace `header` / `footer` on the first
