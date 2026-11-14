@@ -57,7 +57,7 @@ final class Agent
      * A number living in two files with nothing comparing them drifts; that is
      * the same failure the envelope's `kit.json` rule exists to stop.
      */
-    public const VERSION = '0.20.2';
+    public const VERSION = '0.21.0';
 
     /**
      * Validate a document without writing anything. Returns a structured
