@@ -64,6 +64,49 @@ and the failures seen in real agent builds. It works with any agent loop.
 `Agent::guide(['images' => $images])` adds a section listing the host's named
 images.
 
+## Letterhead on a PDF
+
+The supported way to put a `.docx` letterhead on a PDF is this package plus
+`particle-academy/fine-print` (the PDF writer), through the shared document
+model:
+
+1. **Read the letterhead:** `$read = LastWord\Agent::read($docx);`
+2. **Merge `$read['page']` into your document** (`size`, `margins`, `header`,
+   `footer`, `firstHeader`, `firstFooter`). The document's own values win, the
+   same rule as `templateParts`: `size`, `orientation` and each margin override
+   that one value, and a document `header` / `footer` replaces the
+   letterhead's of that kind, its first-page variant included.
+
+   ```php
+   $page = $read['page'] ?? [];
+   $own = $doc['page'] ?? [];
+   foreach (['header', 'footer'] as $kind) {
+       if (isset($own[$kind])) {
+           unset($page[$kind], $page['first'.ucfirst($kind)]);
+       }
+   }
+   $margins = array_replace($page['margins'] ?? [], $own['margins'] ?? []);
+   $doc['page'] = array_replace($page, $own);
+   if ($margins !== []) {
+       $doc['page']['margins'] = $margins;
+   }
+   ```
+3. **Write it:** `$r = FinePrint\Agent::validateAndRepair($doc);` then, when
+   `$r['ok']`, `FinePrint\Agent::toBytes($r['schema'])`.
+
+The band images pass through byte for byte: a JPEG is embedded as it is, and a
+PNG's image data goes into the PDF unchanged. fine-print's
+`LetterheadRouteTest` guards this route against the released last-word.
+
+- **The portable exchange does NOT carry the letterhead.**
+  `LastWord\Agent::toPortable` / `FinePrint\Agent::fromPortable` move content
+  only: no page size, no margins and no header or footer bands. Use the route
+  above.
+- **Check `$read['unrepresented']`.** A Word-authored letterhead may hold VML
+  shapes, EMF, SVG or linked pictures, or text boxes; the reader drops those
+  from a band and lists them there. A floating (anchored) logo is read as an
+  inline image, so its position is not kept.
+
 ## Traps
 
 - **Validate before writing.** `toBytes()` throws `SchemaException` on an

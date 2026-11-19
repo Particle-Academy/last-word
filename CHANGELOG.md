@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Docs:** `AGENTS.md` gains "Letterhead on a PDF", the supported way to put a `.docx` letterhead on a fine-print PDF: `Agent::read($docx)`, merge its `page` (size, margins, `header`, `footer`, `firstHeader`, `firstFooter`) into the document with the document's own values winning, as `templateParts` does, then `FinePrint\Agent::validateAndRepair` and `toBytes`. Band images pass through byte for byte. The portable exchange (`toPortable` / `fromPortable`) does not carry page setup or bands, and `read.unrepresented` lists VML, EMF, SVG, text boxes and linked pictures a Word-authored letterhead lost; a floating logo loses its position. The route is guarded by fine-print's `LetterheadRouteTest`. No code changed; nothing to do.
+
 ### Changed
 
 - Rebranded the display name to Fancy Dev Kit (README and package description). Package names, the npm scope, URLs and the `fancy-ui` MCP id are unchanged.
