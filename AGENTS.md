@@ -37,7 +37,7 @@ Static façade `LastWord\Agent`, mirrored exactly in the Node package:
 | `Agent::toBytes($doc)` | DOCX bytes; throws `SchemaException` when invalid |
 | `Agent::write($doc, $path)` | write to disk → `{path, bytes, blocks}` |
 | `Agent::toBytes($doc, ['template' => $dotx])` | render onto a house template's styles + theme |
-| `Agent::read($bytesOrPath)` / `Agent::fromBytes($bytes)` | parse a .docx, .doc, .odt or .rtf back into the model |
+| `Agent::read($bytesOrPath, $options)` / `Agent::fromBytes($bytes, $options)` | parse a .docx, .doc, .odt or .rtf back into the model; see *Tracked changes* below |
 | `Agent::toMarkdown($doc)` / `Agent::fromMarkdown($md)` | the Editor bridge |
 | `Agent::describe($doc)` | plain-text summary (title, block counts, word count) |
 | `Agent::jsonSchema()` | JSON Schema for LLM tool registration |
@@ -54,6 +54,42 @@ Static façade `LastWord\Agent`, mirrored exactly in the Node package:
 become runs, `"text"` shorthand becomes runs, heading levels clamp to 1-6,
 unknown block types drop with the error retained, missing `blocks`
 defaults to `[]` — hand the errors back to the model if `ok` is false.
+
+## Tracked changes (reading)
+
+**Read-then-write flattens revisions unless you check this signal.** The reader
+ACCEPTS every tracked change in a .docx as it reads: an insertion's text is kept,
+a deletion's text is dropped, a move lands at its destination, and a formatting
+change keeps the new formatting. The model has no revisions, so writing the
+result back erases a person's pending tracked changes for good.
+
+The read result says when that happened, beside `meta` and `unrepresented`:
+
+```php
+$read = LastWord\Agent::read($docx);
+// ['present' => true, 'insertions' => 3, 'deletions' => 1, 'moves' => 1, 'formatChanges' => 2]
+if ($read['trackedChanges']['present'] ?? false) {
+    // stop, or ask the person to accept or reject them in Word first
+}
+```
+
+- `trackedChanges` is **absent** when the file holds no revisions, so a clean
+  document reads exactly as before. Counts cover every `word/*.xml` part
+  (body, headers, footers, footnotes, comments). `insertions` counts `w:ins` and
+  `w:cellIns` (a paragraph mark or table row counts too), `deletions` `w:del` and
+  `w:cellDel`, `moves` moved passages, `formatChanges` `w:rPrChange`,
+  `w:pPrChange`, the section, table, row, cell and numbering changes, and
+  `w:cellMerge`. Counts only, never document text.
+- **To fail instead of flattening**, pass `['refuseTrackedChanges' => true]` to
+  `read()` or `fromBytes()`. A .docx with any revision then throws
+  `LastWord\Exceptions\TrackedChangesRefused`: `reason` is
+  `tracked_changes_present`, and `insertions`, `deletions`, `moves` and
+  `formatChanges` hold the counts (the message names them too). A clean file
+  reads normally. A non-boolean value throws `InvalidArgumentException`.
+- **The default is unchanged:** without the option, revisions are still accepted.
+- **.docx and .dotx only.** The .doc, .odt and .rtf readers do not detect
+  revisions, so neither the field nor the option says anything about them.
+- **The Node package (`last-word-js`) does not have this yet.**
 
 ## Agent guide
 

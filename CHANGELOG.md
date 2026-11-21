@@ -12,6 +12,11 @@
 - **Docs:** `AGENTS.md` added: the guide to using this package (install, its entries on the Fancy MCP catalog server, API essentials, traps). `CONTRIBUTING.md` added for the contributor notes, with `CLAUDE.md` as a symlink to it. The README points to the MCP server and to `AGENTS.md`. No code changed; nothing to do.
 - CI: re-pin org third-party allowlist to 2614224
 
+### Fixed
+
+- **Reading a .docx no longer accepts tracked changes in silence.** The reader flattens revision markup (`w:ins`, `w:del`, `w:moveFrom` / `w:moveTo`, `w:rPrChange`, `w:pPrChange` and the other property changes): insertions are kept, deletions dropped, the new formatting kept. It still does, but the result now says so with `trackedChanges: {present: true, insertions, deletions, moves, formatChanges}`, counted across every `word/*.xml` part, beside `meta` and `unrepresented`. It is absent when the file has no revisions, so a clean document reads exactly as before. New read option `Agent::read($input, ['refuseTrackedChanges' => true])` (also on `fromBytes()`) throws the new `LastWord\Exceptions\TrackedChangesRefused` instead, with `reason` `tracked_changes_present` and the four counts. Default behaviour is unchanged; additive, nothing breaks. **Consumer action:** if you read a .docx, edit it and write it back, check `$read['trackedChanges']['present'] ?? false` before writing, or read with `refuseTrackedChanges`; otherwise the write erases the person's pending tracked changes. Covers .docx and .dotx only; the .doc, .odt and .rtf readers do not detect revisions.
+- **Follow-up:** the Node port, `last-word-js` (`@particle-academy/last-word`), does not have `trackedChanges` or `refuseTrackedChanges` yet and still flattens revisions without a signal.
+
 ## [0.21.0] - 2026-11-14
 
 ### Added

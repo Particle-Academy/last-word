@@ -10,6 +10,7 @@ use DOMNode;
 use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\PartXml;
 use LastWord\Archive\SourceArchive;
+use LastWord\Exceptions\TrackedChangesRefused;
 use LastWord\Schema\Schema;
 use LastWord\Writer\DocxWriter;
 use LastWord\Writer\TemplateSection;
@@ -170,8 +171,18 @@ final class DocxReader
      */
     private array $unrepresented = [];
 
+    /**
+     * Revision markup found anywhere in the package's word parts, by kind:
+     * `{insertions, deletions, moves, formatChanges}`. The reader accepts every
+     * revision as it reads, so this is the only trace of them in the result.
+     *
+     * @var array{insertions: int, deletions: int, moves: int, formatChanges: int}
+     */
+    private array $trackedChanges = self::NO_TRACKED_CHANGES;
+
     public function __construct(
         private ?string $tempDir = null,
+        private bool $refuseTrackedChanges = false,
     ) {
     }
 
@@ -183,6 +194,9 @@ final class DocxReader
     public function read(string $bytes): array
     {
         $documentXml = $this->openArchive($bytes);
+        if ($this->refuseTrackedChanges && $this->trackedChanges !== self::NO_TRACKED_CHANGES) {
+            throw new TrackedChangesRefused(...$this->trackedChanges);
+        }
         $this->unrepresented = [];
         $this->bandMediaBytes = 0;
         $this->inBand = false;
@@ -242,6 +256,11 @@ final class DocxReader
         // Never document text: locations and counts only, like the exchange report.
         if ($this->unrepresented !== []) {
             $doc['unrepresented'] = $this->unrepresented;
+        }
+        // Counts only, and only when there are any: a document with no revisions
+        // reads exactly as it did before the signal existed.
+        if ($this->trackedChanges !== self::NO_TRACKED_CHANGES) {
+            $doc['trackedChanges'] = ['present' => true] + $this->trackedChanges;
         }
         // A .dotx reads exactly like its .docx twin, and says so.
         if ($this->sourceKind === OfficeTemplate::TEMPLATE) {
@@ -1092,7 +1111,11 @@ final class DocxReader
         $this->bandParts = [];
         $this->bandRels = [];
         $this->chartParts = [];
+        $this->trackedChanges = self::NO_TRACKED_CHANGES;
         foreach ($zip->names() as $name) {
+            if (preg_match('#^word/[^/]+[.]xml$#', $name) === 1) {
+                $this->countTrackedChanges((string) $zip->read($name));
+            }
             if (preg_match('#^word/_rels/((?:header|footer)\d*\.xml)\.rels$#', $name, $m) === 1) {
                 $xml = (string) $zip->read($name);
                 // A DOCTYPE leaves the part with no relationships, so nothing resolves.
@@ -1110,6 +1133,63 @@ final class DocxReader
         }
 
         return $documentXml;
+    }
+
+    private const NO_TRACKED_CHANGES = ['insertions' => 0, 'deletions' => 0, 'moves' => 0, 'formatChanges' => 0];
+
+    /** WordprocessingML elements that are revisions, by the kind they count as. Moves are counted by passage instead. */
+    private const REVISION_KINDS = [
+        'ins' => 'insertions',
+        'cellIns' => 'insertions',
+        'del' => 'deletions',
+        'cellDel' => 'deletions',
+        'rPrChange' => 'formatChanges',
+        'pPrChange' => 'formatChanges',
+        'sectPrChange' => 'formatChanges',
+        'tblPrChange' => 'formatChanges',
+        'tblPrExChange' => 'formatChanges',
+        'tblGridChange' => 'formatChanges',
+        'trPrChange' => 'formatChanges',
+        'tcPrChange' => 'formatChanges',
+        'numberingChange' => 'formatChanges',
+        'cellMerge' => 'formatChanges',
+    ];
+
+    /**
+     * Add one part's revision markup to {@see $trackedChanges}. A move is one
+     * passage however many runs it spans: counted by the names that tie its
+     * source and destination ranges together, or, in a file without range
+     * markers, by the larger of its source and destination element counts.
+     */
+    private function countTrackedChanges(string $xml): void
+    {
+        // Most parts hold none: skip the parse when no revision element can be there.
+        if (preg_match('#<(?:[A-Za-z0-9_]+:)?(?:ins|del|cell(?:Ins|Del|Merge)|move(?:From|To)|[A-Za-z]+Change)[ \t\r\n/>]#', $xml) !== 1) {
+            return;
+        }
+        $dom = PartXml::dom($xml);
+        if ($dom === null) {
+            return;
+        }
+        $names = [];
+        $from = 0;
+        $to = 0;
+        foreach ($dom->getElementsByTagName('*') as $el) {
+            if (!str_contains((string) $el->namespaceURI, 'wordprocessingml')) {
+                continue;
+            }
+            $local = $el->localName;
+            if (isset(self::REVISION_KINDS[$local])) {
+                $this->trackedChanges[self::REVISION_KINDS[$local]]++;
+            } elseif ($local === 'moveFromRangeStart' || $local === 'moveToRangeStart') {
+                $names[(string) $this->wAttr($el, 'name')] = true;
+            } elseif ($local === 'moveFrom') {
+                $from++;
+            } elseif ($local === 'moveTo') {
+                $to++;
+            }
+        }
+        $this->trackedChanges['moves'] += $names !== [] ? count($names) : max($from, $to);
     }
 
     /** `w:evenAndOddHeaders` in word/settings.xml: even pages have their own header and footer. */

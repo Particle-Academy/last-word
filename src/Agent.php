@@ -17,6 +17,7 @@ use LastWord\Exchange\Portable;
 use LastWord\Exchange\ToPortable;
 use LastWord\Layout\PageLayout;
 use LastWord\Exceptions\TemplateException;
+use LastWord\Exceptions\TrackedChangesRefused;
 use LastWord\Markdown\FromMarkdown;
 use LastWord\Markdown\ToMarkdown;
 use LastWord\Ops\DocDiff;
@@ -331,18 +332,35 @@ final class Agent
      * unknown constructs degrade to plain paragraphs. What each non-docx reader
      * recovers is listed on DocReader, OdtReader and RtfReader.
      *
+     * Tracked changes in a .docx are ACCEPTED as it reads: an insertion's text is
+     * kept, a deletion's dropped, a formatting change keeps the new formatting.
+     * The result then carries `trackedChanges`, `{present: true, insertions,
+     * deletions, moves, formatChanges}`, absent when the file holds none. Writing
+     * such a result back erases the pending revisions. `refuseTrackedChanges:
+     * true` makes the read throw {@see TrackedChangesRefused} instead. The other
+     * formats' readers do not detect revisions.
+     *
+     * @param  array{refuseTrackedChanges?: bool}  $options
+     *
      * @throws UnsupportedFormatException for bytes that are not one of those
      *   formats, naming what they are when that is knowable (`xls`, `pptx`, …)
+     * @throws TrackedChangesRefused for a .docx holding revisions, with
+     *   `refuseTrackedChanges`
+     * @throws InvalidArgumentException when `refuseTrackedChanges` is not a bool
      * @throws \RuntimeException for a file in a supported format that is damaged
      *
      * @return array<string, mixed>
      */
-    public static function read(string $bytesOrPath): array
+    public static function read(string $bytesOrPath, array $options = []): array
     {
+        $refuse = $options['refuseTrackedChanges'] ?? false;
+        if (! is_bool($refuse)) {
+            throw new InvalidArgumentException('The read option refuseTrackedChanges must be a boolean.');
+        }
         $bytes = self::bytesFrom($bytesOrPath);
 
         return match ($format = Format::detect($bytes)) {
-            Format::DOCX => (new DocxReader())->read($bytes),
+            Format::DOCX => (new DocxReader(refuseTrackedChanges: $refuse))->read($bytes),
             Format::ODT => (new OdtReader())->read($bytes),
             Format::RTF => (new RtfReader())->read($bytes),
             // A compound file: DocReader reads a Word document and names anything
@@ -387,13 +405,14 @@ final class Agent
     }
 
     /**
-     * Alias of {@see read()} for symmetry with {@see toBytes()}.
+     * Alias of {@see read()} for symmetry with {@see toBytes()}; same options.
      *
+     * @param  array{refuseTrackedChanges?: bool}  $options
      * @return array<string, mixed>
      */
-    public static function fromBytes(string $bytes): array
+    public static function fromBytes(string $bytes, array $options = []): array
     {
-        return self::read($bytes);
+        return self::read($bytes, $options);
     }
 
     /**
