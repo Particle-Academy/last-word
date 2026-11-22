@@ -726,3 +726,16 @@ describe('the bridges report what they cannot carry', function () {
             ]);
     });
 });
+
+describe('the exports report what they cannot carry', function () {
+    it('reports a bookmark and a field in the html and text exports', function (string $target) {
+        $doc = blfDoc([['type' => 'paragraph', 'runs' => [
+            ['text' => 'Results', 'bookmark' => 'results'],
+            ['text' => '3', 'field' => '{page}'],
+        ]]]);
+        $r = Agent::export($doc, $target, [], new LastWord\Exchange\ExportPolicy(['allow' => [$target]]));
+
+        expect(array_column($r['report']['dropped'], 'kind'))->toContain('link')
+            ->and(array_column($r['report']['approximated'], 'kind'))->toContain('formula-as-value');
+    })->with(['html', 'text']);
+});
