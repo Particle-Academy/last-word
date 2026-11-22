@@ -13,6 +13,7 @@ use LastWord\Archive\SourceArchive;
 use LastWord\Exceptions\TrackedChangesRefused;
 use LastWord\Schema\Revisions;
 use LastWord\Schema\Schema;
+use LastWord\Schema\Shapes;
 use LastWord\Writer\DocxWriter;
 use LastWord\Writer\TemplateSection;
 use RuntimeException;
@@ -250,6 +251,24 @@ final class DocxReader
     /** Revision markup in the body and footnotes not kept as it was: accepted, or changed to fit. */
     private int $revUnkept = 0;
 
+    /** Inside a text box's content: no bookmark, comment, footnote or tracked change is read into the model there. */
+    private bool $inTextBox = false;
+
+    /** Shapes read into the model so far: past {@see Shapes::MAX_SHAPES} a shape is read as its text. */
+    private int $shapeCount = 0;
+
+    /** How deep the `mc:AlternateContent` being read is nested. */
+    private int $mcDepth = 0;
+
+    /** Blocks read inside a text box that the box cannot hold (a footnote's): placed after the box. */
+    private array $boxSpill = [];
+
+    /**
+     * The deepest `mc:AlternateContent` read as markup; any deeper is read as its
+     * text, paragraph by paragraph, and reported.
+     */
+    private const MAX_MC_DEPTH = 8;
+
     /** Open move ranges, by direction and range id => name. @var array{from: array<string, string>, to: array<string, string>} */
     private array $openMoves = ['from' => [], 'to' => []];
 
@@ -291,6 +310,10 @@ final class DocxReader
         $this->revSeq = 0;
         $this->revUnkept = 0;
         $this->openMoves = ['from' => [], 'to' => []];
+        $this->inTextBox = false;
+        $this->shapeCount = 0;
+        $this->mcDepth = 0;
+        $this->boxSpill = [];
 
         $dom = PartXml::dom($documentXml);
         if ($dom === null) {
@@ -1491,7 +1514,7 @@ final class DocxReader
     /** Whether revisions are read into the model here: asked for, and not in a header or footer. */
     private function preserving(): bool
     {
-        return $this->preserveTrackedChanges && !$this->inBand;
+        return $this->preserveTrackedChanges && !$this->inBand && !$this->inTextBox;
     }
 
     /**
@@ -2250,6 +2273,18 @@ final class DocxReader
                     array_push($out, ...$this->blockChildren($node));
 
                     break;
+                case 'AlternateContent':
+                    $branch = !$this->inBand && $this->mcDepth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
+                    if ($branch !== null) {
+                        $this->mcDepth++;
+                        try {
+                            array_push($out, ...$this->blockChildren($branch));
+                        } finally {
+                            $this->mcDepth--;
+                        }
+                    }
+
+                    break;
                 case 'moveFromRangeStart':
                 case 'moveFromRangeEnd':
                 case 'moveToRangeStart':
@@ -2415,6 +2450,192 @@ final class DocxReader
             }
         }
         $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'layout-not-preserved', 'count' => 1];
+    }
+
+    /** One more of a shape report kind at `/blocks`: counts only, never text. */
+    private function noteShape(string $kind): void
+    {
+        foreach ($this->unrepresented as $k => $note) {
+            if ($note['where'] === '/blocks' && $note['kind'] === $kind) {
+                $this->unrepresented[$k]['count']++;
+
+                return;
+            }
+        }
+        $this->unrepresented[] = ['where' => '/blocks', 'kind' => $kind, 'count' => 1];
+    }
+
+    /**
+     * A run's children as the reader takes them: each `mc:AlternateContent`
+     * replaced by the children of the one branch it reads
+     * ({@see ShapeReader::branch()}), nested ones too. Past
+     * {@see MAX_MC_DEPTH} the markup is read as its text, into `images`.
+     *
+     * @param  array<string, mixed>  $state
+     * @return list<DOMElement>
+     */
+    private function runChildren(DOMElement $r, array &$state, int $depth = 0): array
+    {
+        $out = [];
+        foreach ($r->childNodes as $node) {
+            if (!($node instanceof DOMElement)) {
+                continue;
+            }
+            if ($node->localName !== 'AlternateContent' || $this->inBand) {
+                $out[] = $node;
+
+                continue;
+            }
+            if ($this->mcDepth + $depth >= self::MAX_MC_DEPTH) {
+                array_push($state['images'], ...$this->textOfMarkup($node));
+
+                continue;
+            }
+            $branch = ShapeReader::branch($node);
+            if ($branch !== null) {
+                array_push($out, ...$this->runChildren($branch, $state, $depth + 1));
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Markup the reader will not interpret, as the text in it: one paragraph per
+     * `w:p` that holds text, in document order, from one branch only (the
+     * fallback when there is one). Reported as a `shape` the model did not keep.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function textOfMarkup(DOMElement $alternate): array
+    {
+        $this->noteShape('shape');
+        $texts = [];
+        $this->collectText($alternate, null, $texts);
+        $out = [];
+        foreach ($texts as $text) {
+            if ($text !== '') {
+                $out[] = ['type' => 'paragraph', 'runs' => [['text' => $text]]];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * The `w:t` text under a node, by the `w:p` it is in, taking ONE branch of
+     * every `mc:AlternateContent` (its fallback, else its first choice), so no
+     * text is read twice. Linear in the nodes visited; the part's nesting is
+     * already capped when it is parsed.
+     *
+     * @param  array<int, string>  $texts  paragraph id => text
+     */
+    private function collectText(DOMElement $node, ?int $paragraph, array &$texts): void
+    {
+        if ($node->localName === 'AlternateContent') {
+            $branch = null;
+            foreach ($node->childNodes as $child) {
+                if ($child instanceof DOMElement && ($child->localName === 'Fallback' || $branch === null)) {
+                    $branch = $child;
+                }
+            }
+            if ($branch !== null) {
+                $this->collectText($branch, $paragraph, $texts);
+            }
+
+            return;
+        }
+        if ($node->localName === 'p' && $node->namespaceURI === ShapeReader::NS_W) {
+            $paragraph = spl_object_id($node);
+        }
+        if ($node->localName === 't' && $node->namespaceURI === ShapeReader::NS_W) {
+            $texts[$paragraph ?? 0] = ($texts[$paragraph ?? 0] ?? '') . $node->textContent;
+
+            return;
+        }
+        foreach ($node->childNodes as $child) {
+            if ($child instanceof DOMElement) {
+                $this->collectText($child, $paragraph, $texts);
+            }
+        }
+    }
+
+    /**
+     * A shape the reader met, as the blocks it becomes where it is: the shape
+     * (its text box read as blocks), then whatever its box could not hold. Where
+     * the model holds no shape -- inside another text box, in a footnote, past
+     * {@see Shapes::MAX_SHAPES} -- it is its text alone, and reported.
+     *
+     * @param  array<string, mixed>  $shape
+     * @param  list<string>  $notes
+     * @return list<array<string, mixed>>
+     */
+    private function readShape(array $shape, ?DOMElement $content, array $notes): array
+    {
+        $holds = !$this->inTextBox && !$this->inFootnote && $this->shapeCount < Shapes::MAX_SHAPES;
+        $blocks = $content !== null ? $this->readTextBox($content, $shape) : [];
+        if (!$holds) {
+            $this->noteShape('shape');
+
+            return $blocks; // the outer box's own read flattens anything it spilled
+        }
+        $this->shapeCount++;
+        foreach (array_unique($notes) as $kind) {
+            $this->noteShape($kind);
+        }
+        [$spill, $this->boxSpill] = [$this->boxSpill, []];
+        if ($content !== null) {
+            if (in_array($shape['geometry'] ?? 'rect', Shapes::LINES, true)) {
+                unset($shape['geometry']); // a line holds no text: a box that does
+                $this->noteShape('format-approximated');
+            }
+            [$kept, $over] = Shapes::fit($blocks);
+            if ($over !== []) {
+                $this->noteShape('layout-not-preserved'); // what the box could not hold follows it
+            }
+            $shape['blocks'] = $kept;
+            $spill = [...$over, ...$spill];
+        }
+
+        return [$shape, ...$spill];
+    }
+
+    /**
+     * A text box's `w:txbxContent` as blocks: read as a story of its own, its
+     * tables against the box's inner width, with no bookmark, comment, footnote
+     * or tracked change kept in it (a tracked change is accepted). A shape inside
+     * it is read as its text.
+     *
+     * @param  array<string, mixed>  $shape
+     * @return list<array<string, mixed>>
+     */
+    private function readTextBox(DOMElement $content, array $shape): array
+    {
+        $saved = [$this->inTextBox, $this->contentWidth, $this->commentRun, $this->revArrival, $this->revDeparture, $this->runFormat];
+        if ($this->preserveTrackedChanges && !$this->inTextBox) {
+            $this->revUnkept += $this->revisionsIn($content); // accepted: a text box carries none
+        }
+        $this->inTextBox = true;
+        $this->contentWidth = \LastWord\Writer\ShapeXml::innerTwips($shape);
+        [$this->revArrival, $this->revDeparture, $this->runFormat] = [null, null, null];
+        try {
+            $blocks = $this->parseBlockContainer($content);
+        } finally {
+            [$this->inTextBox, $this->contentWidth, $this->commentRun, $this->revArrival, $this->revDeparture, $this->runFormat] = $saved;
+        }
+
+        return Shapes::flattenList($blocks);
+    }
+
+    /** Revision elements under a node, of every kind the reader counts. */
+    private function revisionsIn(DOMElement $node): int
+    {
+        $n = 0;
+        foreach ([...array_keys(self::REVISION_KINDS), 'moveFrom', 'moveTo'] as $name) {
+            $n += $node->getElementsByTagNameNS(ShapeReader::NS_W, $name)->length;
+        }
+
+        return $n;
     }
 
     private static function isTocInstruction(string $instr): bool
@@ -2645,7 +2866,7 @@ final class DocxReader
         }
         $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
         $revision = $this->paragraphRevision($pPr, $style); // before its runs: the order ids are read in
-        if ($revision === null && !$this->preserveTrackedChanges && !$this->inBand && $this->markDeleted($pPr)) {
+        if ($revision === null && !$this->preserveTrackedChanges && !$this->inBand && !$this->inTextBox && $this->markDeleted($pPr)) {
             // The default read accepts a deleted paragraph mark too: carried this far,
             // then joined to the next paragraph once the document is read.
             $revision = ['delete' => ['id' => 'accepted', 'author' => Revisions::UNKNOWN_AUTHOR]];
@@ -2926,7 +3147,7 @@ final class DocxReader
                 case 'bookmarkEnd':
                     // Body bookmarks only, as markers {@see resolveBookmarks()} turns
                     // back into runs.
-                    if ($this->inBand || $this->inFootnote) {
+                    if ($this->inBand || $this->inFootnote || $this->inTextBox) {
                         break;
                     }
                     $id = (string) $this->wAttr($node, 'id');
@@ -2946,6 +3167,21 @@ final class DocxReader
                 case 'proofErr':
                 case 'commentRangeStart':
                 case 'commentRangeEnd':
+                    break;
+                case 'AlternateContent':
+                    // One branch, never both: the fallback is the same content again.
+                    $branch = !$this->inBand && $this->mcDepth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
+                    if ($branch !== null) {
+                        $this->mcDepth++;
+                        try {
+                            array_push($runs, ...$this->parseInlineContainer($branch, $link, $state));
+                        } finally {
+                            $this->mcDepth--;
+                        }
+                    } elseif (!$this->inBand) {
+                        array_push($state['images'], ...$this->textOfMarkup($node));
+                    }
+
                     break;
                 default:
                     // ins, fldSimple, smartTag, sdt(run-level), … — descend.
@@ -2979,10 +3215,7 @@ final class DocxReader
 
         $out = [];
         $text = '';
-        foreach ($r->childNodes as $node) {
-            if (!($node instanceof DOMElement)) {
-                continue;
-            }
+        foreach ($this->runChildren($r, $state) as $node) {
             if ($this->inBand && in_array($node->localName, ['fldChar', 'instrText'], true)) {
                 $text .= $this->bandField($node, $state);
 
@@ -3042,6 +3275,22 @@ final class DocxReader
 
                     break;
                 case 'footnoteReference':
+                    if ($this->inTextBox) {
+                        // A text box holds no footnote: its text goes after the box.
+                        $this->inTextBox = false;
+                        try {
+                            $note = $this->footnoteRun((string) $this->wAttr($node, 'id'));
+                        } finally {
+                            $this->inTextBox = true;
+                        }
+                        $this->commentRun = $r;
+                        if ($note !== null) {
+                            array_push($this->boxSpill, ...$note['footnote']['blocks']);
+                            $this->noteShape('nested-block');
+                        }
+
+                        break;
+                    }
                     $note = $this->footnoteRun((string) $this->wAttr($node, 'id'));
                     $this->commentRun = $r; // reading the footnote moved it
                     if ($note !== null) {
@@ -3049,7 +3298,7 @@ final class DocxReader
                             $out[] = $this->runFrom($text, $props, $link, $state);
                             $text = '';
                         }
-                        $ids = $this->inBand || $this->inFootnote ? null : $this->comments?->idsFor($r);
+                        $ids = $this->inBand || $this->inFootnote || $this->inTextBox ? null : $this->comments?->idsFor($r);
                         $marked = $ids !== null ? $note + ['comments' => $ids] : $note;
                         $rev = $this->currentRevision(false);
                         $out[] = $rev !== [] ? $marked + ['revision' => $rev] : $marked;
@@ -3058,7 +3307,7 @@ final class DocxReader
                     break;
                 case 'commentReference':
                     // A point comment: one whose range kept no text, or had none.
-                    $ids = $this->comments?->pointAt($node);
+                    $ids = $this->inTextBox ? null : $this->comments?->pointAt($node);
                     if ($ids !== null) {
                         if ($text !== '') {
                             $out[] = $this->runFrom($text, $props, $link, $state);
@@ -3074,7 +3323,9 @@ final class DocxReader
 
                         break;
                     }
-                    if ($this->wAttr($node, 'type') === 'page') {
+                    if ($this->wAttr($node, 'type') === 'page' && $this->inTextBox) {
+                        $this->noteShape('layout-not-preserved'); // a text box has no pages to break
+                    } elseif ($this->wAttr($node, 'type') === 'page') {
                         $state['pageBreak'] = true;
                     } elseif ($this->wAttr($node, 'type') === 'column') {
                         // A run of its own, so the words either side never fuse: a
@@ -3098,9 +3349,29 @@ final class DocxReader
                     $text .= "\t";
 
                     break;
+                case 'pict':
+                    $vml = $this->inBand ? null : ShapeReader::vml($node);
+                    if ($vml !== null && $deleted) {
+                        $this->revUnkept++;
+                    } elseif ($vml !== null) {
+                        array_push($state['images'], ...$this->readShape(...ShapeReader::fromVml($vml)));
+                    }
+
+                    break;
                 case 'drawing':
                     if ($deleted) {
                         $this->revUnkept++; // a deleted picture: not made live
+
+                        break;
+                    }
+                    $wsp = $this->inBand ? null : ShapeReader::wsp($node);
+                    if ($wsp !== null) {
+                        array_push($state['images'], ...$this->readShape(...ShapeReader::fromWsp($wsp)));
+
+                        break;
+                    }
+                    if ($this->inTextBox && $this->parseChartDrawing($node) !== null) {
+                        $this->noteShape('chart'); // a text box holds no chart
 
                         break;
                     }
@@ -3153,7 +3424,7 @@ final class DocxReader
                 $run[$key] = $props[$key];
             }
         }
-        $ids = $this->inBand || $this->inFootnote ? null : $this->comments?->idsFor($this->commentRun);
+        $ids = $this->inBand || $this->inFootnote || $this->inTextBox ? null : $this->comments?->idsFor($this->commentRun);
         if ($ids !== null) {
             $run['comments'] = $ids;
         }

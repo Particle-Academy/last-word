@@ -287,6 +287,16 @@ final class ToPortable
                 $this->report->add('chart', $p);
 
                 return;
+            case 'shape':
+                // Portable content has no shapes: a text box's blocks stand on their own.
+                $this->report->add('shape', $p);
+                foreach (is_array($b['blocks'] ?? null) ? array_values($b['blocks']) : [] as $k => $child) {
+                    if (is_array($child)) {
+                        $this->block($child, $p.'/blocks/'.$k);
+                    }
+                }
+
+                return;
             default: // pageBreak, hr: layout, not content
                 $this->report->add('layout-not-preserved', $p);
         }

@@ -67,6 +67,7 @@ final class BlockMeasurer
             'quote' => $this->quote($block, $ctx),
             'image' => $this->image($block, $ctx),
             'chart' => $this->chart($block, $ctx),
+            'shape' => $this->shape($block, $ctx),
             'hr' => ['h' => Metrics::lu($ctx['spaceAfter']) + Metrics::lu($ctx['size'] * Metrics::SINGLE_LINE), 'bottoms' => [], 'marks' => []],
             default => ['h' => 0, 'bottoms' => [], 'marks' => []],
         };
@@ -313,6 +314,24 @@ final class BlockMeasurer
         );
 
         return ['h' => $size['height'] * 64 + Metrics::lu($ctx['spaceAfter']), 'bottoms' => [], 'marks' => []];
+    }
+
+    /**
+     * A shape: inline, the height of its box, as an image; floating, the empty
+     * paragraph it is anchored to, because it is drawn out of the flow. Either
+     * way an estimate: `approximate` says so.
+     *
+     * @param  array<string, mixed>  $block
+     * @param  array{size: float, spaceAfter: float, width: int, contentPt: float, bold: bool, italic: bool}  $ctx
+     * @return array{h: int, bottoms: list<int>, marks: array<int, int>}
+     */
+    private function shape(array $block, array $ctx): array
+    {
+        if (is_array($block['anchor'] ?? null)) {
+            return ['h' => Metrics::lu($ctx['size'] * Metrics::SINGLE_LINE) + Metrics::lu($ctx['spaceAfter']), 'bottoms' => [], 'marks' => []];
+        }
+
+        return ['h' => Metrics::luPx(max(0.0, self::num($block['heightPx'] ?? null, 0.0))) + Metrics::lu($ctx['spaceAfter']), 'bottoms' => [], 'marks' => []];
     }
 
     /**

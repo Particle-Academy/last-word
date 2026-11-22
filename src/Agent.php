@@ -590,6 +590,11 @@ final class Agent
             $lines[] = "Page {$kind}: " . count($band['blocks']) . ' blocks' . ($parts !== [] ? ' (' . implode(', ', $parts) . ')' : '');
         }
 
+        $shapes = \LastWord\Schema\Shapes::describe($blocks);
+        if ($shapes !== null) {
+            $lines[] = $shapes;
+        }
+
         $comments = \LastWord\Schema\Comments::describe($doc);
         if ($comments !== null) {
             $lines[] = $comments;

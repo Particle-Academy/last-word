@@ -30,6 +30,7 @@ final class Schema
         'hr',
         'toc',
         'columnBreak',
+        'shape',
     ];
 
     /**
@@ -40,7 +41,7 @@ final class Schema
      *
      * @var list<string>
      */
-    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc', 'columnBreak'];
+    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc', 'columnBreak', 'shape'];
 
     /**
      * Block types a footnote's `blocks` refuse, at any depth: a page break means
@@ -50,7 +51,7 @@ final class Schema
      *
      * @var list<string>
      */
-    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc', 'columnBreak'];
+    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc', 'columnBreak', 'shape'];
 
     /**
      * A bookmark name (a run's `bookmark`, and what follows `#` in an internal
@@ -783,6 +784,7 @@ final class Schema
                     'levels' => ['type' => 'integer', 'minimum' => 1, 'maximum' => self::MAX_HEADING_LEVEL, 'description' => 'The deepest heading level listed: 3 lists headings 1 to 3. 3 by default.'],
                 ],
             ],
+            'shape' => Shapes::jsonSchema(['$ref' => '#/$defs/block']),
         ];
 
         return [
@@ -858,7 +860,7 @@ final class Schema
                             'items' => [
                                 'allOf' => [
                                     ['$ref' => '#/$defs/block'],
-                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc', 'columnBreak']]], 'required' => ['type']]],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc', 'columnBreak', 'shape']]], 'required' => ['type']]],
                                 ],
                             ],
                         ],
@@ -876,13 +878,14 @@ final class Schema
                             'items' => [
                                 'allOf' => [
                                     ['$ref' => '#/$defs/block'],
-                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc', 'columnBreak']]], 'required' => ['type']]],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc', 'columnBreak', 'shape']]], 'required' => ['type']]],
                                 ],
                             ],
                         ],
                     ],
                 ],
                 'block' =>['oneOf' => array_values($blocks)],
+                'anchor' => Anchor::jsonSchema(),
                 'portable' => self::portableSchema(),
                 'portableRun' => [
                     'type' => 'object',

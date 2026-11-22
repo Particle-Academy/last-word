@@ -545,6 +545,7 @@ describe('validation', function () {
         'a shape in a quote in a text box' => [[['type' => 'quote', 'blocks' => [['type' => 'shape', 'widthPx' => 10, 'heightPx' => 10]]]], ['shape_nested']],
         'a page break' => [[['type' => 'pageBreak']], ['shape_content_refused']],
         'a table of contents' => [[['type' => 'toc']], ['shape_content_refused']],
+        'a column break' => [[['type' => 'columnBreak']], ['shape_content_refused']],
         'a chart' => [[['type' => 'chart', 'option' => ['series' => [['type' => 'pie', 'data' => [1, 2]]]]]], ['shape_content_refused']],
         'a footnote' => [[['type' => 'paragraph', 'runs' => [['text' => 'x'], ['text' => '', 'footnote' => ['blocks' => [['type' => 'paragraph', 'runs' => [['text' => 'note']]]]]]]]], ['shape_content_refused']],
         'a bookmark' => [[['type' => 'paragraph', 'runs' => [['text' => 'x', 'bookmark' => 'boxed']]]], ['shape_content_refused']],

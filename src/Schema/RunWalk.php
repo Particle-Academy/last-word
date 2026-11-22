@@ -8,10 +8,10 @@ use LastWord\Exchange\Portable;
 
 /**
  * Every run of a document, wherever it sits, with the path the validator
- * names it by and where it is: `body`, `footnote` or `band` (a header or
- * footer). What bookmarks and internal links need: a link in a footnote or a
- * header jumps to a bookmark in the body, so neither can be judged one run at
- * a time.
+ * names it by and where it is: `body`, `footnote`, `band` (a header or
+ * footer) or `textbox` (a shape's blocks). What bookmarks and internal links
+ * need: a link in a footnote or a header jumps to a bookmark in the body, so
+ * neither can be judged one run at a time.
  *
  * Order: the body's blocks in order (a footnote's runs where its mark is, a
  * break's bands where the break is), then the page's bands. Nesting deeper than
@@ -111,6 +111,13 @@ final class RunWalk
                                 $block['rows'][$r]['cells'][$c]['blocks'] = self::blocks($cell['blocks'], "{$at}.rows[{$r}].cells[{$c}].blocks", $where, $fn, $depth + 1);
                             }
                         }
+                    }
+
+                    break;
+                case 'shape':
+                    // A text box's runs: `textbox`, which nothing treats as body text.
+                    if (is_array($block['blocks'] ?? null) && array_is_list($block['blocks'])) {
+                        $block['blocks'] = self::blocks($block['blocks'], "{$at}.blocks", $where === 'body' ? 'textbox' : $where, $fn, $depth + 1);
                     }
 
                     break;

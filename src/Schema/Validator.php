@@ -125,6 +125,10 @@ final class Validator
         }
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
         $this->validateBookmarks($doc, $errors);
+        $shapes = Shapes::count($doc['blocks']);
+        if ($shapes > Shapes::MAX_SHAPES) {
+            $errors[] = ['path' => 'blocks', 'message' => 'a document holds at most ' . Shapes::MAX_SHAPES . " shapes and text boxes (found {$shapes})", 'code' => 'shape_count_exceeded'];
+        }
 
         // Tracked changes: every revision a run or a paragraph carries, across the document.
         array_push($errors, ...Revisions::validate($doc));
@@ -626,6 +630,7 @@ final class Validator
             'hr' => null,
             'toc' => $this->validateToc($block, $path, $errors),
             'columnBreak' => $this->validateColumnBreak($path, $errors),
+            'shape' => $this->validateShape($block, $path, $errors),
         };
     }
 
@@ -1155,6 +1160,9 @@ final class Validator
      */
     private function validateBookmark(array $run, string $runPath, array &$errors): void
     {
+        if ($this->context === 'textbox') {
+            return; // refused with the text box's content ({@see Shapes::validateContent()})
+        }
         $at = "{$runPath}.bookmark";
         $name = $run['bookmark'];
         if (array_key_exists('footnote', $run)) {
@@ -1181,6 +1189,9 @@ final class Validator
     private function validateFootnote(array $run, string $runPath, array &$errors): void
     {
         $at = "{$runPath}.footnote";
+        if ($this->context === 'textbox') {
+            return; // refused with the text box's content ({@see Shapes::validateContent()})
+        }
         if ($this->context === 'band') {
             $errors[] = self::error($at, 'a header or footer cannot hold a footnote');
 
@@ -1219,6 +1230,44 @@ final class Validator
             $this->context = $outer;
         }
         $this->refuseInFootnote($blocks, "{$at}.blocks", $errors);
+    }
+
+    /**
+     * A shape or text box: its own keys ({@see Shapes::validateOwn()}), then its
+     * blocks under the body's rules less what a text box refuses. A shape in a
+     * header, footer or footnote is refused by type there, and one inside a text
+     * box is `shape_nested`.
+     *
+     * @param  array<string, mixed>  $block
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateShape(array $block, string $path, array &$errors): void
+    {
+        if ($this->context === 'band' || $this->context === 'footnote') {
+            return; // refused by type where it sits
+        }
+        if ($this->context === 'textbox') {
+            $errors[] = ['path' => $path, 'message' => 'a text box cannot hold another shape or text box; put it beside this one', 'code' => 'shape_nested'];
+
+            return;
+        }
+        array_push($errors, ...Shapes::validateOwn($block, $path));
+        $blocks = $block['blocks'] ?? null;
+        if (!is_array($blocks) || !array_is_list($blocks)) {
+            return;
+        }
+        [$outer, $this->context] = [$this->context, 'textbox'];
+        try {
+            foreach ($blocks as $i => $child) {
+                if (is_array($child) && in_array($child['type'] ?? null, Shapes::TEXTBOX_REFUSED_TYPES, true)) {
+                    continue; // refused below
+                }
+                $this->validateBlock($child, "{$path}.blocks[{$i}]", $errors);
+            }
+        } finally {
+            $this->context = $outer;
+        }
+        array_push($errors, ...Shapes::validateContent($blocks, "{$path}.blocks"));
     }
 
     /**

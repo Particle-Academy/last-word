@@ -369,6 +369,128 @@ a break's `page`; a `columnBreak` block moves on to the next column early:
   `continuous section break`). The markdown bridge and `toPortable()` drop them
   and report `layout-not-preserved`. **.docx only, PHP only.**
 
+## Text boxes and shapes
+
+A `shape` block is a drawn shape: a box, an ellipse, an arrow, a callout, a
+line. Give it `blocks` and it is a **text box**: a sidebar, a pull quote, a
+boxed note. Inline by default (it sits in the flow like an image); give it an
+`anchor` to float it beside the text.
+
+```json
+{"blocks": [
+  {"type": "paragraph", "runs": [{"text": "Body text the sidebar sits beside."}]},
+  {"type": "shape", "geometry": "roundRect", "widthPx": 192, "heightPx": 288,
+   "fill": "#F3F6FA", "outline": {"color": "#1F6FEB", "width": 1.5},
+   "anchor": {"horizontal": {"relativeTo": "margin", "align": "right"},
+              "vertical": {"relativeTo": "paragraph", "offset": 0}, "wrap": "square"},
+   "blocks": [{"type": "heading", "level": 3, "runs": [{"text": "Key figures"}]},
+              {"type": "list", "items": [{"runs": [{"text": "Revenue up 18%"}]}]}]},
+  {"type": "shape", "geometry": "line", "widthPx": 624, "heightPx": 0,
+   "outline": {"width": 2, "tailEnd": "triangle"}}
+]}
+```
+
+| field | unit / values | default |
+|---|---|---|
+| `geometry` | a preset: `rect`, `roundRect`, `ellipse`, `triangle`, `diamond`, `star5`, `rightArrow`, `chevron`, `wedgeRectCallout`, `flowChartDecision`, `line`, `straightConnector1` ... (the full list is in `jsonSchema()`) | `rect` |
+| `widthPx`, `heightPx` | **px at 96 dpi** (96 = one inch), 0 to 2112 (22 inches); required. Only a line may be 0 in one of them | |
+| `fill` | `#RRGGBB` | none (the page shows through) |
+| `outline.color` | `#RRGGBB` | `#000000` |
+| `outline.width` | **points**, above 0, at most 100 | 0.75 |
+| `outline.style` | `solid`, `dashed`, `dotted`, `none` (removes it) | `solid` |
+| `outline.headEnd`, `outline.tailEnd` | arrowheads: `none`, `triangle`, `stealth`, `diamond`, `oval`, `arrow` | `none` |
+| `flipH`, `flipV` | booleans; `flipV` makes a line rise left to right | false |
+| `blocks` | the text box's content: the body's blocks less `chart`, `pageBreak`, `toc`, `columnBreak` and `shape` | none (a plain shape) |
+| `verticalAlign` | `top`, `middle`, `bottom`; text boxes only | `top` |
+| `alt` | alternative text | |
+| `anchor` | see *Floating drawings* below | inline |
+
+- **Where:** the body, a quote and a table cell. A header, a footer and a
+  footnote refuse it (Word's watermarks come later). A text box never holds
+  another one (`shape_nested`). Its runs carry no `footnote`, `bookmark` or
+  `revision` (`shape_content_refused`), and, as everywhere, no review
+  `comments` outside body text (`comment_outside_body`). A `link` in a text box
+  may jump to a body bookmark.
+- **Caps:** `Shapes::MAX_SHAPES` (1,000) per document, wherever they sit;
+  `MAX_BOX_BLOCKS` (500, counted at every depth: list items and table cells
+  too) and `MAX_BOX_TEXT` (32,768 characters) per text box.
+- **Errors carry a `code`:** `shape_invalid`, `shape_geometry_unknown`,
+  `shape_size_invalid`, `shape_text_on_line`, `shape_nested`,
+  `shape_content_refused`, `shape_content_too_large`, `shape_count_exceeded`,
+  and the anchor's below.
+- **`validateAndRepair()` never drops text.** An unknown preset becomes `rect`, a
+  bad size the default (240 x 120) or the cap, a bad fill or outline key goes. A
+  shape where none may go (header, footer, footnote, another text box, past the
+  cap) becomes its blocks, in place. What a full text box cannot hold, whole
+  blocks from the first that does not fit, follows the box. A footnote typed in a
+  text box follows the box too, a tracked change in one is accepted, a bookmark
+  in one is dropped (its text stays).
+- **Reading:** DrawingML `wps:wsp` (Word 2010 and later) and VML (`w:pict`:
+  `v:rect`, `v:roundrect`, `v:oval`, `v:line`, `v:shape` with a text box) are
+  read. Of an `mc:AlternateContent`, ONE branch is read (the DrawingML choice,
+  else the VML fallback), never both. Every number is range-checked before use:
+  sizes and offsets past the caps clamp, unreadable ones take the default. What
+  the model cannot hold is reported in `unrepresented` (`where: "/blocks"`,
+  counts only) and never costs text: `format-approximated` (an unknown preset or
+  custom geometry read as `rect`, a gradient or theme fill, a rotation, anything
+  read from VML), `layout-not-preserved` (a size or position out of range, a
+  position frame the model does not name, text a full box could not hold), and
+  `shape` (a shape read as its text: one inside another text box, in a footnote,
+  past the cap, or behind more than 8 nested `mc:AlternateContent`). A footnote
+  in a text box is read after the box (`nested-block`); a tracked change in one
+  is accepted (`tracked-change`, with `preserveTrackedChanges`). A VML picture is
+  still not read. Shapes in a header or footer are read as before (dropped and
+  listed).
+- **Other views:** `describe()` says `Shapes: 3 (2 text boxes, 1 floating)` and
+  counts a text box's words. The markdown bridge and `toPortable()` keep a text
+  box's blocks as ordinary blocks and report kind `shape`. `layout()` measures an
+  inline shape at its height and a floating one as the empty paragraph it hangs
+  from, and lists `text box or shape` in `approximate`.
+- **.docx only, PHP only.** The Node and Python packages, fine-print and
+  last-word-ui do not have `shape` yet; see the contract below.
+
+## Floating drawings (`anchor`)
+
+ONE `anchor` object for every drawing that floats: shapes and text boxes now,
+anchored pictures (CC-fancy-0055) on the same model. Absent, the drawing is
+inline (`wp:inline`); present, even `{}`, it floats (`wp:anchor`).
+
+| field | unit / values | default |
+|---|---|---|
+| `horizontal.relativeTo` | `page`, `margin`, `column`, `character` | `column` |
+| `vertical.relativeTo` | `page`, `margin`, `paragraph`, `line` | `paragraph` |
+| `horizontal.offset`, `vertical.offset` | **points** from the frame's top-left corner, negative allowed, -1584 to 1584 | 0 |
+| `horizontal.align` | `left`, `center`, `right`, `inside`, `outside` (instead of `offset`, never both) | |
+| `vertical.align` | `top`, `center`, `bottom`, `inside`, `outside` | |
+| `wrap` | `square`, `tight`, `through`, `topAndBottom`, `behind`, `inFront` | `square` |
+| `allowOverlap` | boolean: may other floating drawings overlap this one | true |
+
+- Size is never in the anchor: it is the drawing's own `widthPx` / `heightPx`
+  (px). Position is points, as `page.margins` are.
+- `behind` and `inFront` are Word's "Behind Text" and "In Front of Text"
+  (`wp:wrapNone`, `behindDoc` 1 or 0). Within a layer, a later floating drawing
+  is drawn over an earlier one: document order is stacking order. `tight` and
+  `through` wrap round the drawing's rectangle.
+- **Errors:** `anchor_invalid` (not an object, an unknown key, a frame or align
+  the axis does not take, offset with align), `anchor_offset_invalid`,
+  `anchor_wrap_invalid`, `anchor_overlap_invalid`. No message repeats a key the
+  document made up. Repair resets a bad frame to its default, clamps an offset,
+  sets a bad wrap to `square`, and makes a drawing whose anchor is not an object
+  inline.
+- **Read back in full:** both axes, `wrap` and `allowOverlap`, whatever the
+  document gave, so a read model writes the same bytes again. A frame the model
+  does not name (`leftMargin`, `insideMargin` ...) reads as `page` with the
+  offset kept, reported `layout-not-preserved`; so does a missing position or
+  wrap (`inFront`). Stacking is read from document order, not from the file's
+  `relativeHeight`.
+- **The contract for a renderer that cannot place a floating drawing**
+  (fine-print, last-word-ui, the ports; Fancy pins it in conformance): draw it
+  inline at its paragraph and report `layout-not-preserved`. One that cannot
+  draw a `shape` draws its `blocks` as ordinary blocks and reports `shape`.
+  Dropping the text is a bug. Today fine-print refuses a `shape` block (unknown
+  type) and last-word-ui draws nothing for one: hand them a document with shapes
+  only after replacing each shape with its `blocks`.
+
 ## Agent guide
 
 Building a document with an LLM? `agent-guide/professional-documents.md` (also

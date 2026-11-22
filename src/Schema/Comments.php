@@ -272,9 +272,11 @@ final class Comments
             }
             $at = "{$path}.comments";
             if (!$isBody) {
-                $errors[] = self::error($at, $where === 'band'
-                    ? 'a header or footer cannot hold a comment (Word allows comments in body text only)'
-                    : 'a footnote cannot hold a comment here; comment on the footnote mark in the body instead', 'comment_outside_body');
+                $errors[] = self::error($at, match ($where) {
+                    'band' => 'a header or footer cannot hold a comment (Word allows comments in body text only)',
+                    'textbox' => 'a text box cannot hold a comment here; comment on body text beside it instead',
+                    default => 'a footnote cannot hold a comment here; comment on the footnote mark in the body instead',
+                }, 'comment_outside_body');
 
                 continue;
             }
