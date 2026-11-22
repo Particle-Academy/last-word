@@ -99,6 +99,9 @@ final class Validator
             return $errors;
         }
 
+        // Comments (Word review comments): the list, and every run that anchors one.
+        array_push($errors, ...Comments::validate($doc));
+
         // Each break is judged against the document as its stretch sees it: margins
         // it inherits, on the paper it turns to.
         foreach (Schema::stretches($doc) as $stretch) {

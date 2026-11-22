@@ -233,6 +233,9 @@ final class DocxWriter
 
     private int $footnoteRelCounter = 0;
 
+    /** The document's review comments: their range markers and parts. Empty without any. */
+    private ?CommentsPart $commentsPart = null;
+
     /** True while a footnote's blocks render: a footnote run inside one renders as nothing. */
     private bool $inFootnote = false;
 
@@ -405,6 +408,7 @@ final class DocxWriter
         $hasCore = $hasTitle || $author !== null;
         $this->fieldAuthor = $author ?? '';
         $this->fieldTitle = is_string($doc['title'] ?? null) ? $doc['title'] : '';
+        $this->commentsPart = new CommentsPart($doc);
 
         // Build document.xml first — it registers hyperlink/image rels and
         // media files, and counts the ordered-list numbering instances the
@@ -464,6 +468,12 @@ final class DocxWriter
                 $zip->addFromString('word/footnotes.xml', $this->buildFootnotes());
                 if ($this->footnoteRels !== []) {
                     $zip->addFromString('word/_rels/footnotes.xml.rels', $this->relsXml($this->footnoteRels));
+                }
+            }
+            if ($this->commentsPart->has()) {
+                $zip->addFromString('word/comments.xml', $this->commentsPart->commentsXml());
+                if ($this->commentsPart->hasExtended()) {
+                    $zip->addFromString('word/commentsExtended.xml', $this->commentsPart->extendedXml());
                 }
             }
             $zip->addFromString('word/_rels/document.xml.rels', $this->buildDocumentRels());
@@ -811,6 +821,12 @@ final class DocxWriter
         if ($this->footnotes !== []) {
             $xml .= '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>';
         }
+        if ($this->commentsPart?->has()) {
+            $xml .= '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>';
+            if ($this->commentsPart->hasExtended()) {
+                $xml .= '<Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>';
+            }
+        }
         foreach (array_keys($this->charts) as $n) {
             $xml .= '<Override PartName="/word/charts/chart' . $n . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>';
         }
@@ -868,6 +884,12 @@ final class DocxWriter
         }
         if ($this->footnotes !== []) {
             $xml .= '<Relationship Id="rIdFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>';
+        }
+        if ($this->commentsPart?->has()) {
+            $xml .= '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>';
+            if ($this->commentsPart->hasExtended()) {
+                $xml .= '<Relationship Id="rIdCommentsExtended" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/>';
+            }
         }
         foreach (array_keys($this->bands) as $name) {
             $kind = str_starts_with($name, 'header') ? 'header' : 'footer';
@@ -1993,8 +2015,16 @@ final class DocxWriter
     private function renderRuns(array $runs): string
     {
         $xml = '';
+        if (!$this->inBand && !$this->inFootnote && $this->commentsPart !== null) {
+            $runs = $this->commentsPart->marks($runs); // review comments: range markers, body only
+        }
         foreach ($runs as $run) {
             if (!is_array($run)) {
+                continue;
+            }
+            if (isset($run[CommentsPart::RAW])) {
+                $xml .= $run[CommentsPart::RAW];
+
                 continue;
             }
             if (array_key_exists('footnote', $run)) {
@@ -2003,7 +2033,7 @@ final class DocxWriter
                 // it rather than lost, which is what repair does.
                 if (is_string($run['text'] ?? null) && $run['text'] !== '') {
                     $plain = $run;
-                    unset($plain['footnote']);
+                    unset($plain['footnote'], $plain['comments']); // its markers are already placed
                     $xml .= $this->renderRuns([$plain]);
                 }
                 $xml .= $this->renderFootnoteRun($run);
@@ -2563,6 +2593,19 @@ final class DocxWriter
             $styles['FootnoteReference'] = '<w:style w:type="character" w:styleId="FootnoteReference">'
                 . '<w:name w:val="footnote reference"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>'
                 . '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+                . '</w:style>';
+        }
+
+        // Likewise only with a comment: Word's "annotation text" and "annotation reference".
+        if ($this->commentsPart?->has()) {
+            $styles['CommentText'] = '<w:style w:type="paragraph" w:styleId="CommentText">'
+                . '<w:name w:val="annotation text"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>'
+                . '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+                . '<w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>'
+                . '</w:style>';
+            $styles['CommentReference'] = '<w:style w:type="character" w:styleId="CommentReference">'
+                . '<w:name w:val="annotation reference"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>'
+                . '<w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr>'
                 . '</w:style>';
         }
 

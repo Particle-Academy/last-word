@@ -347,6 +347,9 @@ final class ToPortable
             if (array_key_exists('field', $r)) {
                 $this->report->add('formula-as-value', $p.'/'.$i);
             }
+            if (array_key_exists('comments', $r)) {
+                $this->report->add('comment', $p.'/'.$i); // portable content has no review comments
+            }
             $out[] = $run;
         }
 

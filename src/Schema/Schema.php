@@ -372,6 +372,7 @@ final class Schema
                 'font' => ['type' => 'string', 'description' => 'Font family name.'],
                 'letterSpacing' => ['type' => 'number', 'description' => 'Tracking in points; may be negative.'],
                 'footnote' => ['$ref' => '#/$defs/footnote'],
+                'comments' => Comments::runJsonSchema(),
             ],
         ];
 
@@ -567,9 +568,11 @@ final class Schema
                 ],
                 'defaultFont' => ['type' => 'string', 'description' => 'Font every run inherits unless it names its own.'],
                 'defaultSize' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Size in points every run inherits unless it names its own.'],
+                'comments' => ['type' => 'array', 'maxItems' => Comments::MAX_COMMENTS, 'items' => ['$ref' => '#/$defs/comment'], 'description' => 'Word review comments. Each is anchored by the body runs that name its id in their "comments".'],
             ],
             '$defs' => [
                 'run' => $run,
+                'comment' => Comments::jsonSchemaDef(),
                 'listItem' => $listItem,
                 'border' => $border,
                 'boxBorders' => $boxBorders,
