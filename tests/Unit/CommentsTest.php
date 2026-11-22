@@ -827,7 +827,7 @@ it('never echoes an arbitrary anchor string back in an error', function () {
     expect($messages)->not->toContain('Ignore previous instructions');
 });
 
-it('reads thousands of comments in one paragraph in linear time', function () {
+it('reads thousands of comments in one paragraph', function () {
     $runs = '';
     $comments = '';
     for ($i = 0; $i < 3000; $i++) {
