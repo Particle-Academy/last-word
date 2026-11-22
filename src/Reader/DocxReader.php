@@ -211,6 +211,12 @@ final class DocxReader
      */
     private array $trackedChanges = self::NO_TRACKED_CHANGES;
 
+    /** The document's review comments, or null without a comments part. */
+    private ?DocxComments $comments = null;
+
+    /** The w:r whose runs are being read: what a body run's comments are looked up by. */
+    private ?DOMElement $commentRun = null;
+
     public function __construct(
         private ?string $tempDir = null,
         private bool $refuseTrackedChanges = false,
@@ -248,6 +254,9 @@ final class DocxReader
         }
 
         $body = $this->firstChildByName($dom->documentElement, 'body');
+        if ($body !== null) {
+            $this->comments?->index($body); // every range, before any block is read
+        }
 
         // Canonical title slot: docProps/core.xml dc:title (shared with the
         // Node mirror). When absent, the pre-0.2.0 legacy slot — the first
@@ -288,6 +297,11 @@ final class DocxReader
         }
 
         $doc['blocks'] = $blocks;
+        $review = $this->comments?->finish() ?? ['comments' => [], 'unrepresented' => []];
+        if ($review['comments'] !== []) {
+            $doc['comments'] = $review['comments'];
+        }
+        array_push($this->unrepresented, ...$review['unrepresented']);
         // Never document text: locations and counts only, like the exchange report.
         if ($this->unrepresented !== []) {
             $doc['unrepresented'] = $this->unrepresented;
@@ -1135,6 +1149,7 @@ final class DocxReader
         $relsXml = $zip->read('word/_rels/document.xml.rels');
         $this->rels = $relsXml !== null ? $this->parseRels($relsXml) : [];
         $this->loadFootnotes($zip, $relsXml);
+        $this->comments = DocxComments::load($zip, $relsXml);
         $numberingXml = $zip->read('word/numbering.xml');
         $this->numbering = $numberingXml !== null ? $this->parseNumbering($numberingXml) : [];
         $this->coreXml = $zip->read('docProps/core.xml');
@@ -2367,6 +2382,7 @@ final class DocxReader
      */
     private function parseRun(DOMElement $r, ?string $link, array &$state): array
     {
+        $this->commentRun = $r;
         $props = [];
         $rPr = $this->firstChildByName($r, 'rPr');
         if ($rPr !== null) {
@@ -2434,12 +2450,26 @@ final class DocxReader
                     break;
                 case 'footnoteReference':
                     $note = $this->footnoteRun((string) $this->wAttr($node, 'id'));
+                    $this->commentRun = $r; // reading the footnote moved it
                     if ($note !== null) {
                         if ($text !== '') {
                             $out[] = $this->runFrom($text, $props, $link, $state);
                             $text = '';
                         }
-                        $out[] = $note;
+                        $ids = $this->inBand || $this->inFootnote ? null : $this->comments?->idsFor($r);
+                        $out[] = $ids !== null ? $note + ['comments' => $ids] : $note;
+                    }
+
+                    break;
+                case 'commentReference':
+                    // A point comment: one whose range kept no text, or had none.
+                    $ids = $this->comments?->pointAt($node);
+                    if ($ids !== null) {
+                        if ($text !== '') {
+                            $out[] = $this->runFrom($text, $props, $link, $state);
+                            $text = '';
+                        }
+                        $out[] = ['text' => '', 'comments' => $ids];
                     }
 
                     break;
@@ -2509,6 +2539,10 @@ final class DocxReader
             if (isset($props[$key])) {
                 $run[$key] = $props[$key];
             }
+        }
+        $ids = $this->inBand || $this->inFootnote ? null : $this->comments?->idsFor($this->commentRun);
+        if ($ids !== null) {
+            $run['comments'] = $ids;
         }
 
         return $run;
@@ -2778,6 +2812,11 @@ final class DocxReader
     {
         $merged = [];
         foreach ($runs as $run) {
+            if ($run['text'] === '' && isset($run['comments']) && !array_key_exists('footnote', $run)) {
+                $merged[] = $run; // a point comment: no text, still there
+
+                continue;
+            }
             // A footnote run's text is always "", and it is never merged: two
             // identical footnotes in a row are two footnotes.
             // A field is never merged either (two {page} in a row are two

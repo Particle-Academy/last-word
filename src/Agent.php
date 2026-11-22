@@ -572,6 +572,11 @@ final class Agent
             $lines[] = "Page {$kind}: " . count($band['blocks']) . ' blocks' . ($parts !== [] ? ' (' . implode(', ', $parts) . ')' : '');
         }
 
+        $comments = \LastWord\Schema\Comments::describe($doc);
+        if ($comments !== null) {
+            $lines[] = $comments;
+        }
+
         // What read() found in a header or footer and could not represent
         // (last-word#5), so an agent knows a letterhead logo is there before it
         // writes the document back without one.

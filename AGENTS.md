@@ -132,6 +132,75 @@ if ($read['trackedChanges']['present'] ?? false) {
   does not teach them yet (it is shared byte for byte with them); the JSON
   schema's descriptions do.
 
+## Review comments
+
+Word review comments are in the model, written and read back. A comment lives in
+the document's top-level `comments` list; the text it is about is the body runs
+whose `comments` list names its id:
+
+```php
+$doc = [
+    'blocks' => [
+        ['type' => 'paragraph', 'runs' => [
+            ['text' => 'Revenue grew '],
+            ['text' => '18%', 'comments' => ['c1']],
+            ['text' => ' on the prior year.'],
+            ['text' => '', 'comments' => ['c3']],            // a point comment
+        ]],
+    ],
+    'comments' => [
+        ['id' => 'c1', 'author' => 'Ann Reviewer', 'initials' => 'AR', 'date' => '2026-11-21T09:30:00Z', 'text' => 'Is this audited?'],
+        ['id' => 'c2', 'author' => 'Bo Editor', 'text' => 'Yes, FY2026.', 'replyTo' => 'c1', 'done' => true],
+        ['id' => 'c3', 'author' => 'Bo Editor', 'text' => "Add the source.\nSecond paragraph."],
+    ],
+];
+```
+
+- **Comment fields:** `id` (ASCII, `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`, unique),
+  `author` (required), `initials`, `date` (ISO 8601 date-time), `text` (required;
+  `\n` starts a paragraph, `\t` is a tab), `replyTo`, `done`. Nothing else.
+- **A range is the runs that name the id, consecutive in reading order.** It may
+  cross paragraphs, list items, table cells and quotes, and comments may overlap
+  (`"comments": ["c1", "c2"]`). A gap is refused (`comment_range_broken`): use two
+  comments. A run with `text: ""` that names an id is a point. A footnote mark
+  may carry `comments` too.
+- **Threads:** a reply names the FIRST comment of its thread in `replyTo` (Word
+  threads are one level) and no run names it; Word puts it on the thread's
+  range. `done` is Word's "Resolve".
+- **Body only.** A comment in a header, footer or footnote is refused
+  (`comment_outside_body`): Word does not allow one in a header or footer, and
+  this package does not anchor one in a footnote's text. On read they are not
+  read, and are reported.
+- **`author` and `initials` are labels, not identities.** Nothing here trusts
+  them. They are still refused when they hold control characters, bidi
+  controls, zero-width characters, or a space of any kind at either end (an
+  override can make one name display as another). `validateAndRepair()` strips
+  those, but never invents an author.
+- **Caps:** `Comments::MAX_COMMENTS` (10,000) per document,
+  `Comments::MAX_PER_RUN` (32) on one run, `Comments::MAX_TEXT` (32,768
+  characters) per text, `MAX_AUTHOR` 255, `MAX_INITIALS` 16.
+- **Errors carry a `code`:** `comment_invalid`, `comment_id_invalid`,
+  `comment_id_duplicate`, `comment_author_invalid`, `comment_initials_invalid`,
+  `comment_date_invalid`, `comment_text_invalid`, `comment_text_too_long`,
+  `comment_reply_invalid`, `comment_count_exceeded`, `comment_unknown`,
+  `comment_reply_anchored`, `comment_anchor_invalid`, `comment_overlap_exceeded`,
+  `comment_range_broken`, `comment_unanchored`, `comment_outside_body`.
+  `validateAndRepair()` drops anchors it cannot keep, keeps a broken range's
+  first stretch, and drops a comment nothing anchors with its replies.
+- **Reading:** ids come back as `c1`, `c2` ... in the file's order, so a document
+  that uses those ids reads back as it was written. A range without an end
+  closes at its reference; one that never closes is dropped, not stretched to
+  the end of the document. A reference with no range is a point. Every comment
+  dropped (unanchored, outside the body, over a cap) is counted in
+  `unrepresented` as `{where: "/comments", kind: "comment", count}`, and a text
+  cut at the cap as `{where: "/comments/<n>/text", kind: "comment", count: 1}`.
+- **No timestamp is added.** `w:date` is written only when the model has a
+  `date`, so `toBytes()` stays deterministic.
+- **The bridges do not carry comments.** `toMarkdownWithReport()` and
+  `toPortable()` report them with kind `comment`.
+- **.docx only, PHP only.** The .doc, .odt and .rtf readers read no comments, and
+  the Node and Python packages do not have them yet.
+
 ## Agent guide
 
 Building a document with an LLM? `agent-guide/professional-documents.md` (also

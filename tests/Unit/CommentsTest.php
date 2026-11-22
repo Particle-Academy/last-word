@@ -274,7 +274,7 @@ it('refuses comments outside the body: a header, a footer, a footnote', function
 
 it('refuses malformed comments', function (array $comment, string $path, string $code) {
     $doc = cmDoc();
-    $doc['comments'][0] = $comment + ['id' => 'c1'];
+    $doc['comments'][0] = $comment === ['nope'] ? 'nope' : $comment + ['id' => 'c1'];
 
     expect(cmCodes($doc, $path))->toContain($code);
 })->with([

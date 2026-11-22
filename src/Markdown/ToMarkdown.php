@@ -67,6 +67,9 @@ final class ToMarkdown
         $this->report = new Report;
         try {
             $markdown = $this->render($doc, $indexes);
+            if (is_array($doc['comments'] ?? null) && $doc['comments'] !== []) {
+                $this->note('comment', '/comments'); // GFM has no review comments
+            }
 
             return ['markdown' => $markdown, 'report' => $this->report->toArray()];
         } finally {
