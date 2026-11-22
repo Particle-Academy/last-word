@@ -38,6 +38,9 @@ final class CommentsPart
     /** @var array<string, list<string>> thread root id => reply ids, in list order */
     private array $replies = [];
 
+    /** @var array<string, string> reply id => its thread's first comment: a keyed set, so writing stays linear */
+    private array $threadOf = [];
+
     /** @var array<string, int> root id => how many body runs name it */
     private array $total = [];
 
@@ -65,6 +68,7 @@ final class CommentsPart
             $to = $comment['replyTo'] ?? null;
             if (is_string($to) && isset($this->wId[$to]) && !$index[$to]['reply']) {
                 $this->replies[$to][] = $comment['id'];
+                $this->threadOf[$comment['id']] = $to;
             }
             if ($to !== null || ($comment['done'] ?? false) === true) {
                 $this->extended = true;
@@ -189,8 +193,8 @@ final class CommentsPart
         $xml = Xml::declaration()
             . '<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w15">';
         foreach ($this->comments as $n => $comment) {
-            $to = $comment['replyTo'] ?? null;
-            $parent = is_string($to) && isset($this->replies[$to]) && in_array($comment['id'], $this->replies[$to], true)
+            $to = $this->threadOf[$comment['id']] ?? null;
+            $parent = $to !== null
                 ? ' w15:paraIdParent="' . self::paraId($this->wId[$to]) . '"'
                 : '';
             $xml .= '<w15:commentEx w15:paraId="' . self::paraId($n) . '"' . $parent . ' w15:done="' . (($comment['done'] ?? false) === true ? '1' : '0') . '"/>';

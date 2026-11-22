@@ -538,6 +538,18 @@ it('writes nothing new for a document without comments, and the same bytes twice
         ->and(Agent::toBytes(cmReviewDoc()))->toBe(Agent::toBytes(cmReviewDoc()));
 });
 
+it('writes one thread of replies at the cap, every reply tied to its root', function () {
+    $doc = ['blocks' => [['type' => 'paragraph', 'runs' => [['text' => 'x', 'comments' => ['c1']]]]], 'comments' => [['id' => 'c1', 'author' => 'A', 'text' => 'root']]];
+    for ($i = 2; $i <= Comments::MAX_COMMENTS; $i++) {
+        $doc['comments'][] = ['id' => "c{$i}", 'author' => 'A', 'text' => 'r', 'replyTo' => 'c1'];
+    }
+
+    $parts = cmParts($doc);
+
+    expect(substr_count($parts['word/commentsExtended.xml'], 'w15:paraIdParent="00000001"'))->toBe(Comments::MAX_COMMENTS - 1)
+        ->and(Agent::read(Agent::toBytes($doc))['comments'])->toBe($doc['comments']);
+});
+
 it('refuses to write an invalid comment', function () {
     $doc = cmDoc();
     $doc['comments'][0]['author'] = "Ann\u{202E}";
