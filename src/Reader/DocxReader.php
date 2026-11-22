@@ -183,6 +183,26 @@ final class DocxReader
     private const MAX_FIELD_DEPTH = 32;
 
     /**
+     * How many times one read looks ahead for a table of contents' end. Each look
+     * can run to the end of its container, so a file of unclosed TOCs is bounded;
+     * past it a TOC reads as its text, as an unclosed one does.
+     */
+    private const MAX_TOC_SCANS = 20;
+
+    /** The `toc` blocks read so far, capped at {@see Schema::MAX_TOCS}. */
+    private int $tocCount = 0;
+
+    private int $tocScans = 0;
+
+    /**
+     * The ids of the body bookmarks read, so only their ends become markers: a
+     * hidden or refused bookmark's end must not break a user bookmark's range.
+     *
+     * @var array<string, true>
+     */
+    private array $bookmarkIds = [];
+
+    /**
      * Revision markup found anywhere in the package's word parts, by kind:
      * `{insertions, deletions, moves, formatChanges}`. The reader accepts every
      * revision as it reads, so this is the only trace of them in the result.
@@ -210,6 +230,9 @@ final class DocxReader
         }
         $this->unrepresented = [];
         $this->bookmarksSeen = [];
+        $this->bookmarkIds = [];
+        $this->tocCount = 0;
+        $this->tocScans = 0;
         $this->bandMediaBytes = 0;
         $this->inBand = false;
         $this->inFootnote = false;
@@ -1476,10 +1499,12 @@ final class DocxReader
         };
 
         $sectionEnded = false;
-        // Inside a table of contents: how many fields are open. Its paragraphs are
-        // Word's cached entries, which the toc block regenerates, so they are skipped.
-        $tocDepth = 0;
-        foreach ($this->blockChildren($container) as $node) {
+        // Inside a table of contents: the child index of the paragraph that ends it
+        // and the end itself. Its paragraphs are Word's cached entries, which the
+        // toc block regenerates, so they are skipped.
+        $tocUntil = null;
+        $children = $this->blockChildren($container);
+        foreach ($children as $idx => $node) {
             if ($sectionEnded) {
                 $flushAll();
                 $this->endSection($blocks);
@@ -1488,19 +1513,41 @@ final class DocxReader
             if ($topLevel && $node->localName === 'p' && $this->firstChildByName($this->firstChildByName($node, 'pPr'), 'sectPr') !== null) {
                 $sectionEnded = true; // after this paragraph, whatever it turns out to hold
             }
-            if ($node->localName === 'p' && !$this->inBand && !$this->inFootnote) {
-                if ($tocDepth > 0) {
-                    $tocDepth = $this->fieldDepthAfter($node, $tocDepth, null);
-
+            if ($tocUntil !== null) {
+                if ($idx < $tocUntil['index']) {
                     continue;
                 }
+                // The paragraph the TOC ends in: what follows the end is the document's.
+                $tail = $this->paragraphPart($node, $tocUntil['end'], false);
+                $tocUntil = null;
+                array_push($blocks, ...$tail);
+
+                continue;
+            }
+            if ($node->localName === 'p' && !$this->inBand && !$this->inFootnote) {
                 $toc = $this->tocStart($node);
                 if ($toc !== null) {
-                    $flushAll();
-                    $blocks[] = ['type' => 'toc'] + ($toc['levels'] !== Schema::TOC_LEVELS_DEFAULT ? ['levels' => $toc['levels']] : []);
-                    $tocDepth = $toc['depth'];
+                    // A TOC becomes a toc block only where the model can hold one --
+                    // top level, within the cap -- and only when its end is found.
+                    // Anything else reads as its text, as before toc existed.
+                    $close = $topLevel && $this->tocCount < Schema::MAX_TOCS && $this->tocScans++ < self::MAX_TOC_SCANS
+                        ? $this->tocClose($children, $idx, $toc['begin'])
+                        : null;
+                    if ($close === null) {
+                        $this->noteStructure();
+                    } else {
+                        $flushAll();
+                        array_push($blocks, ...$this->paragraphPart($node, $toc['begin'], true));
+                        $blocks[] = ['type' => 'toc'] + ($toc['levels'] !== Schema::TOC_LEVELS_DEFAULT ? ['levels' => $toc['levels']] : []);
+                        $this->tocCount++;
+                        if ($close['index'] === $idx) {
+                            array_push($blocks, ...$this->paragraphPart($node, $close['end'], false));
+                        } else {
+                            $tocUntil = $close;
+                        }
 
-                    continue;
+                        continue;
+                    }
                 }
             }
             if ($node->localName === 'tbl') {
@@ -1677,14 +1724,13 @@ final class DocxReader
     }
 
     /**
-     * Where a paragraph starts a table of contents, its levels and how many fields
-     * are still open at the paragraph's end (0 when the whole field is in it), or
-     * null when it holds none. A TOC field is a `TOC` instruction, as a complex
-     * field or a `w:fldSimple`; `\o "1-n"` gives the levels, clamped to 1-6, and
-     * without one they are the default. No other switch is read: the toc block
-     * writes its own instruction.
+     * Where a paragraph starts a table of contents: its levels and the field's
+     * begin (null for a `w:fldSimple`, which is whole in itself), or null when it
+     * holds none. A TOC field is a `TOC` instruction; `\o "1-n"` gives the
+     * levels, clamped to 1-6, and without one they are the default. No other
+     * switch is read: the toc block writes its own instruction.
      *
-     * @return array{levels: int, depth: int}|null
+     * @return array{levels: int, begin: ?DOMElement}|null
      */
     private function tocStart(DOMElement $p): ?array
     {
@@ -1693,14 +1739,14 @@ final class DocxReader
         foreach ($p->getElementsByTagName('*') as $el) {
             $name = $el->localName;
             if ($name === 'fldSimple' && self::isTocInstruction((string) $this->wAttr($el, 'instr'))) {
-                return ['levels' => self::tocLevels((string) $this->wAttr($el, 'instr')), 'depth' => 0];
+                return ['levels' => self::tocLevels((string) $this->wAttr($el, 'instr')), 'begin' => $el];
             }
             if ($name === 'fldChar') {
                 $type = $this->wAttr($el, 'fldCharType');
                 if ($type === 'begin') {
                     [$open, $instr] = [$el, ''];
                 } elseif ($open !== null && self::isTocInstruction($instr)) {
-                    return ['levels' => self::tocLevels($instr), 'depth' => $this->fieldDepthAfter($p, 0, $open)];
+                    return ['levels' => self::tocLevels($instr), 'begin' => $open];
                 } else {
                     $open = null;
                 }
@@ -1713,31 +1759,105 @@ final class DocxReader
     }
 
     /**
-     * How many fields are open after this paragraph, given `$depth` open before it
-     * -- counting from `$from` (a begin it holds) when given, else from its start.
+     * Where the TOC that `$begin` opens ends: the index of the container child
+     * holding its end, and the end, or null when the container ends first. A
+     * `w:fldSimple` ends where it is.
+     *
+     * @param  list<DOMElement>  $children
+     * @return array{index: int, end: DOMElement}|null
      */
-    private function fieldDepthAfter(DOMElement $p, int $depth, ?DOMElement $from): int
+    private function tocClose(array $children, int $from, DOMElement $begin): ?array
     {
-        $counting = $from === null;
-        foreach ($p->getElementsByTagName('*') as $el) {
-            if ($el->localName !== 'fldChar') {
-                continue;
-            }
-            if (!$counting) {
-                if (!$el->isSameNode($from)) {
+        if ($begin->localName === 'fldSimple') {
+            return ['index' => $from, 'end' => $begin];
+        }
+        $depth = 0;
+        $counting = false;
+        $count = count($children);
+        for ($i = $from; $i < $count; $i++) {
+            foreach ($children[$i]->getElementsByTagName('*') as $el) {
+                if ($el->localName !== 'fldChar') {
                     continue;
                 }
-                $counting = true;
-            }
-            $type = $this->wAttr($el, 'fldCharType');
-            if ($type === 'begin') {
-                $depth++;
-            } elseif ($type === 'end' && --$depth <= 0) {
-                return 0;
+                if (!$counting) {
+                    if (!$el->isSameNode($begin)) {
+                        continue;
+                    }
+                    $counting = true;
+                }
+                $type = $this->wAttr($el, 'fldCharType');
+                if ($type === 'begin') {
+                    $depth++;
+                } elseif ($type === 'end' && --$depth === 0) {
+                    return ['index' => $i, 'end' => $el];
+                }
             }
         }
 
-        return $depth;
+        return null;
+    }
+
+    /**
+     * What a paragraph holds before (or after) the element `$at` -- the text
+     * around a TOC -- as the blocks it reads as: a paragraph when there is text,
+     * nothing otherwise. Read from a copy of the paragraph cut at the child that
+     * holds `$at`, so the rest reads exactly as a paragraph would.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function paragraphPart(DOMElement $p, DOMElement $at, bool $before): array
+    {
+        $child = $at;
+        while ($child->parentNode !== null && !$child->parentNode->isSameNode($p)) {
+            $child = $child->parentNode;
+        }
+        if ($child->parentNode === null) {
+            return [];
+        }
+        $position = 0;
+        foreach ($p->childNodes as $k => $node) {
+            if ($node->isSameNode($child)) {
+                $position = $k;
+            }
+        }
+        $copy = $p->cloneNode(true);
+        $remove = [];
+        foreach ($copy->childNodes as $k => $node) {
+            $isPPr = $node instanceof DOMElement && $node->localName === 'pPr';
+            if ($before ? $k >= $position : ($k <= $position && !$isPPr)) {
+                $remove[] = $node;
+            }
+        }
+        foreach ($remove as $node) {
+            $copy->removeChild($node);
+        }
+        $read = $this->parseParagraphNode($copy);
+        if ($this->plainText($read['runs']) === '') {
+            return [];
+        }
+        $para = ['type' => 'paragraph', 'runs' => $read['runs']];
+        if ($read['align'] !== null) {
+            $para['align'] = $read['align'];
+        }
+
+        return [$para + $read['props']];
+    }
+
+    /**
+     * One more piece of field markup the reader could not structure -- an
+     * unclosed or misplaced TOC, a field that begins or ends in another
+     * paragraph -- read as its text instead, counted in `unrepresented`.
+     */
+    private function noteStructure(): void
+    {
+        foreach ($this->unrepresented as $k => $note) {
+            if ($note['where'] === '/blocks' && $note['kind'] === 'structure-not-recovered') {
+                $this->unrepresented[$k]['count']++;
+
+                return;
+            }
+        }
+        $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'structure-not-recovered', 'count' => 1];
     }
 
     private static function isTocInstruction(string $instr): bool
@@ -1959,7 +2079,14 @@ final class DocxReader
         // header or footer puts first (a logo beside an address). `field`: a
         // complex field in a header or footer -- null outside one, its
         // instruction so far, or false while its cached result is skipped.
-        $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => []];
+        // Field markup that does not balance inside the paragraph (a begin with no
+        // end, an end with no begin) is not tracked at all: the paragraph reads as
+        // its text, as before body fields were read, and says so.
+        $fieldsOff = !$this->inBand && !$this->fieldsBalance($p);
+        if ($fieldsOff) {
+            $this->noteStructure();
+        }
+        $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
         $runs = $this->parseInlineContainer($p, null, $state);
         // A field still capturing at the paragraph's end: its text, as text.
         foreach ($state['fields'] as $open) {
@@ -2202,8 +2329,13 @@ final class DocxReader
                     }
                     $id = (string) $this->wAttr($node, 'id');
                     if ($node->localName === 'bookmarkEnd') {
-                        $runs[] = ['__bookmark' => 'end', 'id' => $id];
-                    } elseif ($this->acceptBookmark((string) $this->wAttr($node, 'name'))) {
+                        // Only the end of a bookmark that was read: a hidden one's
+                        // (_GoBack) must not cut a user bookmark's range.
+                        if (isset($this->bookmarkIds[$id])) {
+                            $runs[] = ['__bookmark' => 'end', 'id' => $id];
+                        }
+                    } elseif (!isset($this->bookmarkIds[$id]) && $this->acceptBookmark((string) $this->wAttr($node, 'name'))) {
+                        $this->bookmarkIds[$id] = true;
                         $runs[] = ['__bookmark' => 'start', 'id' => $id, 'name' => (string) $this->wAttr($node, 'name')];
                     }
 
@@ -2253,6 +2385,9 @@ final class DocxReader
                 continue;
             }
             if (!$this->inBand && in_array($node->localName, ['fldChar', 'instrText'], true)) {
+                if ($state['fieldsOff'] ?? false) {
+                    continue;
+                }
                 $done = $this->bodyField($node, $state);
                 if ($done !== null) {
                     if ($text !== '') {
@@ -2379,6 +2514,25 @@ final class DocxReader
         return $run;
     }
 
+    /** Whether every complex field in the paragraph begins and ends in it. */
+    private function fieldsBalance(DOMElement $p): bool
+    {
+        $depth = 0;
+        foreach ($p->getElementsByTagName('*') as $el) {
+            if ($el->localName !== 'fldChar') {
+                continue;
+            }
+            $type = $this->wAttr($el, 'fldCharType');
+            if ($type === 'begin') {
+                $depth++;
+            } elseif ($type === 'end' && --$depth < 0) {
+                return false;
+            }
+        }
+
+        return $depth === 0;
+    }
+
     /**
      * One piece of a complex field in body text. Fields nest, so they are a stack.
      * An allow-listed one ({@see Schema::fieldTokenOf()}) not inside another is
@@ -2460,7 +2614,7 @@ final class DocxReader
      */
     private function bodyFieldCapture(array $state): int|false|null
     {
-        if ($this->inBand) {
+        if ($this->inBand || ($state['fieldsOff'] ?? false)) {
             return null;
         }
         $capture = null;
