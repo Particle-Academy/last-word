@@ -279,8 +279,9 @@ $doc = [
   A paragraph, heading or list item whose MARK is deleted joins the one after
   it (a paragraph, a heading or a list's first item; a list's last item joins
   a paragraph after the list), and the joined paragraph has the FOLLOWING one's
-  properties, because they live in the mark that survives (ECMA-376 Part 1,
-  17.13.5.15). With nothing to join it stays, or goes when nothing is left of
+  properties, because only its mark survives (that follows the markup; it is
+  unverified: ECMA-376 says the content combines with the following paragraph,
+  not whose properties survive). With nothing to join it stays, or goes when nothing is left of
   it; a list item with nested items keeps its place. The default read joins
   them the same way.
   `Agent::layout()` measures every run, deleted ones included, as Word's All

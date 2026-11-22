@@ -7,9 +7,11 @@ use LastWord\Agent;
 /*
  * Accepting a DELETED PARAGRAPH MARK, as Word's Accept All does: the paragraph
  * whose mark is deleted joins the paragraph after it, and the joined paragraph
- * has the following paragraph's properties, because those live in the mark that
- * survives (ECMA-376 Part 1, 17.13.5.15, "del (Deleted Paragraph)"; 17.3.1.29
- * on the paragraph mark's run properties). The default read does it, and so
+ * has the following paragraph's properties, because only that paragraph's mark
+ * survives, and a paragraph's properties are in its mark. That follows the
+ * markup and is unverified against the standard: ECMA-376's "del (Deleted
+ * Paragraph)" says the content combines with the following paragraph, not
+ * whose properties survive. The default read does it, and so
  * does every consumer that sees revisions accepted (markdown, portable content,
  * describe).
  */

@@ -744,9 +744,11 @@ final class Revisions
      *  - A paragraph, heading or list item whose MARK is deleted joins the one
      *    after it, and the joined paragraph has the FOLLOWING one's properties
      *    (type, level, alignment, list membership): a paragraph's properties
-     *    live in its mark, and the mark that survives is the next one's
-     *    (ECMA-376 Part 1, 17.13.5.15 "del (Deleted Paragraph)": the paragraph's
-     *    content is combined with the following paragraph). The next one may be
+     *    live in its mark, and only the next one's mark survives. That follows
+     *    the markup; it is not confirmed from the standard. (ECMA-376's "del
+     *    (Deleted Paragraph)" says the content combines with the following
+     *    paragraph, not whose properties survive; its section number varies by
+     *    edition, so none is cited.) The next one may be
      *    a paragraph, a heading or a list's first item; the last item of a list
      *    joins a paragraph or heading after the list.
      *  - Nothing to join (a table or an image next, the end of a cell, a quote,
