@@ -338,16 +338,19 @@ final class Agent
      * The result then carries `trackedChanges`, `{present: true, insertions,
      * deletions, moves, formatChanges}`, absent when the file holds none. Writing
      * such a result back erases the pending revisions. `refuseTrackedChanges:
-     * true` makes the read throw {@see TrackedChangesRefused} instead. The other
-     * formats' readers do not detect revisions.
+     * true` makes the read throw {@see TrackedChangesRefused} instead.
+     * `preserveTrackedChanges: true` keeps them in the model instead: each run and
+     * paragraph carries its `revision` (see {@see \LastWord\Schema\Revisions}),
+     * which the writer writes back as tracked changes. The other formats'
+     * readers do not detect revisions.
      *
-     * @param  array{refuseTrackedChanges?: bool}  $options
+     * @param  array{refuseTrackedChanges?: bool, preserveTrackedChanges?: bool}  $options
      *
      * @throws UnsupportedFormatException for bytes that are not one of those
      *   formats, naming what they are when that is knowable (`xls`, `pptx`, …)
      * @throws TrackedChangesRefused for a .docx holding revisions, with
      *   `refuseTrackedChanges`
-     * @throws InvalidArgumentException when `refuseTrackedChanges` is not a bool
+     * @throws InvalidArgumentException when either option is not a bool, or both are true
      * @throws \RuntimeException for a file in a supported format that is damaged
      *
      * @return array<string, mixed>
@@ -358,10 +361,17 @@ final class Agent
         if (! is_bool($refuse)) {
             throw new InvalidArgumentException('The read option refuseTrackedChanges must be a boolean.');
         }
+        $preserve = $options['preserveTrackedChanges'] ?? false;
+        if (! is_bool($preserve)) {
+            throw new InvalidArgumentException('The read option preserveTrackedChanges must be a boolean.');
+        }
+        if ($refuse && $preserve) {
+            throw new InvalidArgumentException('The read options refuseTrackedChanges and preserveTrackedChanges cannot both be true: one refuses revisions, the other keeps them.');
+        }
         $bytes = self::bytesFrom($bytesOrPath);
 
         return self::withoutDanglingLinks(match ($format = Format::detect($bytes)) {
-            Format::DOCX => (new DocxReader(refuseTrackedChanges: $refuse))->read($bytes),
+            Format::DOCX => (new DocxReader(refuseTrackedChanges: $refuse, preserveTrackedChanges: $preserve))->read($bytes),
             Format::ODT => (new OdtReader())->read($bytes),
             Format::RTF => (new RtfReader())->read($bytes),
             // A compound file: DocReader reads a Word document and names anything
@@ -456,7 +466,7 @@ final class Agent
     /**
      * Alias of {@see read()} for symmetry with {@see toBytes()}; same options.
      *
-     * @param  array{refuseTrackedChanges?: bool}  $options
+     * @param  array{refuseTrackedChanges?: bool, preserveTrackedChanges?: bool}  $options
      * @return array<string, mixed>
      */
     public static function fromBytes(string $bytes, array $options = []): array
@@ -513,7 +523,8 @@ final class Agent
             $counts[$type] = ($counts[$type] ?? 0) + 1;
         }
 
-        $words = self::countWords($doc);
+        // Words a reader of the document sees: with every tracked change accepted.
+        $words = self::countWords(\LastWord\Schema\Revisions::present($doc) ? self::accepted($doc) : $doc);
 
         $lines = ["Document: {$title}"];
         // A document whose page setup changes partway, as fine-print's describe() says it.
@@ -575,6 +586,11 @@ final class Agent
         $comments = \LastWord\Schema\Comments::describe($doc);
         if ($comments !== null) {
             $lines[] = $comments;
+        }
+
+        $revisions = \LastWord\Schema\Revisions::describe($doc);
+        if ($revisions !== null) {
+            $lines[] = $revisions;
         }
 
         // What read() found in a header or footer and could not represent
@@ -670,6 +686,22 @@ final class Agent
     /**
      * @param  array<string, mixed>  $doc
      */
+    /**
+     * The document with every tracked change accepted.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     */
+    private static function accepted(array $doc): array
+    {
+        if (is_array($doc['blocks'] ?? null)) {
+            $accepted = \LastWord\Schema\Revisions::acceptBlocks($doc['blocks'])[0];
+            $doc['blocks'] = array_values(array_filter($accepted, static fn (mixed $b): bool => $b !== null));
+        }
+
+        return $doc;
+    }
+
     private static function countWords(array $doc): int
     {
         $text = [];

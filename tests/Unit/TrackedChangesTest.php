@@ -85,6 +85,25 @@ it('still accepts the revisions by default, as before', function () {
     expect($doc['blocks'][0]['runs'][0]['text'] ?? null)->toBe('The fee is twelve pounds.');
 });
 
+it('reads a moved passage once, at its destination, as accepting the move does', function () {
+    $doc = Agent::read(lwTrackedDocx(lwRevisedBody()));
+    $texts = array_map(static fn (array $b): string => implode('', array_column($b['runs'] ?? [], 'text')), $doc['blocks']);
+
+    expect(array_count_values($texts)['Moved sentence.'] ?? 0)->toBe(1)
+        ->and($texts)->toBe(['The fee is twelve pounds.', 'Added clause.', 'Moved sentence.', 'Bold now.']);
+});
+
+it('reads a moved passage once when its source sits in a smart tag or a content control', function (string $source) {
+    $to = '<w:p><w:moveToRangeStart w:id="7" w:name="m" w:author="Ann"/><w:moveTo w:id="8" w:author="Ann"><w:r><w:t>Moved.</w:t></w:r></w:moveTo><w:moveToRangeEnd w:id="7"/></w:p>';
+    $doc = Agent::read(lwTrackedDocx('<w:p>' . $source . '<w:r><w:t xml:space="preserve"> Stays.</w:t></w:r></w:p>' . $to));
+    $texts = array_map(static fn (array $b): string => implode('', array_column($b['runs'] ?? [], 'text')), $doc['blocks']);
+
+    expect($texts)->toBe([' Stays.', 'Moved.']);
+})->with([
+    'smart tag' => ['<w:smartTag w:uri="urn:x" w:element="place"><w:moveFromRangeStart w:id="1" w:name="m" w:author="Ann"/><w:moveFrom w:id="2" w:author="Ann"><w:r><w:t>Moved.</w:t></w:r></w:moveFrom><w:moveFromRangeEnd w:id="1"/></w:smartTag>'],
+    'content control' => ['<w:sdt><w:sdtContent><w:moveFrom w:id="2" w:author="Ann"><w:r><w:t>Moved.</w:t></w:r></w:moveFrom></w:sdtContent></w:sdt>'],
+]);
+
 it('counts revisions outside the body, in a header part', function () {
     $header = '<?xml version="1.0" encoding="UTF-8"?>'
         . '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'

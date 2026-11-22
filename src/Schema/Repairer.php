@@ -57,6 +57,7 @@ final class Repairer
 
         $doc['blocks'] = $this->repairBlocks($doc['blocks'], 'blocks');
         $doc = Comments::repair($doc, $this->notes); // review comments: anchors and the list
+        $doc = Revisions::repair($doc, $this->notes); // tracked changes: only what is safe to fix
 
         if (is_array($doc['page'] ?? null)) {
             $doc['page'] = $this->repairPage($doc['page'], 'page');

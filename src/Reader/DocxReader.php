@@ -11,6 +11,7 @@ use LastWord\Archive\OfficeTemplate;
 use LastWord\Archive\PartXml;
 use LastWord\Archive\SourceArchive;
 use LastWord\Exceptions\TrackedChangesRefused;
+use LastWord\Schema\Revisions;
 use LastWord\Schema\Schema;
 use LastWord\Writer\DocxWriter;
 use LastWord\Writer\TemplateSection;
@@ -216,10 +217,35 @@ final class DocxReader
 
     /** The w:r whose runs are being read: what a body run's comments are looked up by. */
     private ?DOMElement $commentRun = null;
+    /**
+     * With `preserveTrackedChanges`: the revision a run is being read inside, an
+     * arrival (`insert`, `moveTo`) and a departure (`delete`, `moveFrom`), each
+     * `[kind, entry]`; and the formatting change of the w:r being read. Null
+     * outside one, and always null in a header or footer.
+     *
+     * @var array{0: string, 1: array<string, mixed>}|null
+     */
+    private ?array $revArrival = null;
+
+    /** @var array{0: string, 1: array<string, mixed>}|null */
+    private ?array $revDeparture = null;
+
+    /** @var array<string, mixed>|null */
+    private ?array $runFormat = null;
+
+    /** Temporary revision ids, one per element: {@see Revisions::fromRead()} renumbers them. */
+    private int $revSeq = 0;
+
+    /** Revision markup in the body and footnotes not kept as it was: accepted, or changed to fit. */
+    private int $revUnkept = 0;
+
+    /** Open move ranges, by direction and range id => name. @var array{from: array<string, string>, to: array<string, string>} */
+    private array $openMoves = ['from' => [], 'to' => []];
 
     public function __construct(
         private ?string $tempDir = null,
         private bool $refuseTrackedChanges = false,
+        private bool $preserveTrackedChanges = false,
     ) {
     }
 
@@ -247,6 +273,12 @@ final class DocxReader
         $this->sectionCursor = 0;
         $this->sectionTargets = [];
         $this->bandCache = [];
+        $this->revArrival = null;
+        $this->revDeparture = null;
+        $this->runFormat = null;
+        $this->revSeq = 0;
+        $this->revUnkept = 0;
+        $this->openMoves = ['from' => [], 'to' => []];
 
         $dom = PartXml::dom($documentXml);
         if ($dom === null) {
@@ -294,6 +326,27 @@ final class DocxReader
         }
         foreach ($this->parseDocDefaults() as $key => $value) {
             $doc[$key] = $value;
+        }
+
+        if (!$this->preserveTrackedChanges && $this->trackedChanges['deletions'] > 0) {
+            // Accepting a deleted paragraph mark joins it to the next paragraph, as Word does.
+            $blocks = array_values(array_filter(Revisions::acceptBlocks($blocks)[0], static fn (mixed $b): bool => $b !== null));
+        }
+        if ($this->preserveTrackedChanges && $this->trackedChanges !== self::NO_TRACKED_CHANGES) {
+            // What the model has no slot for, then the whole document brought inside the rules.
+            $this->revUnkept += $this->unkeptRevisions($dom) + ($this->footnotesDom !== null ? $this->unkeptRevisions($this->footnotesDom) : 0);
+            $blocks = Revisions::fromRead(['blocks' => $blocks], $this->revUnkept)['blocks'];
+            if ($this->revUnkept > 0) {
+                $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'tracked-change', 'count' => $this->revUnkept];
+            }
+            $inBands = 0;
+            foreach ($this->bandParts as $xml) {
+                $inBands += $this->revisionElements((string) $xml);
+            }
+            if ($inBands > 0) {
+                // A header or footer is read as the default read reads it: accepted.
+                $this->unrepresented[] = ['where' => '/page', 'kind' => 'tracked-change', 'count' => $inBands];
+            }
         }
 
         $doc['blocks'] = $blocks;
@@ -1242,6 +1295,250 @@ final class DocxReader
         $this->trackedChanges['moves'] += $names !== [] ? count($names) : max($from, $to);
     }
 
+    /** Revision markup the model has no slot for: a table's, a row's, a cell's, a section's, numbering, a paragraph mark's formatting. */
+    private const MOVE_RANGES = ['moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd'];
+
+    private const UNKEPT_REVISIONS = ['cellIns', 'cellDel', 'cellMerge', 'tblPrChange', 'tblPrExChange', 'tblGridChange', 'trPrChange', 'tcPrChange', 'sectPrChange', 'numberingChange'];
+
+    /** How many revision elements in a part the model cannot carry (they are accepted). */
+    private function unkeptRevisions(DOMDocument $dom): int
+    {
+        $n = 0;
+        foreach ($dom->getElementsByTagName('*') as $el) {
+            if (!str_contains((string) $el->namespaceURI, 'wordprocessingml')) {
+                continue;
+            }
+            $parent = $el->parentNode instanceof DOMElement ? $el->parentNode->localName : '';
+            $grand = $el->parentNode?->parentNode instanceof DOMElement ? $el->parentNode->parentNode->localName : '';
+            if (in_array($el->localName, self::UNKEPT_REVISIONS, true)
+                || ($parent === 'trPr' && in_array($el->localName, ['ins', 'del'], true))
+                || ($el->localName === 'rPrChange' && $parent === 'rPr' && $grand === 'pPr')) {
+                $n++;
+            }
+        }
+
+        return $n;
+    }
+
+    /** How many revision elements a part holds, every kind, ranges not counted. */
+    private function revisionElements(string $xml): int
+    {
+        if (preg_match('#<(?:[A-Za-z0-9_]+:)?(?:ins|del|cell(?:Ins|Del|Merge)|move(?:From|To)|[A-Za-z]+Change)[ \t\r\n/>]#', $xml) !== 1) {
+            return 0;
+        }
+        $dom = PartXml::dom($xml);
+        $n = 0;
+        foreach ($dom !== null ? $dom->getElementsByTagName('*') : [] as $el) {
+            if (str_contains((string) $el->namespaceURI, 'wordprocessingml')
+                && (isset(self::REVISION_KINDS[$el->localName]) || $el->localName === 'moveFrom' || $el->localName === 'moveTo')) {
+                $n++;
+            }
+        }
+
+        return $n;
+    }
+
+    // ─── Tracked changes (preserveTrackedChanges) ───────────────────────
+
+    /** Whether revisions are read into the model here: asked for, and not in a header or footer. */
+    private function preserving(): bool
+    {
+        return $this->preserveTrackedChanges && !$this->inBand;
+    }
+
+    /**
+     * A revision entry from an element's attributes: a temporary id, the author
+     * cleaned to the alphabet the model allows ("Unknown" when nothing is left),
+     * and the date when it is a valid one. Anything changed is counted.
+     *
+     * @return array<string, mixed>
+     */
+    private function revisionEntry(DOMElement $el): array
+    {
+        $raw = (string) $this->wAttr($el, 'author');
+        $author = Revisions::cleanAuthor($raw);
+        if ($author !== $raw || $author === '') {
+            $this->revUnkept++;
+        }
+        $entry = ['id' => 't' . ++$this->revSeq, 'author' => $author !== '' ? $author : Revisions::UNKNOWN_AUTHOR];
+        $date = $this->wAttr($el, 'date');
+        if ($date !== null && Revisions::isDate($date)) {
+            $entry['date'] = $date;
+        } elseif ($date !== null) {
+            $this->revUnkept++;
+        }
+
+        return $entry;
+    }
+
+    /**
+     * The runs inside a w:ins, w:del, w:moveFrom or w:moveTo, each carrying it.
+     * A second insertion inside an insertion (or deletion inside a deletion)
+     * has no slot: the outer one is kept, the inner counted, its text read.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function parseRevision(DOMElement $node, ?string $link, array &$state): array
+    {
+        $kind = ['ins' => 'insert', 'del' => 'delete', 'moveFrom' => 'moveFrom', 'moveTo' => 'moveTo'][$node->localName];
+        $arrival = $kind === 'insert' || $kind === 'moveTo';
+        if (($arrival ? $this->revArrival : $this->revDeparture) !== null) {
+            $this->revUnkept++;
+
+            return $this->parseInlineContainer($node, $link, $state);
+        }
+        $entry = $this->revisionEntry($node);
+        if ($kind === 'moveFrom' || $kind === 'moveTo') {
+            $open = $this->openMoves[$kind === 'moveFrom' ? 'from' : 'to'];
+            if ($open !== []) {
+                $entry['name'] = (string) end($open); // the innermost range; none, and it stands alone
+            }
+        }
+        $slot = [$kind, $entry];
+        $arrival ? $this->revArrival = $slot : $this->revDeparture = $slot;
+        try {
+            return $this->parseInlineContainer($node, $link, $state);
+        } finally {
+            $arrival ? $this->revArrival = null : $this->revDeparture = null;
+        }
+    }
+
+    /** Whether a paragraph's mark is deleted (or moved away): `w:del` or `w:moveFrom` in its mark's rPr. */
+    private function markDeleted(?DOMElement $pPr): bool
+    {
+        $markPr = $this->firstChildByName($pPr, 'rPr');
+
+        return $this->firstChildByName($markPr, 'del') !== null || $this->firstChildByName($markPr, 'moveFrom') !== null;
+    }
+
+    /** A move range's start or end: which name a moveFrom or moveTo inside it belongs to. */
+    private function moveRange(DOMElement $node): void
+    {
+        if (!$this->preserving()) {
+            return;
+        }
+        $dir = str_starts_with($node->localName, 'moveFrom') ? 'from' : 'to';
+        $id = (string) $this->wAttr($node, 'id');
+        if (str_ends_with($node->localName, 'Start')) {
+            unset($this->openMoves[$dir][$id]); // a reused id moves to the top
+            $this->openMoves[$dir][$id] = (string) $this->wAttr($node, 'name');
+        } else {
+            unset($this->openMoves[$dir][$id]);
+        }
+    }
+
+    /**
+     * The revision a run read now carries: the elements it sits in and, unless
+     * it is a footnote mark, its w:r's formatting change.
+     *
+     * @return array<string, mixed>
+     */
+    private function currentRevision(bool $withFormat): array
+    {
+        $rev = [];
+        foreach ([$this->revArrival, $this->revDeparture] as $slot) {
+            if ($slot !== null) {
+                $rev[$slot[0]] = $slot[1];
+            }
+        }
+        if ($withFormat && $this->runFormat !== null) {
+            $rev['format'] = $this->runFormat;
+        }
+
+        return $rev;
+    }
+
+    /**
+     * A w:rPr's w:rPrChange as a format entry, `from` holding the old properties
+     * as model run keys; null without one.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function formatEntry(?DOMElement $rPr): ?array
+    {
+        $change = $this->firstChildByName($rPr, 'rPrChange');
+        if ($change === null) {
+            return null;
+        }
+        $old = $this->firstChildByName($change, 'rPr');
+        $props = $old !== null ? $this->parseRunProperties($old) : [];
+        $from = [];
+        foreach (Revisions::RUN_FORMAT_KEYS as $key) {
+            if (in_array($key, ['bold', 'italic', 'underline', 'strike', 'code', 'smallCaps'], true) ? !empty($props[$key]) : isset($props[$key])) {
+                $from[$key] = in_array($key, ['bold', 'italic', 'underline', 'strike', 'code', 'smallCaps'], true) ? true : $props[$key];
+            }
+        }
+
+        return $this->revisionEntry($change) + ['from' => $from];
+    }
+
+    /**
+     * A paragraph's own revision: its mark's insertion or deletion and its
+     * w:pPrChange. A moved mark has no slot and reads as an insertion or a
+     * deletion; a style or numbering change has none either and is counted.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function paragraphRevision(?DOMElement $pPr, ?string $style): ?array
+    {
+        if ($pPr === null || !$this->preserving()) {
+            return null;
+        }
+        $rev = [];
+        $markPr = $this->firstChildByName($pPr, 'rPr');
+        foreach (['ins' => 'insert', 'moveTo' => 'insert', 'del' => 'delete', 'moveFrom' => 'delete'] as $local => $kind) {
+            $el = $this->firstChildByName($markPr, $local);
+            if ($el === null) {
+                continue;
+            }
+            if (isset($rev[$kind]) || $local === 'moveTo' || $local === 'moveFrom') {
+                $this->revUnkept++;
+            }
+            $rev[$kind] ??= $this->revisionEntry($el);
+        }
+        $change = $this->firstChildByName($pPr, 'pPrChange');
+        if ($change !== null) {
+            $old = $this->firstChildByName($change, 'pPr');
+            $oldStyle = $this->firstChildByName($old, 'pStyle');
+            if (($oldStyle !== null ? $this->wAttr($oldStyle, 'val') : null) !== $style
+                || ($this->firstChildByName($old, 'numPr') === null) !== ($this->firstChildByName($pPr, 'numPr') === null)) {
+                $this->revUnkept++; // a style or list change: the model keeps the paragraph as it is now
+            }
+            $from = [];
+            $jc = $this->firstChildByName($old, 'jc');
+            $align = $jc !== null ? match ($this->wAttr($jc, 'val')) {
+                'center' => 'center',
+                'right', 'end' => 'right',
+                'both', 'distribute' => 'justify',
+                default => null,
+            } : null;
+            if ($align !== null) {
+                $from['align'] = $align;
+            }
+            $rev['format'] = $this->revisionEntry($change) + ['from' => $from + $this->parseParagraphProperties($old)];
+        }
+
+        return $rev === [] ? null : $rev;
+    }
+
+    /**
+     * Runs for a place the model holds as plain text (a code block, the title):
+     * every revision accepted there, and counted.
+     *
+     * @param  array{runs: list<array<string, mixed>>, revision?: ?array<string, mixed>}  $p
+     * @return list<array<string, mixed>>
+     */
+    private function flattenRevisions(array $p): array
+    {
+        if (!$this->preserveTrackedChanges) {
+            return $p['runs'];
+        }
+        [, $n] = Revisions::acceptBlock(['type' => 'paragraph', 'runs' => $p['runs']] + (isset($p['revision']) ? ['revision' => $p['revision']] : []));
+        $this->revUnkept += $n;
+
+        return Revisions::acceptRuns($p['runs']);
+    }
+
     /** `w:evenAndOddHeaders` in word/settings.xml: even pages have their own header and footer. */
     private bool $evenAndOddHeaders = false;
 
@@ -1338,12 +1635,17 @@ final class DocxReader
         }
         if (!array_key_exists($id, $this->footnoteCache)) {
             [$rels, $this->rels] = [$this->rels, $this->footnoteRels];
+            // A footnote is its own story: the revision its mark sits in, and the
+            // body's open move ranges, are not its own.
+            $saved = [$this->revArrival, $this->revDeparture, $this->runFormat, $this->openMoves];
+            [$this->revArrival, $this->revDeparture, $this->runFormat, $this->openMoves] = [null, null, null, ['from' => [], 'to' => []]];
             $this->inFootnote = true;
             try {
                 $this->footnoteCache[$id] = $this->parseBlockContainer($this->footnoteNodes[$id]);
             } finally {
                 $this->rels = $rels;
                 $this->inFootnote = false;
+                [$this->revArrival, $this->revDeparture, $this->runFormat, $this->openMoves] = $saved;
             }
         }
         $blocks = $this->footnoteCache[$id];
@@ -1565,6 +1867,11 @@ final class DocxReader
                     }
                 }
             }
+            if (in_array($node->localName, self::MOVE_RANGES, true)) {
+                $this->moveRange($node); // a range marker between paragraphs
+
+                continue;
+            }
             if ($node->localName === 'tbl') {
                 $flushAll();
                 $blocks[] = $this->parseTable($node, $insideQuote);
@@ -1602,7 +1909,11 @@ final class DocxReader
                 if ($pendingList !== [] && $ilvl === 0 && $pendingList[0]['ordered'] !== $ordered) {
                     $flushList();
                 }
-                $pendingList[] = ['ilvl' => $ilvl, 'ordered' => $ordered, 'runs' => $p['runs']];
+                $pendingList[] = ['ilvl' => $ilvl, 'ordered' => $ordered, 'runs' => $p['runs']]
+                    + ($p['revision'] !== null ? ['revision' => array_intersect_key($p['revision'], array_flip(Revisions::ITEM_KINDS))] : []);
+                if (isset($p['revision']['format'])) {
+                    $this->revUnkept++; // a list item has no paragraph formatting to change
+                }
 
                 continue;
             }
@@ -1614,7 +1925,7 @@ final class DocxReader
                     $pendingCodeLanguage = $p['codeLanguage'];
                 }
                 // Soft line breaks inside a single code paragraph are lines too.
-                $text = implode('', array_map(static fn (array $r): string => $r['text'], $p['runs']));
+                $text = implode('', array_map(static fn (array $r): string => $r['text'], $this->flattenRevisions($p)));
                 foreach (explode("\n", $text) as $line) {
                     $pendingCode[] = $line;
                 }
@@ -1629,6 +1940,9 @@ final class DocxReader
                 if ($p['align'] !== null) {
                     $para['align'] = $p['align'];
                 }
+                if ($p['revision'] !== null) {
+                    $para['revision'] = $p['revision'];
+                }
                 $pendingQuote[] = $para;
 
                 continue;
@@ -1637,7 +1951,7 @@ final class DocxReader
             $flushAll();
 
             if ($topLevel && $p['style'] === 'Title' && $this->title === null) {
-                $this->title = $this->plainText($p['runs']);
+                $this->title = $this->plainText($this->flattenRevisions($p));
 
                 continue;
             }
@@ -1645,6 +1959,12 @@ final class DocxReader
             // Images render as their own blocks; text in the same paragraph
             // (unusual, but legal) still becomes a paragraph first.
             $hasText = $this->plainText($p['runs']) !== '';
+
+            $kept = $p['revision'] !== null && ($hasText || ($p['runs'] !== [] && $p['images'] === []));
+            if ($p['revision'] !== null && !$kept) {
+                $this->revUnkept += count($p['revision']); // a paragraph the model does not keep: no text
+            }
+            $revision = $kept ? ['revision' => $p['revision']] : [];
 
             if ($p['pageBreak'] && !$hasText && $p['images'] === []) {
                 $blocks[] = ['type' => 'pageBreak'];
@@ -1664,13 +1984,13 @@ final class DocxReader
                 if ($p['align'] !== null) {
                     $heading['align'] = $p['align'];
                 }
-                $blocks[] = $heading + $p['props'];
+                $blocks[] = $heading + $p['props'] + $revision;
             } elseif ($hasText || ($p['runs'] !== [] && $p['images'] === [])) {
                 $para = ['type' => 'paragraph', 'runs' => $p['runs']];
                 if ($p['align'] !== null) {
                     $para['align'] = $p['align'];
                 }
-                $blocks[] = $para + $p['props'];
+                $blocks[] = $para + $p['props'] + $revision;
             } elseif (!$hasText && $p['images'] === [] && $p['bottomBorder']) {
                 $blocks[] = ['type' => 'hr'];
             }
@@ -1728,6 +2048,15 @@ final class DocxReader
                     break;
                 case 'customXml':
                     array_push($out, ...$this->blockChildren($node));
+
+                    break;
+                case 'moveFromRangeStart':
+                case 'moveFromRangeEnd':
+                case 'moveToRangeStart':
+                case 'moveToRangeEnd':
+                    if ($this->preserving()) {
+                        $out[] = $node; // a move range may open in one paragraph and close between two others
+                    }
 
                     break;
                 default:
@@ -2011,7 +2340,7 @@ final class DocxReader
         $lines = [];
         foreach ($content->childNodes as $node) {
             if ($node instanceof DOMElement && $node->localName === 'p') {
-                $lines[] = $this->plainText($this->parseParagraphNode($node)['runs']);
+                $lines[] = $this->plainText($this->flattenRevisions($this->parseParagraphNode($node)));
             }
         }
 
@@ -2102,6 +2431,12 @@ final class DocxReader
             $this->noteStructure();
         }
         $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
+        $revision = $this->paragraphRevision($pPr, $style); // before its runs: the order ids are read in
+        if ($revision === null && !$this->preserveTrackedChanges && !$this->inBand && $this->markDeleted($pPr)) {
+            // The default read accepts a deleted paragraph mark too: carried this far,
+            // then joined to the next paragraph once the document is read.
+            $revision = ['delete' => ['id' => 'accepted', 'author' => Revisions::UNKNOWN_AUTHOR]];
+        }
         $runs = $this->parseInlineContainer($p, null, $state);
         // A field still capturing at the paragraph's end: its text, as text.
         foreach ($state['fields'] as $open) {
@@ -2112,6 +2447,7 @@ final class DocxReader
         $runs = $this->resolveBookmarks($runs);
 
         return [
+            'revision' => $revision,
             'style' => $style,
             'align' => $align,
             'props' => $props,
@@ -2335,6 +2671,25 @@ final class DocxReader
                     $state['seenText'] = true;
 
                     break;
+                case 'ins':
+                case 'moveTo':
+                case 'del':
+                case 'moveFrom':
+                    if ($this->preserving()) {
+                        array_push($runs, ...$this->parseRevision($node, $link, $state));
+                    } elseif ($node->localName === 'ins' || $node->localName === 'moveTo') {
+                        array_push($runs, ...$this->parseInlineContainer($node, $link, $state));
+                    }
+                    // Accepted: a deletion's text is dropped, a move's source too (its text is at its destination).
+
+                    break;
+                case 'moveFromRangeStart':
+                case 'moveFromRangeEnd':
+                case 'moveToRangeStart':
+                case 'moveToRangeEnd':
+                    $this->moveRange($node);
+
+                    break;
                 case 'bookmarkStart':
                 case 'bookmarkEnd':
                     // Body bookmarks only, as markers {@see resolveBookmarks()} turns
@@ -2357,7 +2712,6 @@ final class DocxReader
                     break;
                 case 'pPr':
                 case 'proofErr':
-                case 'del':
                 case 'commentRangeStart':
                 case 'commentRangeEnd':
                     break;
@@ -2388,6 +2742,8 @@ final class DocxReader
         if ($rPr !== null) {
             $props = $this->parseRunProperties($rPr);
         }
+        $this->runFormat = $this->preserving() ? $this->formatEntry($rPr) : null;
+        $deleted = $this->revDeparture !== null;
 
         $out = [];
         $text = '';
@@ -2418,6 +2774,11 @@ final class DocxReader
                 continue;
             }
             switch ($node->localName) {
+                case 'delText':
+                    if (!$deleted) {
+                        break; // outside a deletion, not text
+                    }
+                    // A deletion's text: read as w:t is.
                 case 't':
                     $capture = $this->bodyFieldCapture($state);
                     if ($capture === false) {
@@ -2457,7 +2818,9 @@ final class DocxReader
                             $text = '';
                         }
                         $ids = $this->inBand || $this->inFootnote ? null : $this->comments?->idsFor($r);
-                        $out[] = $ids !== null ? $note + ['comments' => $ids] : $note;
+                        $marked = $ids !== null ? $note + ['comments' => $ids] : $note;
+                        $rev = $this->currentRevision(false);
+                        $out[] = $rev !== [] ? $marked + ['revision' => $rev] : $marked;
                     }
 
                     break;
@@ -2474,6 +2837,11 @@ final class DocxReader
 
                     break;
                 case 'br':
+                    if ($deleted && $this->wAttr($node, 'type') === 'page') {
+                        $this->revUnkept++; // a deleted page break: not made live
+
+                        break;
+                    }
                     if ($this->wAttr($node, 'type') === 'page') {
                         $state['pageBreak'] = true;
                     } else {
@@ -2491,6 +2859,11 @@ final class DocxReader
 
                     break;
                 case 'drawing':
+                    if ($deleted) {
+                        $this->revUnkept++; // a deleted picture: not made live
+
+                        break;
+                    }
                     $image = $this->parseDrawing($node);
                     if ($image !== null && $this->inBand && !$state['seenText'] && $text === '') {
                         $state['leading'][] = $image;
@@ -2543,6 +2916,12 @@ final class DocxReader
         $ids = $this->inBand || $this->inFootnote ? null : $this->comments?->idsFor($this->commentRun);
         if ($ids !== null) {
             $run['comments'] = $ids;
+        }
+        if ($this->preserving()) {
+            $rev = $this->currentRevision(true);
+            if ($rev !== []) {
+                $run['revision'] = $rev;
+            }
         }
 
         return $run;
@@ -3229,7 +3608,7 @@ final class DocxReader
                     $parent = &$stack[count($stack) - 1];
                 }
             }
-            $parent[] = ['runs' => $entry['runs']];
+            $parent[] = ['runs' => $entry['runs']] + (isset($entry['revision']) && $entry['revision'] !== [] ? ['revision' => $entry['revision']] : []);
             unset($parent);
         }
 

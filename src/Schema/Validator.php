@@ -112,6 +112,9 @@ final class Validator
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
         $this->validateBookmarks($doc, $errors);
 
+        // Tracked changes: every revision a run or a paragraph carries, across the document.
+        array_push($errors, ...Revisions::validate($doc));
+
         return $errors;
     }
 

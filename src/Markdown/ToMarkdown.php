@@ -6,6 +6,7 @@ namespace LastWord\Markdown;
 
 use LastWord\Exchange\Report;
 use LastWord\Helpers\Chart;
+use LastWord\Schema\Revisions;
 
 /**
  * Doc model → GFM markdown. The Editor bridge's outbound half — hand-rolled
@@ -91,8 +92,14 @@ final class ToMarkdown
         }
 
         $blocks = is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [];
+        // GFM has no tracked changes: accepted, so deleted text is never live text. A
+        // block whose paragraph mark was deleted is joined into the next.
+        [$acceptedBlocks, $acceptedCounts] = Revisions::acceptBlocks($blocks);
         foreach ($indexes ?? array_keys($blocks) as $i) {
-            $block = $blocks[$i] ?? null;
+            $block = $acceptedBlocks[$i] ?? null;
+            if (($acceptedCounts[$i] ?? 0) > 0) {
+                $this->report?->add('tracked-change', '/blocks/' . $i, $acceptedCounts[$i]);
+            }
             if (!is_array($block)) {
                 continue;
             }
