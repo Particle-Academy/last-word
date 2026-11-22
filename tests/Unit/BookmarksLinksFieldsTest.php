@@ -540,3 +540,189 @@ describe('the schema and describe()', function () {
             ->and($summary)->toContain('Bookmarks: 2 (a, b); internal links: 1; fields: 1');
     });
 });
+
+/**
+ * Fancy's review of last-word#7. Unbalanced or misplaced field markup in a file
+ * degrades to what the reader did before this feature -- the text kept, a note
+ * in `unrepresented` -- and never truncates; a read never yields an invalid
+ * model; bookmark names match ignoring case everywhere; hidden bookmarks do not
+ * disturb user ones; and the bridges report what they cannot carry.
+ */
+
+const BLR_BEGIN = '<w:r><w:fldChar w:fldCharType="begin"/></w:r>';
+const BLR_SEP = '<w:r><w:fldChar w:fldCharType="separate"/></w:r>';
+const BLR_END = '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+
+function blrInstr(string $instr): string
+{
+    return '<w:r><w:instrText xml:space="preserve"> ' . $instr . ' </w:instrText></w:r>';
+}
+
+function blrText(string $text): string
+{
+    return '<w:r><w:t xml:space="preserve">' . $text . '</w:t></w:r>';
+}
+
+/** Each block's plain text, a toc as "[toc]". */
+function blrTexts(array $blocks): array
+{
+    return array_map(static fn (array $b): string => ($b['type'] ?? null) === 'toc'
+        ? '[toc]'
+        : implode('', array_map(static fn (array $r): string => $r['text'], $b['runs'] ?? [])), $blocks);
+}
+
+/** @return list<string> the kinds in a read's unrepresented */
+function blrKinds(array $read): array
+{
+    return array_column($read['unrepresented'] ?? [], 'kind');
+}
+
+/** @return array<string, list<string>> kind => where, from an exchange report */
+function blrReport(array $report): array
+{
+    $out = [];
+    foreach (['dropped', 'approximated'] as $list) {
+        foreach ($report[$list] ?? [] as $entry) {
+            $out[$entry['kind']] = $entry['where'];
+        }
+    }
+    ksort($out);
+
+    return $out;
+}
+
+describe('unbalanced field markup degrades, never truncates', function () {
+    it('keeps the rest of the body when a TOC field never ends', function () {
+        $read = Agent::read(blfDocxWithBody(
+            '<w:p>' . BLR_BEGIN . blrInstr('TOC \o "1-3" \h') . BLR_SEP . blrText('Summary') . '</w:p>'
+            . '<w:p>' . blrText('Body one') . '</w:p>'
+            . '<w:p>' . blrText('Body two') . '</w:p>'
+        ));
+
+        expect(blrTexts($read['blocks']))->toBe(['Summary', 'Body one', 'Body two'])
+            ->and(blrKinds($read))->toContain('structure-not-recovered')
+            ->and(Agent::validate($read))->toBe([]);
+    });
+
+    it('keeps text before and after a TOC field in the same paragraph', function () {
+        $read = Agent::read(blfDocxWithBody(
+            '<w:p>' . blrText('Keep me') . BLR_BEGIN . blrInstr('TOC \o "1-3"') . BLR_SEP . BLR_END . blrText('and me') . '</w:p>'
+            . '<w:p>' . blrText('Body') . '</w:p>'
+        ));
+
+        expect(blrTexts($read['blocks']))->toBe(['Keep me', '[toc]', 'and me', 'Body']);
+    });
+
+    it('keeps text after the end of a TOC field that spans paragraphs', function () {
+        $read = Agent::read(blfDocxWithBody(
+            '<w:p>' . BLR_BEGIN . blrInstr('TOC \o "1-3"') . BLR_SEP . blrText('Entry') . '</w:p>'
+            . '<w:p>' . blrText('Entry two') . BLR_END . blrText('Tail') . '</w:p>'
+        ));
+
+        expect(blrTexts($read['blocks']))->toBe(['[toc]', 'Tail']);
+    });
+
+    it('reads a paragraph whose field never ends as the text it holds', function () {
+        $read = Agent::read(blfDocxWithBody('<w:p>' . blrText('Before ') . BLR_BEGIN . blrInstr('PAGE') . blrText('after') . '</w:p>'));
+
+        expect($read['blocks'][0]['runs'])->toBe([['text' => 'Before after']])
+            ->and(blrKinds($read))->toContain('structure-not-recovered');
+    });
+
+    it('reads a paragraph with a field end and no begin as the text it holds', function () {
+        $read = Agent::read(blfDocxWithBody('<w:p>' . blrText('Before ') . BLR_END . blrText('after') . '</w:p>'));
+
+        expect($read['blocks'][0]['runs'])->toBe([['text' => 'Before after']])
+            ->and(blrKinds($read))->toContain('structure-not-recovered');
+    });
+});
+
+describe('a read never yields an invalid model', function () {
+    it('reads a TOC inside a table cell as its text', function () {
+        $read = Agent::read(blfDocxWithBody(
+            '<w:tbl><w:tr><w:tc><w:p>' . BLR_BEGIN . blrInstr('TOC \o "1-3"') . BLR_SEP . blrText('Entry') . BLR_END . '</w:p></w:tc></w:tr></w:tbl>'
+        ));
+        $cell = $read['blocks'][0]['rows'][0]['cells'][0]['blocks'];
+
+        expect(blrTexts($cell))->toBe(['Entry'])
+            ->and(blrKinds($read))->toContain('structure-not-recovered')
+            ->and(Agent::validate($read))->toBe([]);
+    });
+
+    it('reads TOCs past the cap as their text', function () {
+        $body = '';
+        for ($i = 0; $i <= Schema::MAX_TOCS; $i++) {
+            $body .= '<w:p>' . BLR_BEGIN . blrInstr('TOC \o "1-3"') . BLR_SEP . blrText("Entry {$i}") . BLR_END . '</w:p>';
+        }
+        $read = Agent::read(blfDocxWithBody($body));
+
+        expect(blrTexts($read['blocks']))->toBe([...array_fill(0, Schema::MAX_TOCS, '[toc]'), 'Entry ' . Schema::MAX_TOCS])
+            ->and(blrKinds($read))->toContain('structure-not-recovered')
+            ->and(Agent::validate($read))->toBe([]);
+    });
+});
+
+describe('bookmark names match ignoring case, everywhere', function () {
+    it('reads a link to a bookmark spelt in another case, normalised to the bookmark', function () {
+        $read = Agent::read(blfDocxWithBody(
+            '<w:p><w:bookmarkStart w:id="0" w:name="Intro"/>' . blrText('Intro') . '<w:bookmarkEnd w:id="0"/></w:p>'
+            . '<w:p><w:hyperlink w:anchor="intro">' . blrText('go') . '</w:hyperlink></w:p>'
+        ));
+
+        expect($read['blocks'][1]['runs'])->toBe([['text' => 'go', 'link' => '#Intro']])
+            ->and($read)->not->toHaveKey('unrepresented');
+    });
+
+    it('validates, repairs and writes a link in another case against the bookmark', function () {
+        $doc = blfDoc([
+            ['type' => 'paragraph', 'runs' => [['text' => 'Intro', 'bookmark' => 'Intro']]],
+            ['type' => 'paragraph', 'runs' => [['text' => 'go', 'link' => '#INTRO'], ['text' => 'x', 'link' => '#missing']]],
+        ]);
+        $repaired = Agent::validateAndRepair($doc);
+
+        expect(Agent::validate(blfDoc([$doc['blocks'][0], ['type' => 'paragraph', 'runs' => [['text' => 'go', 'link' => '#intro']]]])))->toBe([])
+            ->and(array_column(Agent::validate($doc), 'path'))->toBe(['blocks[1].runs[1].link'])
+            ->and($repaired['schema']['blocks'][1]['runs'])->toBe([['text' => 'go', 'link' => '#INTRO'], ['text' => 'x']]);
+
+        $fixed = $repaired['schema'];
+        expect(blfParts($fixed)['word/document.xml'])->toContain('<w:hyperlink w:anchor="Intro" w:history="1">');
+    });
+});
+
+describe('hidden bookmarks do not disturb user bookmarks', function () {
+    it('keeps a user bookmark on its run when Word\'s _GoBack sits inside it', function () {
+        $read = Agent::read(blfDocxWithBody(
+            '<w:p><w:bookmarkStart w:id="0" w:name="keep"/><w:bookmarkStart w:id="1" w:name="_GoBack"/><w:bookmarkEnd w:id="1"/>'
+            . blrText('Kept') . '<w:bookmarkEnd w:id="0"/></w:p>'
+        ));
+
+        expect($read['blocks'][0]['runs'])->toBe([['text' => 'Kept', 'bookmark' => 'keep']]);
+    });
+});
+
+describe('the bridges report what they cannot carry', function () {
+    $doc = blfDoc([['type' => 'paragraph', 'runs' => [
+        ['text' => 'Results', 'bookmark' => 'results'],
+        ['text' => '3', 'field' => '{page}'],
+    ]]]);
+
+    it('reports a bookmark and a field in toPortable', function () use ($doc) {
+        $r = Agent::toPortable($doc);
+
+        expect($r['ok'])->toBeTrue()
+            ->and(blrReport($r['content']['report']))->toBe([
+                'formula-as-value' => ['/blocks/0/runs/1'],
+                'link' => ['/blocks/0/runs/0'],
+            ]);
+    });
+
+    it('reports a bookmark and a field in toMarkdownWithReport', function () use ($doc) {
+        $r = Agent::toMarkdownWithReport($doc);
+
+        expect($r['markdown'])->toBe("Results3\n")
+            ->and(blrReport($r['report']))->toBe([
+                'formula-as-value' => ['/blocks/0/runs/1'],
+                'link' => ['/blocks/0/runs/0'],
+            ]);
+    });
+});
