@@ -292,7 +292,7 @@ final class Comments
             }
             foreach ($names as $name) {
                 if (!isset($index[$name])) {
-                    $errors[] = self::error($at, "no comment has the id \"{$name}\"", 'comment_unknown');
+                    $errors[] = self::error($at, self::isId($name) ? "no comment has the id \"{$name}\"" : 'an anchor names something that is not a comment id', 'comment_unknown'); // never echo an arbitrary string back
 
                     continue;
                 }
@@ -383,7 +383,7 @@ final class Comments
                     $ok = false;
                 }
                 if (!$ok) {
-                    $notes[] = ['path' => "{$path}.comments", 'message' => 'dropped ' . (is_string($name) ? "\"{$name}\"" : 'a non-id') . ' from the run: no such comment, a reply, a repeat, past a broken range or over the cap'];
+                    $notes[] = ['path' => "{$path}.comments", 'message' => 'dropped ' . (self::isId($name) ?"\"{$name}\"" : 'a non-id') . ' from the run: no such comment, a reply, a repeat, past a broken range or over the cap'];
 
                     continue;
                 }

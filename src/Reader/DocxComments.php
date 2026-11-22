@@ -322,15 +322,29 @@ final class DocxComments
                 $parent[$pos] = $byParaId[strtoupper($node->getAttributeNS(self::NS_W15, 'paraIdParent'))] ?? -1;
             }
         }
-        foreach ($parent as $pos => $p) {
-            $seen = [$pos => true];
-            while ($p >= 0 && isset($parent[$p]) && !isset($seen[$p])) {
+        // Each chain is walked once: a long chain of replies is linear, not quadratic.
+        $root = []; // pos => the thread's first comment, or -1 for no thread
+        foreach (array_keys($parent) as $pos) {
+            $chain = [];
+            $p = $pos;
+            while (isset($parent[$p]) && !isset($root[$p]) && !isset($chain[$p])) {
                 $this->threadSteps++;
-                $seen[$p] = true;
+                $chain[$p] = true;
                 $p = $parent[$p];
             }
-            if ($p >= 0 && !isset($parent[$p]) && $p !== $pos) {
-                $this->rootOf[$pos] = $p;
+            $found = match (true) {
+                isset($root[$p]) => $root[$p], // joins a chain already resolved
+                isset($chain[$p]) => -1,       // a loop
+                $p < 0 => -1,                  // a parent no comment ends with
+                default => $p,                 // a comment with no parent: the thread's first
+            };
+            foreach (array_keys($chain) as $c) {
+                $root[$c] = $found;
+            }
+        }
+        foreach ($root as $pos => $r) {
+            if ($r >= 0 && $r !== $pos) {
+                $this->rootOf[$pos] = $r;
             }
         }
     }
