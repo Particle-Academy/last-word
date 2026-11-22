@@ -346,14 +346,23 @@ a break's `page`; a `columnBreak` block moves on to the next column early:
   cannot hold where it is, whose paragraph is kept.
 - **Tables, charts and images** in a section with columns size against the
   narrowest column.
-- **Not everything draws them yet.** `Agent::layout()` measures one column and
-  starts a page at every break, and says so in `approximate` (`columns`,
-  `continuous section break`). last-word-ui, fine-print and the Node and Python
-  packages do not have columns, `start` or `columnBreak`: fine-print refuses a
-  `columnBreak` block as an unknown type and ignores `columns` and `start`, so it
-  sets one column and a new page at every break; last-word-ui draws a
-  `columnBreak` as nothing and a continuous break as a new page. The markdown
-  bridge and `toPortable()` drop them and report `layout-not-preserved`. **.docx only, PHP only.**
+- **Which renderers draw columns today.** Only the .docx does. Columns, a
+  continuous `start` and `columnBreak` are a **known parity follow-up** for every
+  other renderer: the document is laid out wrongly there (one column, extra
+  pages), but no text is lost or leaked.
+
+  | Renderer | Columns today |
+  |---|---|
+  | last-word (this package, .docx) | writes and reads `columns`, `start` and `columnBreak` |
+  | fine-print (PDF) | refuses a `columnBreak` block (an unknown type); ignores `columns` and `start`, so one column and a new page at every break |
+  | last-word-ui (viewer) | draws a `columnBreak` as nothing and a continuous break as a new page; one column |
+  | Node (`last-word-js`) and Python (`fancy-last-word`) ports | not supported yet |
+
+  Handing a document with columns to fine-print, remove its `columnBreak`
+  blocks first. `Agent::layout()` measures one column and starts a page at every
+  break, as the viewer does, and says so in `approximate` (`columns`,
+  `continuous section break`). The markdown bridge and `toPortable()` drop them
+  and report `layout-not-preserved`. **.docx only, PHP only.**
 
 ## Agent guide
 
