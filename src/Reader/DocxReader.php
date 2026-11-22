@@ -148,6 +148,17 @@ final class DocxReader
 
     private int $sectionCursor = 0;
 
+    /**
+     * The key a run carries when it is a column break: its text is the "\n" the
+     * break reads as wherever it cannot be a block, and the paragraph splits there
+     * where it can. Only this reader makes runs, so no document can forge it, and
+     * it never leaves {@see parseParagraphNode()}.
+     */
+    private const COLUMN_MARK = "\0columnBreak";
+
+    /** How many columns the section being read has, as the model holds it: where a column break can be a block. */
+    private int $sectionColumns = 1;
+
     /** The band part a section's reference types name, inherited from the section before: kind => type => part. */
     private array $sectionTargets = [];
 
@@ -271,6 +282,7 @@ final class DocxReader
         $this->footnoteCache = [];
         $this->sectionPlan = [];
         $this->sectionCursor = 0;
+        $this->sectionColumns = 1;
         $this->sectionTargets = [];
         $this->bandCache = [];
         $this->revArrival = null;
@@ -298,8 +310,9 @@ final class DocxReader
         // Top-level `page` is the first section, and every later one a break holding
         // what differs from the page before it.
         [$sections, $dropped] = $body !== null ? $this->sections($body) : [[null], 0];
-        $this->contentWidth = $this->contentWidthOf($sections[0]);
         $page = $this->parsePage($sections[0], $dom->documentElement);
+        $this->contentWidth = Schema::columnTextTwips($page['columns'] ?? null, $this->contentWidthOf($sections[0]));
+        $this->sectionColumns = Schema::columnCount($page['columns'] ?? null);
         $this->planSections($sections, $page ?? []);
         $dropped += $this->droppedByFirstSection($sections[0]);
         $blocks = $body !== null ? $this->parseBlockContainer($body, true) : [];
@@ -438,13 +451,15 @@ final class DocxReader
      * |---|---|
      * | nextPage                                       | break, `page` holding what differs      |
      * | oddPage, evenPage                              | the same, plus a report                 |
-     * | continuous, same size and orientation          | no break, plus a report                 |
+     * | continuous, same size and orientation          | break `{start: "continuous"}` with any  |
+     * |                                                | columns change; anything else reported  |
      * | continuous, other size or orientation          | break (Word has to start a page)        |
-     * | w:cols above 1, a page-number restart          | dropped, plus a report                  |
+     * | w:cols the model cannot hold as written        | the nearest it can, plus a report       |
+     * | a page-number restart                          | dropped, plus a report                  |
      * | a paper size the model has no name for         | dropped, plus a report                  |
      *
-     * A continuous section that does not break leaves the model's page as it was, so
-     * the next section is compared with the page it actually follows.
+     * A continuous section changes only the model's columns, so the next section is
+     * compared with the page the model actually has.
      *
      * @param  list<?DOMElement>  $sections
      * @param  array<string, mixed>  $page  the first section's page, as read
@@ -465,14 +480,19 @@ final class DocxReader
             $reshaped = isset($change['orientation']) || isset($change['size']);
             $typeEl = $sectPr !== null ? $this->firstChildByName($sectPr, 'type') : null;
             $type = $typeEl !== null ? $this->wAttr($typeEl, 'val') : null;
-            $breaks = $type !== 'continuous' || $reshaped;
 
-            $dropped = 0;
-            if (!$breaks) {
-                $dropped++;
+            $dropped = $this->parseColumns($sectPr)['dropped'];
+            if ($type === 'continuous' && !$reshaped) {
+                // On the same page: the columns change, and nothing else can.
+                $break = ['start' => 'continuous'] + array_intersect_key($change, ['columns' => true]);
+                $dropped += array_diff_key($change, ['columns' => true]) !== [] ? 1 : 0;
+                unset($current['columns']);
+                if (isset($next['columns'])) {
+                    $current['columns'] = $next['columns'];
+                }
             } else {
+                $break = $change;
                 $dropped += $type === null || in_array($type, ['nextPage', 'continuous'], true) ? 0 : 1;
-                $dropped += $this->columns($sectPr) > 1 ? 1 : 0;
                 $next = $knownPaper ? $next : self::withSize($next, $current);
                 $current = $next;
             }
@@ -480,8 +500,9 @@ final class DocxReader
             $dropped += $knownPaper ? 0 : 1;
 
             $this->sectionPlan[] = [
-                'break' => $breaks ? $change : null,
-                'width' => $this->contentWidthOf($sectPr),
+                'break' => $break,
+                'width' => Schema::columnTextTwips($current['columns'] ?? null, $this->contentWidthOf($sectPr)),
+                'columns' => Schema::columnCount($current['columns'] ?? null),
                 'dropped' => $dropped,
                 'notes' => $notes,
             ];
@@ -536,6 +557,10 @@ final class DocxReader
         if ($border !== $before) {
             $out['border'] = $border ?? ['style' => 'none'];
         }
+        $columns = $to['columns'] ?? ['count' => 1];
+        if ($columns !== ($from['columns'] ?? ['count' => 1])) {
+            $out['columns'] = $columns;
+        }
 
         return $out;
     }
@@ -566,18 +591,136 @@ final class DocxReader
     /** What the first section asks for that the model cannot hold. */
     private function droppedByFirstSection(?DOMElement $sectPr): int
     {
-        return ($this->columns($sectPr) > 1 ? 1 : 0)
+        return $this->parseColumns($sectPr)['dropped']
             + ($this->restarts($sectPr, false) ? 1 : 0)
             + ($this->paperKnown($sectPr) ? 0 : 1);
     }
 
-    /** `w:cols w:num`, 1 when absent. */
-    private function columns(?DOMElement $sectPr): int
+    /**
+     * A section's `w:cols` (ISO/IEC 29500-1 §17.6.4) as the model's `columns`, or
+     * null for one column, and how many settings had to change to get there (0 or 1).
+     *
+     * Unequal columns are the `w:col` children (§17.6.3) unless `w:equalWidth` is
+     * on; Word writes them with no `w:num`. Equal ones are `w:num` and `w:space`
+     * (720 twips when absent). What the model cannot hold degrades, never by
+     * dropping text: a count past {@see Schema::MAX_COLUMNS} is clamped; unusable
+     * widths make the columns equal; a bad gap is the default; and columns that do
+     * not fit the page become the nearest that do ({@see Schema::fitColumns()}),
+     * as the repairer makes them. At most MAX_COLUMNS + 1 `w:col` are looked at:
+     * the children are attacker-supplied.
+     *
+     * @return array{columns: ?array<string, mixed>, dropped: int}
+     */
+    private function parseColumns(?DOMElement $sectPr): array
     {
         $cols = $sectPr !== null ? $this->firstChildByName($sectPr, 'cols') : null;
-        $num = $cols !== null ? $this->wAttr($cols, 'num') : null;
+        if ($cols === null) {
+            return ['columns' => null, 'dropped' => 0];
+        }
+        $twips = static fn (?string $v): ?int => $v !== null && preg_match('/^\s*-?\d{1,9}\s*$/', $v) === 1 ? (int) $v : null;
+        $degraded = false;
 
-        return is_numeric($num) ? (int) $num : 1;
+        $children = [];
+        $tooMany = false;
+        foreach ($cols->childNodes as $node) {
+            if ($node instanceof DOMElement && $node->localName === 'col') {
+                if (count($children) === Schema::MAX_COLUMNS) {
+                    $tooMany = true;
+
+                    break;
+                }
+                $children[] = $node;
+            }
+        }
+        $equalAttr = $this->wAttr($cols, 'equalWidth');
+        $equal = $children === [] || ($equalAttr !== null && $this->toggleOn($equalAttr));
+
+        $numAttr = $this->wAttr($cols, 'num');
+        $num = $numAttr === null ? null : (preg_match('/^\s*-?\d+\s*$/', $numAttr) === 1 ? $numAttr : false);
+        if ($num === false) {
+            $degraded = true;
+            $count = 1;
+        } elseif ($num === null) {
+            $count = $equal ? 1 : count($children);
+        } else {
+            $count = strlen(ltrim(trim($num), '-0')) > 3 ? (str_starts_with(trim($num), '-') ? 0 : PHP_INT_MAX) : (int) $num;
+            if ($count < 1) {
+                $degraded = true;
+                $count = 1;
+            }
+        }
+        if ($tooMany && !$equal) {
+            $degraded = true;
+            $equal = true;
+            if ($num === null) {
+                $count = 1;
+            }
+        }
+        if ($count > Schema::MAX_COLUMNS) {
+            $degraded = true;
+            $count = Schema::MAX_COLUMNS;
+        }
+        $separator = ($sep = $this->wAttr($cols, 'sep')) !== null && $this->toggleOn($sep);
+
+        $columns = ['count' => $count];
+        if (!$equal && count($children) !== $count) {
+            $degraded = true; // fewer w:col than w:num: equal columns at w:num
+            $equal = true;
+        }
+        if (!$equal && $count > 1) {
+            $widths = [];
+            $gaps = [];
+            foreach ($children as $i => $col) {
+                $w = $twips($this->wAttr($col, 'w'));
+                $gap = $this->wAttr($col, 'space');
+                $g = $gap === null ? 0 : $twips($gap);
+                if ($w === null || $w < 1 || ($i < $count - 1 && ($g === null || $g < 0))) {
+                    $widths = null;
+
+                    break;
+                }
+                $widths[] = Schema::tidyPoints($w / 20);
+                if ($i < $count - 1) {
+                    $gaps[] = Schema::tidyPoints($g / 20);
+                }
+            }
+            if ($widths === null || min($widths) < Schema::MIN_COLUMN_WIDTH) {
+                $degraded = true;
+                $equal = true;
+            } else {
+                $columns['widths'] = $widths;
+                if (count(array_unique(array_map('strval', $gaps))) === 1) {
+                    if ((float) $gaps[0] !== Schema::COLUMN_SPACE_DEFAULT) {
+                        $columns['space'] = $gaps[0];
+                    }
+                } else {
+                    $columns['spaces'] = $gaps;
+                }
+            }
+        }
+        if ($equal && $count > 1) {
+            $spaceAttr = $this->wAttr($cols, 'space');
+            $space = $spaceAttr === null ? 720 : $twips($spaceAttr);
+            if ($space === null || $space < 0) {
+                $degraded = true;
+                $space = 720;
+            }
+            if ($space !== 720) {
+                $columns['space'] = Schema::tidyPoints($space / 20);
+            }
+        }
+        if ($count > 1 && $separator) {
+            $columns['separator'] = true;
+        }
+        if ($count > 1) {
+            $fitted = Schema::fitColumns($columns, $this->contentWidthOf($sectPr));
+            if ($fitted !== $columns) {
+                $degraded = true;
+                $columns = $fitted;
+            }
+        }
+
+        return ['columns' => Schema::columnCount($columns) > 1 ? $columns : null, 'dropped' => $degraded ? 1 : 0];
     }
 
     /**
@@ -626,6 +769,7 @@ final class DocxReader
             return;
         }
         $this->contentWidth = $plan['width'];
+        $this->sectionColumns = $plan['columns'];
         $at = '/blocks/' . count($blocks);
         foreach ($plan['notes'] as $note) {
             $this->unrepresented[] = ['where' => $at . $note['where'], 'kind' => $note['kind'], 'count' => $note['count']];
@@ -700,14 +844,18 @@ final class DocxReader
             $out[$key] = $band;
         }
 
-        // Decoration last, background before border, so a page reads back in
-        // the order the schema lists it.
+        // Decoration last, background before border, then columns, so a page reads
+        // back in the order the schema lists it.
         foreach (['background', 'border'] as $key) {
             if (isset($out[$key])) {
                 $value = $out[$key];
                 unset($out[$key]);
                 $out[$key] = $value;
             }
+        }
+        $columns = $this->parseColumns($sectPr)['columns'];
+        if ($columns !== null) {
+            $out['columns'] = $columns;
         }
 
         return $out === [] ? null : $out;
@@ -1891,6 +2039,22 @@ final class DocxReader
             }
 
             $p = $this->parseParagraphNode($node);
+            // A column break is a block only where the model can hold one: a body
+            // paragraph or heading at the top level, in a section it reads with
+            // columns. Anywhere else (a list item, code, a quote, a table cell, a
+            // header, a footnote, one column) it stays the newline it reads as, so
+            // the words either side stay apart, and each break is reported.
+            $split = false;
+            if ($p['columnBreaks'] > 0) {
+                $split = $topLevel && !$this->inBand && !$this->inFootnote && $this->sectionColumns > 1
+                    && $p['numPr'] === null && $p['style'] !== 'CodeBlock' && !($p['style'] === 'Quote' && !$insideQuote)
+                    && !($p['style'] === 'Title' && $this->title === null);
+                if (!$split) {
+                    for ($n = 0; $n < $p['columnBreaks']; $n++) {
+                        $this->noteColumnBreak();
+                    }
+                }
+            }
 
             // Header/footer only (`leading` is empty elsewhere): a picture before
             // the paragraph's text -- a logo beside an address -- goes first.
@@ -1966,17 +2130,53 @@ final class DocxReader
             }
             $revision = $kept ? ['revision' => $p['revision']] : [];
 
-            if ($p['pageBreak'] && !$hasText && $p['images'] === []) {
-                $blocks[] = ['type' => 'pageBreak'];
-
-                continue;
-            }
-
             $level = null;
             if ($p['style'] !== null && preg_match('/^Heading([1-9])$/', $p['style'], $m) === 1) {
                 $level = min((int) $m[1], 6);
             } elseif ($p['outlineLvl'] !== null) {
                 $level = min($p['outlineLvl'] + 1, 6);
+            }
+
+            if ($split) {
+                // The paragraph between breaks, each break a block. The paragraph
+                // mark ends the last piece, so its revision goes there; its pictures
+                // and any page break follow, as for a paragraph that does not split.
+                $last = count($p['segments']) - 1;
+                $markKept = false;
+                foreach ($p['segments'] as $k => $seg) {
+                    if ($k > 0) {
+                        $blocks[] = ['type' => 'columnBreak'];
+                    }
+                    if ($seg === []) {
+                        continue;
+                    }
+                    $mark = $k === $last && $p['revision'] !== null ? ['revision' => $p['revision']] : [];
+                    $markKept = $markKept || $mark !== [];
+                    $piece = $level !== null && $this->plainText($seg) !== ''
+                        ? ['type' => 'heading', 'level' => $level, 'runs' => $seg]
+                        : ['type' => 'paragraph', 'runs' => $seg];
+                    if ($p['align'] !== null) {
+                        $piece['align'] = $p['align'];
+                    }
+                    $blocks[] = $piece + $p['props'] + $mark;
+                }
+                if ($p['revision'] !== null && !$markKept) {
+                    $this->revUnkept += count($p['revision']);
+                }
+                foreach ($p['images'] as $image) {
+                    $blocks[] = $image;
+                }
+                if ($p['pageBreak']) {
+                    $blocks[] = ['type' => 'pageBreak'];
+                }
+
+                continue;
+            }
+
+            if ($p['pageBreak'] && !$hasText && $p['images'] === []) {
+                $blocks[] = ['type' => 'pageBreak'];
+
+                continue;
             }
 
             if ($level !== null && $hasText) {
@@ -2202,6 +2402,19 @@ final class DocxReader
             }
         }
         $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'structure-not-recovered', 'count' => 1];
+    }
+
+    /** One more column break the model cannot hold where it is: its paragraph is kept, the break counted. */
+    private function noteColumnBreak(): void
+    {
+        foreach ($this->unrepresented as $k => $note) {
+            if ($note['where'] === '/blocks' && $note['kind'] === 'layout-not-preserved') {
+                $this->unrepresented[$k]['count']++;
+
+                return;
+            }
+        }
+        $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'layout-not-preserved', 'count' => 1];
     }
 
     private static function isTocInstruction(string $instr): bool
@@ -2446,6 +2659,22 @@ final class DocxReader
         }
         $runs = $this->resolveBookmarks($runs);
 
+        // The runs between column breaks, for a paragraph that splits there; and
+        // the runs with each break a newline, for one that cannot.
+        $joined = [];
+        $segments = [[]];
+        foreach ($runs as $run) {
+            if (isset($run[self::COLUMN_MARK])) {
+                unset($run[self::COLUMN_MARK]);
+                $joined[] = $run;
+                $segments[] = [];
+
+                continue;
+            }
+            $joined[] = $run;
+            $segments[count($segments) - 1][] = $run;
+        }
+
         return [
             'revision' => $revision,
             'style' => $style,
@@ -2455,8 +2684,10 @@ final class DocxReader
             'numPr' => $numPr,
             'bottomBorder' => $bottomBorder,
             'pageBreak' => $state['pageBreak'],
+            'columnBreaks' => count($segments) - 1,
+            'segments' => count($segments) > 1 ? array_map(fn (array $seg): array => $this->mergeRuns($seg), $segments) : null,
             'codeLanguage' => $codeLanguage,
-            'runs' => $this->mergeRuns($runs),
+            'runs' => $this->mergeRuns($joined),
             'images' => $state['images'],
             'leading' => $state['leading'],
         ];
@@ -2659,6 +2890,7 @@ final class DocxReader
                             static fn (array $r): bool => !isset($r['__bookmark']) && is_string($r['text'] ?? null),
                         ));
                         $run = $inner[0] ?? ['text' => ''];
+                        unset($run[self::COLUMN_MARK]);
                         $run['text'] = implode('', array_column($inner, 'text'));
                         $runs[] = $run + ['field' => $token];
                         $state['seenText'] = true;
@@ -2667,7 +2899,7 @@ final class DocxReader
                     }
                     // The cached result's formatting, the field's token as text.
                     $inner = $this->parseInlineContainer($node, $link, $state);
-                    $runs[] = ['text' => $token] + ($inner[0] ?? []);
+                    $runs[] = ['text' => $token] + array_diff_key($inner[0] ?? [], [self::COLUMN_MARK => true]);
                     $state['seenText'] = true;
 
                     break;
@@ -2837,13 +3069,21 @@ final class DocxReader
 
                     break;
                 case 'br':
-                    if ($deleted && $this->wAttr($node, 'type') === 'page') {
-                        $this->revUnkept++; // a deleted page break: not made live
+                    if ($deleted && in_array($this->wAttr($node, 'type'), ['page', 'column'], true)) {
+                        $this->revUnkept++; // a deleted page or column break: not made live
 
                         break;
                     }
                     if ($this->wAttr($node, 'type') === 'page') {
                         $state['pageBreak'] = true;
+                    } elseif ($this->wAttr($node, 'type') === 'column') {
+                        // A run of its own, so the words either side never fuse: a
+                        // block where the paragraph can split, a newline where not.
+                        if ($text !== '') {
+                            $out[] = $this->runFrom($text, $props, $link, $state);
+                            $text = '';
+                        }
+                        $out[] = $this->runFrom("\n", $props, $link, $state) + [self::COLUMN_MARK => true];
                     } else {
                         $text .= "\n";
                     }

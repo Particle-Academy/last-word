@@ -170,6 +170,8 @@ final class ToMarkdown
             'hr' => '---',
             // Markdown has no table of contents: a viewer builds one from the headings.
             'toc' => $this->note('layout-not-preserved', $p),
+            // Markdown has no columns: the text runs on, and the break is reported.
+            'columnBreak' => $this->note('layout-not-preserved', $p),
             default => null,
         };
     }

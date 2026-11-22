@@ -29,6 +29,7 @@ final class Schema
         'pageBreak',
         'hr',
         'toc',
+        'columnBreak',
     ];
 
     /**
@@ -39,7 +40,7 @@ final class Schema
      *
      * @var list<string>
      */
-    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc'];
+    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc', 'columnBreak'];
 
     /**
      * Block types a footnote's `blocks` refuse, at any depth: a page break means
@@ -49,7 +50,7 @@ final class Schema
      *
      * @var list<string>
      */
-    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc'];
+    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc', 'columnBreak'];
 
     /**
      * A bookmark name (a run's `bookmark`, and what follows `#` in an internal
@@ -73,6 +74,234 @@ final class Schema
 
     /** A toc's `levels` when it does not say: headings 1 to 3, Word's own default. */
     public const TOC_LEVELS_DEFAULT = 3;
+
+    /**
+     * The most text columns a section may have: Word's own ceiling. The format
+     * sets none (`w:num` is a plain decimal number), so this is a cap on what an
+     * agent can make the writer and a reader do, not a format limit.
+     */
+    public const MAX_COLUMNS = 45;
+
+    /**
+     * The narrowest a column may be, in points (a quarter inch). This package's
+     * rule, not Word's: it is what makes "the columns fit the page" a check a
+     * count can fail, so 45 columns on a Letter page is refused rather than
+     * written as columns ten points wide.
+     */
+    public const MIN_COLUMN_WIDTH = 18.0;
+
+    /** The gap between columns when `columns.space` does not say: Word's half inch (`w:space` 720). */
+    public const COLUMN_SPACE_DEFAULT = 36.0;
+
+    /** A `columns` object's keys. */
+    public const COLUMNS_KEYS = ['count', 'space', 'separator', 'widths', 'spaces'];
+
+    /**
+     * How a break's section starts (`pageBreak.page.start`, Word's `w:type`):
+     * `nextPage` (the default, a new page) or `continuous` (on the same page,
+     * which is how columns change partway down a page). `oddPage` and `evenPage`
+     * are not in the model yet.
+     *
+     * @var list<string>
+     */
+    public const SECTION_STARTS = ['nextPage', 'continuous'];
+
+    /** What a continuous break may change: the columns, and nothing that needs a new page. */
+    public const CONTINUOUS_KEYS = ['start', 'columns'];
+
+    /** Whether a value is a finite number (int or float, not a numeric string). */
+    public static function isFiniteNumber(mixed $v): bool
+    {
+        return (is_int($v) || is_float($v)) && is_finite((float) $v);
+    }
+
+    /**
+     * The text width of the page a document (or a stretch's view of one) sets, in
+     * points: the page width, after orientation, less the left and right margins.
+     *
+     * @param  array<string, mixed>  $doc
+     */
+    public static function textWidth(array $doc): float
+    {
+        [$w] = self::pageSize($doc);
+        $m = self::pageMargins($doc);
+
+        return $w - $m['left'] - $m['right'];
+    }
+
+    /**
+     * The same text width in twips, rounded the way the writer rounds it: the page
+     * and each margin to the twip, then subtracted. Columns are measured against
+     * this, so what validates is exactly what the writer can write unscaled.
+     *
+     * @param  array<string, mixed>  $doc
+     */
+    public static function textTwips(array $doc): int
+    {
+        [$w] = self::pageSize($doc);
+        $m = self::pageMargins($doc);
+
+        return (int) round($w * 20) - (int) round($m['left'] * 20) - (int) round($m['right'] * 20);
+    }
+
+    /** Points to twips as the writer rounds them, or null for a value no twip count can hold. */
+    private static function twipsOf(float $pt): ?int
+    {
+        return is_finite($pt) && abs($pt) < 1.0E12 ? (int) round($pt * 20) : null;
+    }
+
+    /** The column count a `columns` value means: 1 for none, or for anything that is not a valid count. */
+    public static function columnCount(mixed $columns): int
+    {
+        $count = is_array($columns) ? ($columns['count'] ?? null) : null;
+
+        return is_int($count) && $count >= 1 && $count <= self::MAX_COLUMNS ? $count : 1;
+    }
+
+    /**
+     * Every column's width and every gap, in points, for a `columns` object whose
+     * shape is valid: `widths` as given, or equal columns sharing what the gaps
+     * leave. Gaps are `spaces`, or `space` (36 by default) between each pair. One
+     * column is the whole text width.
+     *
+     * @param  array<string, mixed>  $columns
+     * @return array{widths: list<float>, spaces: list<float>}
+     */
+    public static function columnGeometry(array $columns, float $textWidth): array
+    {
+        $count = self::columnCount($columns);
+        if ($count === 1) {
+            return ['widths' => [$textWidth], 'spaces' => []];
+        }
+        $space = self::isFiniteNumber($columns['space'] ?? null) ? (float) $columns['space'] : self::COLUMN_SPACE_DEFAULT;
+        $spaces = is_array($columns['spaces'] ?? null) && count($columns['spaces']) === $count - 1
+            ? array_map('floatval', array_values($columns['spaces']))
+            : array_fill(0, $count - 1, $space);
+        if (is_array($columns['widths'] ?? null) && count($columns['widths']) === $count) {
+            return ['widths' => array_map('floatval', array_values($columns['widths'])), 'spaces' => $spaces];
+        }
+        $each = ($textWidth - array_sum($spaces)) / $count;
+
+        return ['widths' => array_fill(0, $count, $each), 'spaces' => $spaces];
+    }
+
+    /**
+     * Whether a valid-shaped `columns` object fits a text width in twips: every
+     * column at least {@see MIN_COLUMN_WIDTH}, and the columns and gaps, each
+     * rounded to the twip as the writer writes it, no wider than the text. There is
+     * no slack: a total one twip over is refused, because the writer could only
+     * write it by scaling, and the read-back would not be the model.
+     *
+     * @param  array<string, mixed>  $columns
+     */
+    public static function columnsFit(array $columns, int $textTwips): bool
+    {
+        $count = self::columnCount($columns);
+        if ($count === 1) {
+            return true;
+        }
+        $g = self::columnGeometry($columns, $textTwips / 20);
+        $gaps = 0;
+        foreach ($g['spaces'] as $gap) {
+            $tw = self::twipsOf($gap);
+            if ($tw === null) {
+                return false;
+            }
+            $gaps += $tw;
+        }
+        $min = (int) round(self::MIN_COLUMN_WIDTH * 20);
+        if (! is_array($columns['widths'] ?? null) || count($columns['widths']) !== $count) {
+            // Equal columns: Word divides what the gaps leave.
+            return intdiv(max(0, $textTwips - $gaps), $count) >= $min && $gaps + $count * $min <= $textTwips;
+        }
+        $total = $gaps;
+        foreach ($g['widths'] as $w) {
+            $tw = self::twipsOf($w);
+            if ($tw === null || $tw < $min) {
+                return false;
+            }
+            $total += $tw;
+        }
+
+        return $total <= $textTwips;
+    }
+
+    /**
+     * The nearest columns that fit, for a valid-shaped `columns` object that does
+     * not: unequal widths become equal ones; then the gap shrinks to what is left
+     * once every column is {@see MIN_COLUMN_WIDTH}; then, with no gap, as many
+     * columns as the width holds (`{"count": 1}` when it holds fewer than two).
+     * The repairer and the reader share it, so a hostile file and a hostile agent
+     * end up with the same document.
+     *
+     * @param  array<string, mixed>  $columns
+     * @return array<string, mixed>
+     */
+    public static function fitColumns(array $columns, int $textTwips): array
+    {
+        if (self::columnsFit($columns, $textTwips)) {
+            return $columns;
+        }
+        unset($columns['widths']);
+        if (isset($columns['spaces'])) {
+            $columns['space'] = self::tidyPoints(min(array_map('floatval', $columns['spaces'])));
+            unset($columns['spaces']);
+            if ((float) $columns['space'] === self::COLUMN_SPACE_DEFAULT) {
+                unset($columns['space']);
+            }
+        }
+        if (self::columnsFit($columns, $textTwips)) {
+            return $columns;
+        }
+        $count = self::columnCount($columns);
+        $min = (int) round(self::MIN_COLUMN_WIDTH * 20);
+        $room = $textTwips - $count * $min;
+        if ($count > 1 && $room >= 0) {
+            $columns['space'] = self::tidyPoints(intdiv($room, $count - 1) / 20);
+
+            return $columns;
+        }
+        $fits = intdiv(max(0, $textTwips), $min);
+        if ($fits < 2) {
+            return ['count' => 1];
+        }
+        $out = ['count' => min($fits, self::MAX_COLUMNS), 'space' => 0];
+        if (($columns['separator'] ?? null) === true) {
+            $out['separator'] = true;
+        }
+
+        return $out;
+    }
+
+    /** A points value as the reader gives it back: an int when it is whole. */
+    public static function tidyPoints(float $pt): float|int
+    {
+        return is_finite($pt) && abs($pt) < 1.0E15 && $pt == floor($pt) ? (int) $pt : $pt;
+    }
+
+    /**
+     * The width, in twips, a table, chart or image lays itself out against in a
+     * section: its text width, or with columns the NARROWEST column, since a block
+     * may land in any of them. The writer and the reader both ask here, so a table
+     * that spans its column reads back without explicit widths.
+     *
+     * @param  mixed  $columns  the section's `columns`, as the model holds them
+     */
+    public static function columnTextTwips(mixed $columns, int $textTwips): int
+    {
+        $count = self::columnCount($columns);
+        if (! is_array($columns) || $count === 1) {
+            return $textTwips;
+        }
+        $tw = static fn (mixed $pt): int => (int) round((float) $pt * 20);
+        if (is_array($columns['widths'] ?? null) && count($columns['widths']) === $count) {
+            return max(1, min(array_map($tw, $columns['widths'])));
+        }
+        $g = self::columnGeometry($columns, $textTwips / 20);
+        $gaps = array_sum(array_map($tw, $g['spaces']));
+
+        return max(1, intdiv(max(0, $textTwips - $gaps), $count));
+    }
 
     /** Whether a value is a valid bookmark name (the reserved prefix aside). */
     public static function isBookmarkName(mixed $name): bool
@@ -120,7 +349,7 @@ final class Schema
      *
      * @var list<string>
      */
-    public const PAGE_BREAK_NEAR_MISS_KEYS = ['size', 'orientation', 'margins', 'header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter', 'background', 'border'];
+    public const PAGE_BREAK_NEAR_MISS_KEYS = ['size', 'orientation', 'margins', 'header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter', 'background', 'border', 'columns', 'start'];
 
     /**
      * A band key => [kind, Word reference type].
@@ -324,6 +553,7 @@ final class Schema
                 'inset' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points from the page edge to the outside of the frame. '.self::PAGE_FRAME_INSET.' by default.'],
             ],
         ],
+        'columns' => ['$ref' => '#/$defs/columns'],
         ];
         $band = [
             'type' => 'object',
@@ -527,7 +757,9 @@ final class Schema
                         'type' => 'object',
                         'additionalProperties' => false,
                         'description' => 'Change the page from here on: {"type": "pageBreak", "page": {"orientation": "landscape", "margins": {"left": 28.8, "right": 28.8}}}. Pages after the break keep every setting until another break names a change; portrait does not come back by itself. margins merge side by side, every other key is replaced whole. firstHeader and firstFooter are never inherited: here they mean the first page after this break. {} starts a new stretch with nothing changed. Only on a top-level break, not one in a quote or a table cell. Word: a section break.',
-                        'properties' => array_diff_key($pageProps, ['background' => true]),
+                        'properties' => [
+                            'start' => ['enum' => self::SECTION_STARTS, 'description' => 'How the stretch after this break starts. nextPage (the default) starts a new page. continuous carries on down the same page, so the columns can change there: {"type": "pageBreak", "page": {"start": "continuous", "columns": {"count": 3}}} under a one-column masthead. A continuous break changes only columns; anything else needs a new page. start is never inherited. Word: w:type.'],
+                        ] + array_diff_key($pageProps, ['background' => true]),
                     ],
                 ],
             ],
@@ -535,6 +767,12 @@ final class Schema
                 'type' => 'object',
                 'required' => ['type'],
                 'properties' => ['type' => ['const' => 'hr']],
+            ],
+            'columnBreak' => [
+                'type' => 'object',
+                'required' => ['type'],
+                'description' => 'Ends the current text column: what follows starts at the top of the next one (Word: w:br w:type="column"). Only at the top level of the body, in a stretch whose page has columns of 2 or more.',
+                'properties' => ['type' => ['const' => 'columnBreak']],
             ],
             'toc' => [
                 'type' => 'object',
@@ -583,6 +821,19 @@ final class Schema
                 'boxBorders' => $boxBorders,
                 'tableBorders' => $tableBorders,
                 'boxSides' => $boxSides,
+                'columns' => [
+                    'type' => 'object',
+                    'required' => ['count'],
+                    'additionalProperties' => false,
+                    'description' => 'Newspaper columns for the page, or for the stretch after a break: {"count": 2} is two equal columns half an inch apart; {"count": 3, "space": 12, "separator": true} three with a 12pt gap and a line between; {"count": 2, "widths": [312, 138], "space": 18} a main column and a sidebar. Text flows down each column and on to the next; a columnBreak block moves on early. Inherited by later breaks like every page key; {"count": 1} goes back to one column. Columns and gaps must fit the text width, and no column may be narrower than '.self::MIN_COLUMN_WIDTH.'pt. Word: w:cols.',
+                    'properties' => [
+                        'count' => ['type' => 'integer', 'minimum' => 1, 'maximum' => self::MAX_COLUMNS, 'description' => 'How many columns, 1 to '.self::MAX_COLUMNS.'. With 1, no other key.'],
+                        'space' => ['type' => 'number', 'minimum' => 0, 'description' => 'Points between each pair of columns. '.self::COLUMN_SPACE_DEFAULT.' (half an inch) by default; 0 is allowed.'],
+                        'separator' => ['type' => 'boolean', 'description' => 'A vertical line between the columns.'],
+                        'widths' => ['type' => 'array', 'items' => ['type' => 'number', 'minimum' => self::MIN_COLUMN_WIDTH], 'description' => 'Unequal columns: each width in points, one per column. Absent, the columns are equal.'],
+                        'spaces' => ['type' => 'array', 'items' => ['type' => 'number', 'minimum' => 0], 'description' => 'With widths only, instead of space: the gap after each column but the last, count - 1 of them.'],
+                    ],
+                ],
                 'pageMargins' => [
                     'type' => 'object',
                     'additionalProperties' => false,
@@ -607,7 +858,7 @@ final class Schema
                             'items' => [
                                 'allOf' => [
                                     ['$ref' => '#/$defs/block'],
-                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc']]], 'required' => ['type']]],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc', 'columnBreak']]], 'required' => ['type']]],
                                 ],
                             ],
                         ],
@@ -625,7 +876,7 @@ final class Schema
                             'items' => [
                                 'allOf' => [
                                     ['$ref' => '#/$defs/block'],
-                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc']]], 'required' => ['type']]],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc', 'columnBreak']]], 'required' => ['type']]],
                                 ],
                             ],
                         ],
@@ -850,7 +1101,7 @@ final class Schema
      */
     private static function mergePage(array $page, array $change): array
     {
-        unset($page['firstHeader'], $page['firstFooter']);
+        unset($page['firstHeader'], $page['firstFooter'], $page['start']);
         foreach ($change as $key => $value) {
             if ($value === null || $key === 'background') {
                 continue;

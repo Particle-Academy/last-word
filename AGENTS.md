@@ -298,6 +298,77 @@ $doc = [
   `toBytes()` stays deterministic.
 - **.docx only, PHP only.** The Node and Python packages do not have this yet.
 
+## Columns
+
+Newspaper columns are a page setting, so they go on the document's `page` or on
+a break's `page`; a `columnBreak` block moves on to the next column early:
+
+```json
+{"blocks": [
+  {"type": "heading", "level": 1, "runs": [{"text": "The Quarterly"}]},
+  {"type": "pageBreak", "page": {"start": "continuous", "columns": {"count": 3, "space": 12, "separator": true}}},
+  {"type": "paragraph", "runs": [{"text": "First story."}]},
+  {"type": "columnBreak"},
+  {"type": "paragraph", "runs": [{"text": "Second story."}]},
+  {"type": "pageBreak", "page": {"start": "continuous", "columns": {"count": 1}}},
+  {"type": "paragraph", "runs": [{"text": "Back to one column, on the same page."}]}
+]}
+```
+
+- **`columns`:** `count` 1 to 45 (required); `space`, points between columns, 0
+  or more, 36 by default; `separator: true` draws a line between them; `widths`,
+  one per column, for unequal columns (a main column and a sidebar), with
+  `spaces` (count - 1 gaps) instead of `space` when the gaps differ. `{"count": 1}`
+  goes back to one column. Nothing else.
+- **They must fit:** every column at least 18pt, and columns plus gaps no wider
+  than the text width of that page (page width less the side margins), measured
+  to the twip as written, with no slack: what validates is written unscaled and
+  reads back exactly. Columns a
+  later break inherits are checked against ITS page, so landscape widths carried
+  onto a portrait page are refused there.
+- **`start` on a break:** `"nextPage"` (the default) starts a new page;
+  `"continuous"` carries on down the same page, which is how a one-column heading
+  sits over three columns. A continuous break may change `columns` and nothing
+  else (a new size, margins or header needs a new page). Not on the document's
+  own `page`, and never inherited.
+- **`columnBreak`:** top level of the body only, in a stretch with two or more
+  columns. Not in a quote, a table cell, a header, a footer or a footnote.
+- **Errors carry a `code`:** `columns_invalid`, `columns_count_exceeded`,
+  `columns_space_invalid`, `columns_width_invalid`, `columns_too_wide`,
+  `section_start_invalid`, `section_continuous_invalid`, `column_break_nested`,
+  `column_break_outside_columns`. `validateAndRepair()` clamps, shrinks columns
+  that do not fit to the nearest that do, drops a column break it cannot keep, and
+  turns a continuous break that changes the page into a new page. It never drops
+  text.
+- **Reading:** `w:cols` reads back as `columns`, and a continuous section as a
+  break with `start: "continuous"`. A gap list whose gaps are all equal reads
+  back as `space`, and a 36pt gap is not written out. Malformed or oversized
+  columns degrade to the nearest the model holds and are counted in
+  `unrepresented` (`layout-not-preserved`). A column break inside a body
+  paragraph or heading of a section with columns splits it: the text before, a
+  `columnBreak`, the text after. Where the model cannot hold one (one column, a
+  list item, a table cell, a quote, code, a header, a footnote) it reads as a
+  newline, so no words fuse, and is counted the same way.
+- **Tables, charts and images** in a section with columns size against the
+  narrowest column.
+- **Which renderers draw columns today.** Only the .docx does. Columns, a
+  continuous `start` and `columnBreak` are a **known parity follow-up** for every
+  other renderer: the document is laid out wrongly there (one column, extra
+  pages), but no text is lost or leaked.
+
+  | Renderer | Columns today |
+  |---|---|
+  | last-word (this package, .docx) | writes and reads `columns`, `start` and `columnBreak` |
+  | fine-print (PDF) | refuses a `columnBreak` block (an unknown type); ignores `columns` and `start`, so one column and a new page at every break |
+  | last-word-ui (viewer) | draws a `columnBreak` as nothing and a continuous break as a new page; one column |
+  | Node (`last-word-js`) and Python (`fancy-last-word`) ports | not supported yet |
+
+  Handing a document with columns to fine-print, remove its `columnBreak`
+  blocks first. `Agent::layout()` measures one column and starts a page at every
+  break, as the viewer does, and says so in `approximate` (`columns`,
+  `continuous section break`). The markdown bridge and `toPortable()` drop them
+  and report `layout-not-preserved`. **.docx only, PHP only.**
+
 ## Agent guide
 
 Building a document with an LLM? `agent-guide/professional-documents.md` (also

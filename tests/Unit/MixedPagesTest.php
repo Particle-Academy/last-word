@@ -518,28 +518,30 @@ it('maps each section start as the plan\'s table says', function (string $type, 
     'nextPage, nothing different' => ['nextPage', MP_PORTRAIT, ['type' => 'pageBreak', 'page' => []], []],
     'oddPage' => ['oddPage', MP_PORTRAIT, ['type' => 'pageBreak', 'page' => []], [['where' => '/blocks/1', 'kind' => 'layout-not-preserved', 'count' => 1]]],
     'evenPage' => ['evenPage', MP_LANDSCAPE, ['type' => 'pageBreak', 'page' => ['orientation' => 'landscape']], [['where' => '/blocks/1', 'kind' => 'layout-not-preserved', 'count' => 1]]],
-    'continuous, same page' => ['continuous', MP_PORTRAIT, [], [['where' => '/blocks/1', 'kind' => 'layout-not-preserved', 'count' => 1]]],
+    'continuous, same page' => ['continuous', MP_PORTRAIT, ['type' => 'pageBreak', 'page' => ['start' => 'continuous']], []],
     'continuous, other orientation' => ['continuous', MP_LANDSCAPE, ['type' => 'pageBreak', 'page' => ['orientation' => 'landscape']], []],
     'continuous, other size' => ['continuous', '<w:pgSz w:w="11906" w:h="16838"/>', ['type' => 'pageBreak', 'page' => ['size' => 'a4']], []],
-    'continuous, other margins' => ['continuous', MP_PORTRAIT . '<w:pgMar w:top="720" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>', [], [['where' => '/blocks/1', 'kind' => 'layout-not-preserved', 'count' => 1]]],
-    'continuous, columns' => ['continuous', MP_PORTRAIT . '<w:cols w:num="2"/>', [], [['where' => '/blocks/1', 'kind' => 'layout-not-preserved', 'count' => 1]]],
+    'continuous, other margins' => ['continuous', MP_PORTRAIT . '<w:pgMar w:top="720" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>', ['type' => 'pageBreak', 'page' => ['start' => 'continuous']], [['where' => '/blocks/1', 'kind' => 'layout-not-preserved', 'count' => 1]]],
+    'continuous, columns' => ['continuous', MP_PORTRAIT . '<w:cols w:num="2"/>', ['type' => 'pageBreak', 'page' => ['start' => 'continuous', 'columns' => ['count' => 2]]], []],
 ]);
 
 it('a continuous stretch leaves the page where it was for the next section', function (): void {
     $margins = '<w:pgMar w:top="720" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
     $doc = Agent::read(mpDocx(MP_P . mpEnds(MP_PORTRAIT) . MP_P . mpEnds('<w:type w:val="continuous"/>' . MP_PORTRAIT . $margins) . MP_P . '<w:sectPr>' . MP_PORTRAIT . '</w:sectPr>'));
 
-    expect(array_column($doc['blocks'], 'type'))->toBe(['paragraph', 'paragraph', 'pageBreak', 'paragraph'])
-        ->and($doc['blocks'][2])->toBe(['type' => 'pageBreak', 'page' => []]);
+    // The continuous break keeps its place but not its margins, so the next section
+    // is compared with the page the model actually has.
+    expect(array_column($doc['blocks'], 'type'))->toBe(['paragraph', 'pageBreak', 'paragraph', 'pageBreak', 'paragraph'])
+        ->and($doc['blocks'][1])->toBe(['type' => 'pageBreak', 'page' => ['start' => 'continuous']])
+        ->and($doc['blocks'][3])->toBe(['type' => 'pageBreak', 'page' => []]);
 });
 
-it('reports columns, a page-number restart and an unknown paper size, and drops them', function (string $inner, ?array $page, string $where): void {
+it('reports a page-number restart and an unknown paper size, and drops them', function (string $inner, ?array $page, string $where): void {
     $doc = Agent::read(mpDocx(MP_P . '<w:sectPr>' . $inner . '</w:sectPr>'));
 
     expect($doc['page'] ?? null)->toBe($page)
         ->and($doc['unrepresented'])->toBe([['where' => $where, 'kind' => 'layout-not-preserved', 'count' => 1]]);
 })->with([
-    'columns' => [MP_PORTRAIT . '<w:cols w:num="3"/>', null, '/page'],
     'restart' => [MP_PORTRAIT . '<w:pgNumType w:start="5"/>', null, '/page'],
     'paper' => ['<w:pgSz w:w="10000" w:h="14000"/>', null, '/page'],
 ]);
@@ -646,9 +648,9 @@ it('describe() counts the stretches, as fine-print\'s does', function (): void {
 });
 
 it('describe() says what a read dropped, not that sections were flattened', function (): void {
-    $doc = Agent::read(mpDocx(MP_P . '<w:sectPr>' . MP_PORTRAIT . '<w:cols w:num="2"/></w:sectPr>'));
+    $doc = Agent::read(mpDocx(MP_P . '<w:sectPr>' . MP_PORTRAIT . '<w:pgNumType w:start="5"/></w:sectPr>'));
 
-    expect(Agent::describe($doc))->toContain('Layout not preserved: 1 section setting dropped (columns, odd or even starts, continuous breaks, page-number restarts, unknown paper)');
+    expect(Agent::describe($doc))->toContain('Layout not preserved: 1 section setting dropped (odd or even starts, what a continuous break changes besides columns, columns or column breaks the model cannot hold, page-number restarts, unknown paper)');
 });
 
 it('markdown marks the break and reports the page it could not carry', function (): void {

@@ -533,6 +533,13 @@ final class Agent
             $shapes = array_map(static fn (array $s): string => ($s['doc']['page']['orientation'] ?? null) === 'landscape' ? 'landscape' : 'portrait', $stretches);
             $lines[] = 'Stretches: ' . count($stretches) . ' (' . implode(', ', $shapes) . ')';
         }
+        // Columns by stretch, so an agent editing a newsletter knows where the
+        // column breaks mean something; absent when the document has none.
+        $columnCounts = array_map(static fn (array $s): int => Schema::columnCount($s['doc']['page']['columns'] ?? null), $stretches);
+        $continuous = count(array_filter($blocks, static fn (mixed $b): bool => is_array($b) && ($b['type'] ?? null) === 'pageBreak' && is_array($b['page'] ?? null) && ($b['page']['start'] ?? null) === 'continuous'));
+        if (max($columnCounts) > 1 || isset($counts['columnBreak']) || $continuous > 0) {
+            $lines[] = 'Columns: ' . implode(', ', $columnCounts) . ' (by stretch); column breaks: ' . ($counts['columnBreak'] ?? 0) . '; continuous breaks: ' . $continuous;
+        }
         $lines[] = 'Blocks: ' . count($blocks);
         if (!empty($counts)) {
             $parts = [];
@@ -614,7 +621,7 @@ final class Agent
             $lines[] = 'Not represented (kept only by writing onto the original as a template): ' . implode(', ', $notes);
         }
         if ($sectionNotes > 0) {
-            $lines[] = 'Layout not preserved: ' . $sectionNotes . ' section setting' . ($sectionNotes === 1 ? '' : 's') . ' dropped (columns, odd or even starts, continuous breaks, page-number restarts, unknown paper)';
+            $lines[] = 'Layout not preserved: ' . $sectionNotes . ' section setting' . ($sectionNotes === 1 ? '' : 's') . ' dropped (odd or even starts, what a continuous break changes besides columns, columns or column breaks the model cannot hold, page-number restarts, unknown paper)';
         }
 
         return implode("\n", $lines);
