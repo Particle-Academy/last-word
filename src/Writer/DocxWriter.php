@@ -2630,7 +2630,11 @@ final class DocxWriter
             }
             [$arrKind, $arr, $depKind, $dep] = self::revisionParts($run);
             if ($arr === null && $dep === null) {
-                $xml .= $this->renderOneRun($run, self::linkOf($run), false); // plain, or a formatting change only
+                // A run with no revision element: one without any revision goes the
+                // ordinary way, so whatever that path writes for a run, it still does.
+                $xml .= is_array($run['revision'] ?? null)
+                    ? $this->renderOneRun($run, self::linkOf($run), false) // a formatting change only
+                    : $this->renderRuns([$run]);
                 $i++;
 
                 continue;
