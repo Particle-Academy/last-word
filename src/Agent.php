@@ -30,6 +30,7 @@ use LastWord\Reader\Format;
 use LastWord\Reader\OdtReader;
 use LastWord\Reader\RtfReader;
 use LastWord\Schema\Repairer;
+use LastWord\Schema\RunWalk;
 use LastWord\Schema\Schema;
 use LastWord\Schema\Validator;
 use LastWord\Writer\DocxTemplate;
@@ -359,7 +360,7 @@ final class Agent
         }
         $bytes = self::bytesFrom($bytesOrPath);
 
-        return match ($format = Format::detect($bytes)) {
+        return self::withoutDanglingLinks(match ($format = Format::detect($bytes)) {
             Format::DOCX => (new DocxReader(refuseTrackedChanges: $refuse))->read($bytes),
             Format::ODT => (new OdtReader())->read($bytes),
             Format::RTF => (new RtfReader())->read($bytes),
@@ -376,7 +377,55 @@ final class Agent
                 "This is a .{$format} file, not a word-processing document. "
                 .'Agent::read() reads .docx, .doc (Word 97-2003), .odt and .rtf.',
             ),
-        };
+        });
+    }
+
+    /**
+     * A read document without internal links to bookmarks it does not have.
+     *
+     * A link that names a bookmark in another case is spelt as the bookmark is.
+     *
+     * Word files link to Word's hidden bookmarks (`_Toc`, `_Ref`), to ones whose
+     * names the model cannot hold, or to nothing at all; and the .odt, .rtf and
+     * .doc readers read no bookmarks. Such a link keeps its text and loses its
+     * `link`, counted in `unrepresented` as kind `link` (at `/blocks` for the
+     * body and footnotes, `/page` for a header or footer), so what is read
+     * always validates and writes.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     */
+    private static function withoutDanglingLinks(array $doc): array
+    {
+        $names = [];
+        foreach (RunWalk::all($doc) as ['run' => $run, 'where' => $where]) {
+            if ($where === 'body' && Schema::isBookmarkName($run['bookmark'] ?? null)) {
+                $names[strtolower($run['bookmark'])] ??= $run['bookmark'];
+            }
+        }
+        $dropped = [];
+        $doc = RunWalk::map($doc, static function (array $run, string $path, string $where) use ($names, &$dropped): array {
+            $link = $run['link'] ?? null;
+            if (is_string($link) && str_starts_with($link, '#')) {
+                // Word resolves an anchor ignoring case; the model's link is
+                // spelt as its bookmark is, so it round-trips as it reads.
+                $name = $names[strtolower(substr($link, 1))] ?? null;
+                if ($name !== null) {
+                    $run['link'] = '#' . $name;
+                } else {
+                    unset($run['link']);
+                    $at = $where === 'band' ? '/page' : '/blocks';
+                    $dropped[$at] = ($dropped[$at] ?? 0) + 1;
+                }
+            }
+
+            return $run;
+        });
+        foreach ($dropped as $where => $count) {
+            $doc['unrepresented'][] = ['where' => $where, 'kind' => 'link', 'count' => $count];
+        }
+
+        return $doc;
     }
 
     /**
@@ -482,6 +531,27 @@ final class Agent
             $lines[] = 'Block types: ' . implode(', ', $parts);
         }
         $lines[] = "Words: {$words}";
+
+        // Bookmarks, internal links and body fields: not counted as blocks, and
+        // what an agent editing the document must not break.
+        $bookmarks = [];
+        $links = 0;
+        $fields = 0;
+        foreach (RunWalk::all(['blocks' => $blocks] + $doc) as ['run' => $run, 'where' => $where]) {
+            if ($where === 'body' && is_string($run['bookmark'] ?? null)) {
+                $bookmarks[] = $run['bookmark'];
+            }
+            if (is_string($run['link'] ?? null) && str_starts_with($run['link'], '#')) {
+                $links++;
+            }
+            if (is_string($run['field'] ?? null)) {
+                $fields++;
+            }
+        }
+        if ($bookmarks !== [] || $links > 0 || $fields > 0) {
+            $shown = implode(', ', array_slice($bookmarks, 0, 10)) . (count($bookmarks) > 10 ? ', ...' : '');
+            $lines[] = 'Bookmarks: ' . count($bookmarks) . ($bookmarks !== [] ? " ({$shown})" : '') . "; internal links: {$links}; fields: {$fields}";
+        }
 
         // A header or footer that holds blocks (last-word#6) -- a letterhead's
         // logo and address -- so an agent knows it is there without the JSON.

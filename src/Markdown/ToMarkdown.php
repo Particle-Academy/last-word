@@ -158,6 +158,8 @@ final class ToMarkdown
             'chart' => $this->chart($block, $p),
             'pageBreak' => $this->pageBreak($block, $p),
             'hr' => '---',
+            // Markdown has no table of contents: a viewer builds one from the headings.
+            'toc' => $this->note('layout-not-preserved', $p),
             default => null,
         };
     }
@@ -382,6 +384,14 @@ final class ToMarkdown
                 }
                 if ($styled) {
                     $this->note('run-style-dropped', $p . '/' . $i);
+                }
+                // Markdown has no anchor for a bookmark (a link target, dropped),
+                // and a field becomes the value it showed.
+                if (array_key_exists('bookmark', $run)) {
+                    $this->note('link', $p . '/' . $i);
+                }
+                if (array_key_exists('field', $run)) {
+                    $this->note('formula-as-value', $p . '/' . $i);
                 }
                 if (str_contains($run['text'], "\n") || str_contains($run['text'], "\r")) {
                     $this->note('layout-not-preserved', $p . '/' . $i); // a line break becomes a space

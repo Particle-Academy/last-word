@@ -99,11 +99,15 @@ describe('formatting', function () {
         ]);
     });
 
-    it('keeps a bookmark hyperlink as an anchor', function () {
+    it('keeps the text of a bookmark hyperlink, and reports the link, because RTF bookmarks are not read', function () {
         // RTF escapes the field switch's backslash: \\l, not \l (a control word).
+        // The reader still sees the anchor; Agent::read drops a link to a
+        // bookmark the document does not hold, so what it reads always writes.
         $field = '{\field{\*\fldinst HYPERLINK \\\\l "intro"}{\fldrslt top}}';
+        $read = Agent::read('{\rtf1\ansi '.$field.'\par}');
 
-        expect(rtfBlocks($field.'\par')[0]['runs'])->toBe([['text' => 'top', 'link' => '#intro']]);
+        expect($read['blocks'][0]['runs'])->toBe([['text' => 'top']])
+            ->and($read['unrepresented'])->toBe([['where' => '/blocks', 'kind' => 'link', 'count' => 1]]);
     });
 
     it('keeps another field\'s result and drops its instruction', function () {

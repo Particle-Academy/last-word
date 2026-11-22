@@ -339,6 +339,14 @@ final class ToPortable
             if ($styled) {
                 $this->report->add('run-style-dropped', $p.'/'.$i);
             }
+            // Portable runs carry neither: a bookmark (a link target) is dropped,
+            // and a field travels as the value it showed.
+            if (array_key_exists('bookmark', $r)) {
+                $this->report->add('link', $p.'/'.$i);
+            }
+            if (array_key_exists('field', $r)) {
+                $this->report->add('formula-as-value', $p.'/'.$i);
+            }
             $out[] = $run;
         }
 

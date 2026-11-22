@@ -172,6 +172,37 @@ final class DocxReader
     private array $unrepresented = [];
 
     /**
+     * The body bookmarks read so far, lower-cased: Word compares names ignoring
+     * case, so the second of two that differ only by case is not read.
+     *
+     * @var array<string, true>
+     */
+    private array $bookmarksSeen = [];
+
+    /** How deeply body fields nest before the reader stops tracking them. */
+    private const MAX_FIELD_DEPTH = 32;
+
+    /**
+     * How many times one read looks ahead for a table of contents' end. Each look
+     * can run to the end of its container, so a file of unclosed TOCs is bounded;
+     * past it a TOC reads as its text, as an unclosed one does.
+     */
+    private const MAX_TOC_SCANS = 20;
+
+    /** The `toc` blocks read so far, capped at {@see Schema::MAX_TOCS}. */
+    private int $tocCount = 0;
+
+    private int $tocScans = 0;
+
+    /**
+     * The ids of the body bookmarks read, so only their ends become markers: a
+     * hidden or refused bookmark's end must not break a user bookmark's range.
+     *
+     * @var array<string, true>
+     */
+    private array $bookmarkIds = [];
+
+    /**
      * Revision markup found anywhere in the package's word parts, by kind:
      * `{insertions, deletions, moves, formatChanges}`. The reader accepts every
      * revision as it reads, so this is the only trace of them in the result.
@@ -198,6 +229,10 @@ final class DocxReader
             throw new TrackedChangesRefused(...$this->trackedChanges);
         }
         $this->unrepresented = [];
+        $this->bookmarksSeen = [];
+        $this->bookmarkIds = [];
+        $this->tocCount = 0;
+        $this->tocScans = 0;
         $this->bandMediaBytes = 0;
         $this->inBand = false;
         $this->inFootnote = false;
@@ -1464,7 +1499,12 @@ final class DocxReader
         };
 
         $sectionEnded = false;
-        foreach ($this->blockChildren($container) as $node) {
+        // Inside a table of contents: the child index of the paragraph that ends it
+        // and the end itself. Its paragraphs are Word's cached entries, which the
+        // toc block regenerates, so they are skipped.
+        $tocUntil = null;
+        $children = $this->blockChildren($container);
+        foreach ($children as $idx => $node) {
             if ($sectionEnded) {
                 $flushAll();
                 $this->endSection($blocks);
@@ -1472,6 +1512,43 @@ final class DocxReader
             }
             if ($topLevel && $node->localName === 'p' && $this->firstChildByName($this->firstChildByName($node, 'pPr'), 'sectPr') !== null) {
                 $sectionEnded = true; // after this paragraph, whatever it turns out to hold
+            }
+            if ($tocUntil !== null) {
+                if ($idx < $tocUntil['index']) {
+                    continue;
+                }
+                // The paragraph the TOC ends in: what follows the end is the document's.
+                $tail = $this->paragraphPart($node, $tocUntil['end'], false);
+                $tocUntil = null;
+                array_push($blocks, ...$tail);
+
+                continue;
+            }
+            if ($node->localName === 'p' && !$this->inBand && !$this->inFootnote) {
+                $toc = $this->tocStart($node);
+                if ($toc !== null) {
+                    // A TOC becomes a toc block only where the model can hold one --
+                    // top level, within the cap -- and only when its end is found.
+                    // Anything else reads as its text, as before toc existed.
+                    $close = $topLevel && $this->tocCount < Schema::MAX_TOCS && $this->tocScans++ < self::MAX_TOC_SCANS
+                        ? $this->tocClose($children, $idx, $toc['begin'])
+                        : null;
+                    if ($close === null) {
+                        $this->noteStructure();
+                    } else {
+                        $flushAll();
+                        array_push($blocks, ...$this->paragraphPart($node, $toc['begin'], true));
+                        $blocks[] = ['type' => 'toc'] + ($toc['levels'] !== Schema::TOC_LEVELS_DEFAULT ? ['levels' => $toc['levels']] : []);
+                        $this->tocCount++;
+                        if ($close['index'] === $idx) {
+                            array_push($blocks, ...$this->paragraphPart($node, $close['end'], false));
+                        } else {
+                            $tocUntil = $close;
+                        }
+
+                        continue;
+                    }
+                }
             }
             if ($node->localName === 'tbl') {
                 $flushAll();
@@ -1647,6 +1724,231 @@ final class DocxReader
     }
 
     /**
+     * Where a paragraph starts a table of contents: its levels and the field's
+     * begin (null for a `w:fldSimple`, which is whole in itself), or null when it
+     * holds none. A TOC field is a `TOC` instruction; `\o "1-n"` gives the
+     * levels, clamped to 1-6, and without one they are the default. No other
+     * switch is read: the toc block writes its own instruction.
+     *
+     * @return array{levels: int, begin: ?DOMElement}|null
+     */
+    private function tocStart(DOMElement $p): ?array
+    {
+        $open = null;
+        $instr = '';
+        foreach ($p->getElementsByTagName('*') as $el) {
+            $name = $el->localName;
+            if ($name === 'fldSimple' && self::isTocInstruction((string) $this->wAttr($el, 'instr'))) {
+                return ['levels' => self::tocLevels((string) $this->wAttr($el, 'instr')), 'begin' => $el];
+            }
+            if ($name === 'fldChar') {
+                $type = $this->wAttr($el, 'fldCharType');
+                if ($type === 'begin') {
+                    [$open, $instr] = [$el, ''];
+                } elseif ($open !== null && self::isTocInstruction($instr)) {
+                    return ['levels' => self::tocLevels($instr), 'begin' => $open];
+                } else {
+                    $open = null;
+                }
+            } elseif ($name === 'instrText' && $open !== null) {
+                $instr .= $el->textContent;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Where the TOC that `$begin` opens ends: the index of the container child
+     * holding its end, and the end, or null when the container ends first. A
+     * `w:fldSimple` ends where it is.
+     *
+     * @param  list<DOMElement>  $children
+     * @return array{index: int, end: DOMElement}|null
+     */
+    private function tocClose(array $children, int $from, DOMElement $begin): ?array
+    {
+        if ($begin->localName === 'fldSimple') {
+            return ['index' => $from, 'end' => $begin];
+        }
+        $depth = 0;
+        $counting = false;
+        $count = count($children);
+        for ($i = $from; $i < $count; $i++) {
+            foreach ($children[$i]->getElementsByTagName('*') as $el) {
+                if ($el->localName !== 'fldChar') {
+                    continue;
+                }
+                if (!$counting) {
+                    if (!$el->isSameNode($begin)) {
+                        continue;
+                    }
+                    $counting = true;
+                }
+                $type = $this->wAttr($el, 'fldCharType');
+                if ($type === 'begin') {
+                    $depth++;
+                } elseif ($type === 'end' && --$depth === 0) {
+                    return ['index' => $i, 'end' => $el];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * What a paragraph holds before (or after) the element `$at` -- the text
+     * around a TOC -- as the blocks it reads as: a paragraph when there is text,
+     * nothing otherwise. Read from a copy of the paragraph cut at the child that
+     * holds `$at`, so the rest reads exactly as a paragraph would.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function paragraphPart(DOMElement $p, DOMElement $at, bool $before): array
+    {
+        $child = $at;
+        while ($child->parentNode !== null && !$child->parentNode->isSameNode($p)) {
+            $child = $child->parentNode;
+        }
+        if ($child->parentNode === null) {
+            return [];
+        }
+        $position = 0;
+        foreach ($p->childNodes as $k => $node) {
+            if ($node->isSameNode($child)) {
+                $position = $k;
+            }
+        }
+        $copy = $p->cloneNode(true);
+        $remove = [];
+        foreach ($copy->childNodes as $k => $node) {
+            $isPPr = $node instanceof DOMElement && $node->localName === 'pPr';
+            if ($before ? $k >= $position : ($k <= $position && !$isPPr)) {
+                $remove[] = $node;
+            }
+        }
+        foreach ($remove as $node) {
+            $copy->removeChild($node);
+        }
+        $read = $this->parseParagraphNode($copy);
+        if ($this->plainText($read['runs']) === '') {
+            return [];
+        }
+        $para = ['type' => 'paragraph', 'runs' => $read['runs']];
+        if ($read['align'] !== null) {
+            $para['align'] = $read['align'];
+        }
+
+        return [$para + $read['props']];
+    }
+
+    /**
+     * One more piece of field markup the reader could not structure -- an
+     * unclosed or misplaced TOC, a field that begins or ends in another
+     * paragraph -- read as its text instead, counted in `unrepresented`.
+     */
+    private function noteStructure(): void
+    {
+        foreach ($this->unrepresented as $k => $note) {
+            if ($note['where'] === '/blocks' && $note['kind'] === 'structure-not-recovered') {
+                $this->unrepresented[$k]['count']++;
+
+                return;
+            }
+        }
+        $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'structure-not-recovered', 'count' => 1];
+    }
+
+    private static function isTocInstruction(string $instr): bool
+    {
+        return preg_match('/^\s*TOC(?:\s|$)/i', $instr) === 1;
+    }
+
+    private static function tocLevels(string $instr): int
+    {
+        if (preg_match('/\\\\o\s*"?\s*\d\s*-\s*(\d)/', $instr, $m) === 1) {
+            return max(1, min(Schema::MAX_HEADING_LEVEL, (int) $m[1]));
+        }
+
+        return Schema::TOC_LEVELS_DEFAULT;
+    }
+
+    /**
+     * Bookmark markers back into runs: a bookmark whose start and end hold exactly
+     * one run of text (after merging) is that run's `bookmark`; any other -- one
+     * spanning differently formatted runs, or ending in a later paragraph -- is a
+     * point, `{"text": "", "bookmark": name}`, where it starts. Markers whose
+     * other half is not here are dropped.
+     *
+     * @param  list<array<string, mixed>>  $runs
+     * @return list<array<string, mixed>>
+     */
+    private function resolveBookmarks(array $runs): array
+    {
+        $ends = [];
+        $markers = [];
+        foreach ($runs as $i => $run) {
+            if (isset($run['__bookmark'])) {
+                $markers[] = $i;
+            }
+            if (($run['__bookmark'] ?? null) === 'end') {
+                $ends[$run['id']] ??= $i;
+            }
+        }
+        // The marker after each one: a bookmark attaches only when the next marker
+        // is its own end, so the runs between are looked at once (linear in a
+        // hostile paragraph of thousands of bookmarks).
+        $nextMarker = [];
+        foreach ($markers as $k => $i) {
+            $nextMarker[$i] = $markers[$k + 1] ?? null;
+        }
+        $out = [];
+        $count = count($runs);
+        for ($i = 0; $i < $count; $i++) {
+            $run = $runs[$i];
+            $marker = $run['__bookmark'] ?? null;
+            if ($marker === 'end') {
+                continue;
+            }
+            if ($marker === null) {
+                $out[] = $run;
+
+                continue;
+            }
+            $end = $ends[$run['id']] ?? null;
+            if ($end !== null && $end > $i && $nextMarker[$i] === $end) {
+                $merged = $this->mergeRuns(array_slice($runs, $i + 1, $end - $i - 1));
+                if (count($merged) === 1 && $merged[0]['text'] !== '' && array_intersect_key($merged[0], ['footnote' => 1, 'field' => 1, 'bookmark' => 1]) === []) {
+                    $out[] = $merged[0] + ['bookmark' => $run['name']];
+                    $i = $end;
+
+                    continue;
+                }
+            }
+            $out[] = ['text' => '', 'bookmark' => $run['name']];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Whether a body bookmark of this name is read: a name the model takes
+     * (Word's hidden `_` ones are not), not the reserved code-language prefix, not
+     * a second of the same name ignoring case, and within the document's cap.
+     */
+    private function acceptBookmark(string $name): bool
+    {
+        if (!Schema::isBookmarkName($name) || str_starts_with($name, Schema::BOOKMARK_RESERVED_PREFIX)
+            || isset($this->bookmarksSeen[strtolower($name)]) || count($this->bookmarksSeen) >= Schema::MAX_BOOKMARKS) {
+            return false;
+        }
+        $this->bookmarksSeen[strtolower($name)] = true;
+
+        return true;
+    }
+
+    /**
      * The sdt's w:tag value when it is one of ours (`lastword:code[:{lang}]`
      * or `lastword:quote`); null for foreign / untagged sdts.
      */
@@ -1777,8 +2079,22 @@ final class DocxReader
         // header or footer puts first (a logo beside an address). `field`: a
         // complex field in a header or footer -- null outside one, its
         // instruction so far, or false while its cached result is skipped.
-        $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null];
+        // Field markup that does not balance inside the paragraph (a begin with no
+        // end, an end with no begin) is not tracked at all: the paragraph reads as
+        // its text, as before body fields were read, and says so.
+        $fieldsOff = !$this->inBand && !$this->fieldsBalance($p);
+        if ($fieldsOff) {
+            $this->noteStructure();
+        }
+        $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
         $runs = $this->parseInlineContainer($p, null, $state);
+        // A field still capturing at the paragraph's end: its text, as text.
+        foreach ($state['fields'] as $open) {
+            if ($open['token'] !== null && $open['text'] !== '') {
+                $runs[] = ['text' => $open['text']];
+            }
+        }
+        $runs = $this->resolveBookmarks($runs);
 
         return [
             'style' => $style,
@@ -1978,9 +2294,23 @@ final class DocxReader
 
                     break;
                 case 'fldSimple':
-                    $token = $this->inBand ? self::fieldToken((string) $this->wAttr($node, 'instr')) : '';
+                    $token = self::fieldToken((string) $this->wAttr($node, 'instr'));
                     if ($token === '') {
                         array_push($runs, ...$this->parseInlineContainer($node, $link, $state));
+
+                        break;
+                    }
+                    if (!$this->inBand) {
+                        // In body text an allow-listed field is a field run, its
+                        // cached result the text; any other keeps its text.
+                        $inner = array_values(array_filter(
+                            $this->parseInlineContainer($node, $link, $state),
+                            static fn (array $r): bool => !isset($r['__bookmark']) && is_string($r['text'] ?? null),
+                        ));
+                        $run = $inner[0] ?? ['text' => ''];
+                        $run['text'] = implode('', array_column($inner, 'text'));
+                        $runs[] = $run + ['field' => $token];
+                        $state['seenText'] = true;
 
                         break;
                     }
@@ -1990,9 +2320,27 @@ final class DocxReader
                     $state['seenText'] = true;
 
                     break;
-                case 'pPr':
                 case 'bookmarkStart':
                 case 'bookmarkEnd':
+                    // Body bookmarks only, as markers {@see resolveBookmarks()} turns
+                    // back into runs.
+                    if ($this->inBand || $this->inFootnote) {
+                        break;
+                    }
+                    $id = (string) $this->wAttr($node, 'id');
+                    if ($node->localName === 'bookmarkEnd') {
+                        // Only the end of a bookmark that was read: a hidden one's
+                        // (_GoBack) must not cut a user bookmark's range.
+                        if (isset($this->bookmarkIds[$id])) {
+                            $runs[] = ['__bookmark' => 'end', 'id' => $id];
+                        }
+                    } elseif (!isset($this->bookmarkIds[$id]) && $this->acceptBookmark((string) $this->wAttr($node, 'name'))) {
+                        $this->bookmarkIds[$id] = true;
+                        $runs[] = ['__bookmark' => 'start', 'id' => $id, 'name' => (string) $this->wAttr($node, 'name')];
+                    }
+
+                    break;
+                case 'pPr':
                 case 'proofErr':
                 case 'del':
                 case 'commentRangeStart':
@@ -2036,8 +2384,35 @@ final class DocxReader
 
                 continue;
             }
+            if (!$this->inBand && in_array($node->localName, ['fldChar', 'instrText'], true)) {
+                if ($state['fieldsOff'] ?? false) {
+                    continue;
+                }
+                $done = $this->bodyField($node, $state);
+                if ($done !== null) {
+                    if ($text !== '') {
+                        $out[] = $this->runFrom($text, $props, $link, $state);
+                        $text = '';
+                    }
+                    if ($done['field'] !== null) {
+                        $out[] = $this->runFrom($done['text'], $done['props'] ?? $props, $link, $state) + ['field' => $done['field']];
+                    }
+                }
+
+                continue;
+            }
             switch ($node->localName) {
                 case 't':
+                    $capture = $this->bodyFieldCapture($state);
+                    if ($capture === false) {
+                        break; // an instruction's own text, not the document's
+                    }
+                    if (is_int($capture)) {
+                        $state['fields'][$capture]['text'] .= $node->textContent;
+                        $state['fields'][$capture]['props'] ??= $props;
+
+                        break;
+                    }
                     if ($state['field'] === null) {
                         $piece = $node->textContent;
                         // The space Word puts between a footnote's own mark and
@@ -2137,6 +2512,122 @@ final class DocxReader
         }
 
         return $run;
+    }
+
+    /** Whether every complex field in the paragraph begins and ends in it. */
+    private function fieldsBalance(DOMElement $p): bool
+    {
+        $depth = 0;
+        foreach ($p->getElementsByTagName('*') as $el) {
+            if ($el->localName !== 'fldChar') {
+                continue;
+            }
+            $type = $this->wAttr($el, 'fldCharType');
+            if ($type === 'begin') {
+                $depth++;
+            } elseif ($type === 'end' && --$depth < 0) {
+                return false;
+            }
+        }
+
+        return $depth === 0;
+    }
+
+    /**
+     * One piece of a complex field in body text. Fields nest, so they are a stack.
+     * An allow-listed one ({@see Schema::fieldTokenOf()}) not inside another is
+     * captured: its cached result becomes a run with `field`, and is returned when
+     * its end arrives (`field` null for anything else that ends, which signals
+     * the text before it to be flushed). Any other field keeps its cached result
+     * as text, as before, and a field inside another's instruction (an IF's
+     * PAGE) is the instruction's, never text. Null while nothing ends.
+     *
+     * @param  array<string, mixed>  $state
+     * @return array{field: ?string, text: string, props: ?array<string, mixed>}|null
+     */
+    private function bodyField(DOMElement $node, array &$state): ?array
+    {
+        $top = array_key_last($state['fields']);
+        if ($node->localName === 'instrText') {
+            if ($top !== null && !$state['fields'][$top]['separated']) {
+                $state['fields'][$top]['instr'] .= $node->textContent;
+            }
+
+            return null;
+        }
+        $type = $this->wAttr($node, 'fldCharType');
+        // Fields nested deeper than this are counted, not tracked: the stack is
+        // walked for every piece of text, so a hostile file's depth is bounded.
+        if ($type === 'begin') {
+            if ($top !== null && $top + 1 >= self::MAX_FIELD_DEPTH) {
+                $state['fieldOverflow'] = ($state['fieldOverflow'] ?? 0) + 1;
+
+                return null;
+            }
+            $state['fields'][] = ['instr' => '', 'separated' => false, 'token' => null, 'text' => '', 'props' => null];
+
+            return null;
+        }
+        if (($state['fieldOverflow'] ?? 0) > 0) {
+            if ($type === 'end') {
+                $state['fieldOverflow']--;
+            }
+
+            return null;
+        }
+        if ($top === null) {
+            return null;
+        }
+        if ($type === 'separate') {
+            $state['fields'][$top]['separated'] = true;
+            $outer = array_slice($state['fields'], 0, $top);
+            $free = array_filter($outer, static fn (array $f): bool => !$f['separated'] || $f['token'] !== null) === [];
+            $token = self::fieldToken($state['fields'][$top]['instr']);
+            if ($free && $token !== '') {
+                $state['fields'][$top]['token'] = $token;
+            }
+
+            return null;
+        }
+        if ($type === 'end') {
+            $field = array_pop($state['fields']);
+            $parent = array_key_last($state['fields']);
+            if ($field['token'] !== null) {
+                return ['field' => $field['token'], 'text' => $field['text'], 'props' => $field['props']];
+            }
+            if ($parent !== null) {
+                return null;
+            }
+
+            return ['field' => null, 'text' => '', 'props' => null];
+        }
+
+        return null;
+    }
+
+    /**
+     * Where body text goes while fields are open: false when it is an instruction's
+     * (some open field has not reached its result), the index of the capturing
+     * field when one is capturing, and null when it is plain text.
+     *
+     * @param  array<string, mixed>  $state
+     */
+    private function bodyFieldCapture(array $state): int|false|null
+    {
+        if ($this->inBand || ($state['fieldsOff'] ?? false)) {
+            return null;
+        }
+        $capture = null;
+        foreach ($state['fields'] ?? [] as $i => $field) {
+            if (!$field['separated']) {
+                return false;
+            }
+            if ($field['token'] !== null && $capture === null) {
+                $capture = $i;
+            }
+        }
+
+        return $capture;
     }
 
     /**
@@ -2289,12 +2780,14 @@ final class DocxReader
         foreach ($runs as $run) {
             // A footnote run's text is always "", and it is never merged: two
             // identical footnotes in a row are two footnotes.
-            $isNote = array_key_exists('footnote', $run);
-            if ($run['text'] === '' && !$isNote) {
+            // A field is never merged either (two {page} in a row are two
+            // fields), and a bookmark or a field with no text is still there.
+            $isNote = array_key_exists('footnote', $run) || array_key_exists('field', $run);
+            if ($run['text'] === '' && !$isNote && !array_key_exists('bookmark', $run)) {
                 continue;
             }
             $last = $merged !== [] ? count($merged) - 1 : null;
-            if ($last !== null && !$isNote && !array_key_exists('footnote', $merged[$last])) {
+            if ($last !== null && !$isNote && !array_key_exists('footnote', $merged[$last]) && !array_key_exists('field', $merged[$last])) {
                 $a = $merged[$last];
                 $b = $run;
                 $aProps = $a;

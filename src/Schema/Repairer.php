@@ -61,7 +61,95 @@ final class Repairer
             $doc['page'] = $this->repairPage($doc['page'], 'page');
         }
 
-        return ['doc' => $doc, 'notes' => $this->notes];
+        return ['doc' => $this->repairBookmarks($doc), 'notes' => $this->notes];
+    }
+
+    /**
+     * The document-wide half of bookmarks and internal links, once every run is
+     * repaired: past {@see Schema::MAX_TOCS} a toc is dropped; a bookmark whose
+     * name is taken (ignoring case) or that is past {@see Schema::MAX_BOOKMARKS}
+     * loses its name; and an internal link to no bookmark loses its link and
+     * keeps its text. Each with a note.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     */
+    private function repairBookmarks(array $doc): array
+    {
+        $tocs = 0;
+        $kept = [];
+        foreach ($doc['blocks'] as $i => $block) {
+            if (is_array($block) && ($block['type'] ?? null) === 'toc' && ++$tocs > Schema::MAX_TOCS) {
+                $this->note("blocks[{$i}]", 'dropped a toc: a document holds at most ' . Schema::MAX_TOCS);
+
+                continue;
+            }
+            $kept[] = $block;
+        }
+        $doc['blocks'] = $kept;
+
+        $names = [];
+        $seen = [];
+        $doc = RunWalk::map($doc, function (array $run, string $path, string $where) use (&$names, &$seen): array {
+            if ($where !== 'body' || !Schema::isBookmarkName($run['bookmark'] ?? null)) {
+                return $run;
+            }
+            $key = strtolower($run['bookmark']);
+            if (isset($seen[$key])) {
+                $this->note("{$path}.bookmark", "dropped bookmark \"{$run['bookmark']}\": the name is already used at {$seen[$key]}");
+                unset($run['bookmark']);
+            } elseif (count($seen) >= Schema::MAX_BOOKMARKS) {
+                $this->note("{$path}.bookmark", 'dropped a bookmark: a document holds at most ' . Schema::MAX_BOOKMARKS);
+                unset($run['bookmark']);
+            } else {
+                $seen[$key] = $path;
+                $names[$key] = true;
+            }
+
+            return $run;
+        });
+
+        return RunWalk::map($doc, function (array $run, string $path) use ($names): array {
+            $link = $run['link'] ?? null;
+            if (is_string($link) && str_starts_with($link, '#') && !isset($names[strtolower(substr($link, 1))])) {
+                $this->note("{$path}.link", "dropped the link to \"{$link}\": no bookmark of that name; the text stays");
+                unset($run['link']);
+            }
+
+            return $run;
+        });
+    }
+
+    /**
+     * A table of contents: `levels` coerced and clamped to 1-6 (dropped when it
+     * is not a number); one nested in a quote or a table cell is dropped.
+     *
+     * @param  array<string, mixed>  $block
+     * @return array<string, mixed>|null
+     */
+    private function repairToc(array $block, string $path): ?array
+    {
+        if ($this->context === 'body' && preg_match('/^blocks\[\d+\]$/', $path) !== 1) {
+            $this->note($path, 'dropped a toc: it goes at the top level of the body, not in a quote or a table cell');
+
+            return null;
+        }
+        $out = ['type' => 'toc'];
+        if (array_key_exists('levels', $block)) {
+            $levels = $block['levels'];
+            if (!is_int($levels) && !(is_numeric($levels) && (int) $levels == $levels)) {
+                $this->note("{$path}.levels", 'dropped toc levels that are not a whole number');
+
+                return $out;
+            }
+            $clamped = max(1, min(Schema::MAX_HEADING_LEVEL, (int) $levels));
+            if ($clamped !== $levels) {
+                $this->note("{$path}.levels", "set toc levels {$levels} to {$clamped}");
+            }
+            $out['levels'] = $clamped;
+        }
+
+        return $out;
     }
 
     /**
@@ -266,6 +354,7 @@ final class Repairer
             'chart' => $this->repairChart($block, $path),
             'pageBreak' => $this->repairPageBreak($block, $path),
             'hr' => ['type' => 'hr'],
+            'toc' => $this->repairToc($block, $path),
         };
     }
 
@@ -738,6 +827,30 @@ final class Repairer
                 unset($run['link']);
                 $this->note("{$runPath}.link", 'dropped non-string link');
             }
+            if (array_key_exists('bookmark', $run)) {
+                $name = $run['bookmark'];
+                if ($this->context !== 'body') {
+                    unset($run['bookmark']);
+                    $this->note("{$runPath}.bookmark", $this->context === 'band'
+                        ? 'dropped a bookmark: a header or footer cannot hold one'
+                        : 'dropped a bookmark: a footnote cannot hold one');
+                } elseif (!Schema::isBookmarkName($name) || str_starts_with($name, Schema::BOOKMARK_RESERVED_PREFIX)) {
+                    unset($run['bookmark']);
+                    $this->note("{$runPath}.bookmark", 'dropped a bookmark whose name is not a letter, then letters, digits or _, at most 40 characters (or is reserved)');
+                }
+            }
+            if (array_key_exists('field', $run)) {
+                $field = $run['field'];
+                unset($run['field']);
+                if ($this->context === 'band' && Schema::isFieldToken($field)) {
+                    $run['text'] = $field;
+                    $this->note("{$runPath}.field", 'moved the field into the text as its token: a header or footer takes the token in its text');
+                } elseif (Schema::isFieldToken($field)) {
+                    $run['field'] = $field;
+                } else {
+                    $this->note("{$runPath}.field", 'dropped a field that is not exactly one field token; the text stays');
+                }
+            }
             $out[] = $run;
         }
 
@@ -758,6 +871,12 @@ final class Repairer
     {
         $note = $run['footnote'];
         unset($run['footnote']);
+        foreach (['bookmark', 'field'] as $key) {
+            if (array_key_exists($key, $run)) {
+                unset($run[$key]);
+                $this->note("{$path}.{$key}", "dropped {$key} from a footnote mark");
+            }
+        }
         $out = [];
         if (is_scalar($run['text'] ?? null) && (string) $run['text'] !== '') {
             $run['text'] = (string) $run['text'];
