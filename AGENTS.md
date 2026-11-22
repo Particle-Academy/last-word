@@ -286,6 +286,12 @@ $doc = [
   `Agent::layout()` measures every run, deleted ones included, as Word's All
   Markup view draws them. Another renderer (fine-print, last-word-ui) does not
   know `revision` yet and would draw a deleted run as text: accept first.
+- **Beside the other run features:** a run with a revision keeps its `bookmark`,
+  an internal `link: "#name"` stays an anchor, an inserted `field` stays a live
+  field, and a review comment on part of a revision does not split it. A
+  `field` cannot be deleted or moved away (`revision_combination_invalid`);
+  read back, a deleted field keeps its shown text as deleted text. A table of
+  contents lists a heading's accepted text.
 - **No timestamp is added.** `w:date` is written only when the model has a
   `date`, and every `w:id` is numbered from 1 in the order written, so
   `toBytes()` stays deterministic.

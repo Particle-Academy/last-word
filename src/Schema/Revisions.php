@@ -482,6 +482,7 @@ final class Revisions
                     $has('delete') && $has('moveFrom') => 'a run cannot be both deleted and moved away',
                     $has('moveFrom') && ($has('insert') || $has('moveTo')) => 'moved-away text is already gone: moveFrom goes with nothing but format',
                     $isNote && ($has('moveFrom') || $has('moveTo') || $has('format')) => 'a footnote mark takes insert and delete only',
+                    array_key_exists('field', $run) && ($has('delete') || $has('moveFrom')) => 'a field cannot be tracked as deleted or moved away: Word keeps a deleted field\'s code as w:delInstrText, which this package does not write',
                     default => null,
                 };
                 if ($combination !== null) {
@@ -1205,6 +1206,7 @@ final class Revisions
         $names = [];      // model names in use
         $total = 0;
         $over = [];
+        $unkeptFields = 0;
         $assign = static function (string $temp, string $owner, int $index, ?string $link, ?string $arrival) use (&$canon, &$total): ?string {
             $seen = $canon[$temp] ?? null;
             if ($seen !== null && $index >= 0 && $seen[1] === $owner && $seen[2] === $index - 1 && $seen[3] === $link && $seen[4] === $arrival) {
@@ -1262,7 +1264,7 @@ final class Revisions
 
                 return $owner;
             },
-            static function (array $run, string $path, string $where, string $ownerPath, int $index) use ($assign, $order, &$over, &$nameMap, &$names): array {
+            static function (array $run, string $path, string $where, string $ownerPath, int $index) use ($assign, $order, &$over, &$nameMap, &$names, &$unkeptFields): array {
                 if (!is_array($run['revision'] ?? null)) {
                     return $run;
                 }
@@ -1312,12 +1314,17 @@ final class Revisions
 
                     return ['text' => '', self::GONE => true];
                 }
-                $run['revision'] = $rev;
+                if (array_key_exists('field', $run) && (isset($rev['delete']) || isset($rev['moveFrom']))) {
+                    unset($run['field']); // a deleted field: its shown text is kept, as deleted text
+                    $unkeptFields++;
+                }
+                unset($run['revision']);
+                $run['revision'] = $rev; // always the run's last key
 
                 return $run;
             },
         );
-        $unkept += count($over);
+        $unkept += count($over) + $unkeptFields;
         if ($over !== []) {
             $doc = self::map($doc, static function (array $owner): array {
                 if (is_array($owner['runs'] ?? null) && array_is_list($owner['runs'])) {

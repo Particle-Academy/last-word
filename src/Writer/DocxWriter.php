@@ -2034,15 +2034,15 @@ final class DocxWriter
     /**
      * @param  list<array<string, mixed>>  $runs
      */
-    private function renderRuns(array $runs): string
+    private function renderRuns(array $runs, bool $marked = false): string
     {
+        if (!$marked && !$this->inBand && !$this->inFootnote && $this->commentsPart !== null) {
+            $runs = $this->commentsPart->marks($runs); // review comments: range markers, body only
+        }
         if (!$this->inBand && self::hasRunRevision($runs)) {
             return $this->renderRevisedRuns($runs);
         }
         $xml = '';
-        if (!$this->inBand && !$this->inFootnote && $this->commentsPart !== null) {
-            $runs = $this->commentsPart->marks($runs); // review comments: range markers, body only
-        }
         foreach ($runs as $run) {
             if (!is_array($run)) {
                 continue;
@@ -2612,6 +2612,9 @@ final class DocxWriter
 
     /**
      * Runs, some carrying a revision, grouped into the elements Word wraps them in.
+     * A review comment's range markers (the pseudo-runs {@see CommentsPart::marks()}
+     * places) are transparent: inside one revision they stay inside it, so a
+     * comment on part of an insertion does not split the insertion in two.
      *
      * @param  array<mixed>  $runs
      */
@@ -2629,32 +2632,28 @@ final class DocxWriter
                 continue;
             }
             [$arrKind, $arr, $depKind, $dep] = self::revisionParts($run);
-            if ($arr === null && $dep === null) {
+            if (self::isMarker($run) || ($arr === null && $dep === null)) {
                 // A run with no revision element: one without any revision goes the
                 // ordinary way, so whatever that path writes for a run, it still does.
                 $xml .= is_array($run['revision'] ?? null)
                     ? $this->renderOneRun($run, self::linkOf($run), false) // a formatting change only
-                    : $this->renderRuns([$run]);
+                    : $this->renderRuns([$run], true);
                 $i++;
 
                 continue;
             }
             [$kind, $outer] = $arr !== null ? [$arrKind, $arr] : [$depKind, $dep];
             $link = self::linkOf($run);
-            $group = [];
-            while ($i < $n && is_array($runs[$i])) {
-                [$ak, $a, $dk, $d] = self::revisionParts($runs[$i]);
+            $continues = static function (array $r) use ($arr, $kind, $outer, $link): bool {
+                [$ak, $a, $dk, $d] = self::revisionParts($r);
                 [$k, $o] = $arr !== null ? [$ak, $a] : ($a === null ? [$dk, $d] : [null, null]);
-                if ($k !== $kind || $o === null || ($o['id'] ?? null) !== ($outer['id'] ?? null) || self::linkOf($runs[$i]) !== $link) {
-                    break;
-                }
-                $group[] = $runs[$i];
-                $i++;
-            }
-            if ($group === []) {
-                $group[] = $run;
-                $i++;
-            }
+
+                return $k === $kind && $o !== null && ($o['id'] ?? null) === ($outer['id'] ?? null) && self::linkOf($r) === $link;
+            };
+            $end = self::span($runs, $i, $continues);
+            $group = array_slice($runs, $i, max(1, $end - $i));
+            $i = max($i + 1, $end);
+            $real = count(array_filter($group, static fn (mixed $g): bool => !self::isMarker($g)));
 
             $start = $this->moveRangeStart($kind, $outer);
             $tag = self::REVISION_TAGS[$kind];
@@ -2667,50 +2666,99 @@ final class DocxWriter
                 $m = count($group);
                 for ($k = 0; $k < $m;) {
                     [, , $dk, $d] = self::revisionParts($group[$k]);
-                    if ($d === null) {
+                    if ($d === null || self::isMarker($group[$k])) {
                         $body .= $this->renderOneRun($group[$k], null, false);
                         $k++;
 
                         continue;
                     }
+                    $same = static function (array $r) use ($dk, $d): bool {
+                        [, , $dk2, $d2] = self::revisionParts($r);
+
+                        return $d2 !== null && $dk2 === $dk && ($d2['id'] ?? null) === ($d['id'] ?? null);
+                    };
+                    $stop = max($k + 1, self::span($group, $k, $same));
                     $body .= '<w:' . self::REVISION_TAGS[$dk] . $this->revisionAttrs($d) . '>';
-                    while ($k < $m) {
-                        [, , $dk2, $d2] = self::revisionParts($group[$k]);
-                        if ($d2 === null || $dk2 !== $dk || ($d2['id'] ?? null) !== ($d['id'] ?? null)) {
-                            break;
-                        }
+                    for (; $k < $stop; $k++) {
                         $body .= $this->renderOneRun($group[$k], null, true);
-                        $k++;
                     }
                     $body .= '</w:' . self::REVISION_TAGS[$dk] . '>';
                 }
             }
             $body .= '</w:' . $tag . '>';
-            $xml .= $start . $this->withLink($link, $body) . $this->moveRangeEnd($kind, $outer, count($group));
+            $xml .= $start . $this->withLink($link, $body) . $this->moveRangeEnd($kind, $outer, $real);
         }
 
         return $xml;
     }
 
+    /** Whether a run-list entry is a review comment's range marker, not a run. */
+    private static function isMarker(mixed $run): bool
+    {
+        return is_array($run) && isset($run[CommentsPart::RAW]);
+    }
+
     /**
-     * One run with no revision element around it: a footnote mark, or a run,
-     * in a hyperlink when `$link` names one.
+     * Where a span that starts at `$i` ends (exclusive): every run `$continues`
+     * accepts, and the markers between them, never a marker at its end.
+     *
+     * @param  list<mixed>  $runs
+     */
+    private static function span(array $runs, int $i, callable $continues): int
+    {
+        $n = count($runs);
+        $end = $i;
+        $j = $i;
+        while ($j < $n && is_array($runs[$j])) {
+            if (self::isMarker($runs[$j])) {
+                $j++;
+
+                continue;
+            }
+            if (!$continues($runs[$j])) {
+                break;
+            }
+            $end = ++$j;
+        }
+
+        return $end;
+    }
+
+    /**
+     * One run with no revision element around it: a comment's marker, a footnote
+     * mark, or a run with its bookmark, in a hyperlink when `$link` names one.
      *
      * @param  array<string, mixed>  $run
      */
     private function renderOneRun(array $run, ?string $link, bool $deleted): string
     {
+        if (self::isMarker($run)) {
+            return (string) $run[CommentsPart::RAW];
+        }
         if (array_key_exists('footnote', $run)) {
             return $this->renderFootnoteRun($run);
         }
+        $xml = $this->withLink($link, $this->renderRun($run, $deleted));
+        // A bookmark spans its run, as the ordinary path writes it. Body only.
+        $name = $run['bookmark'] ?? null;
+        if (Schema::isBookmarkName($name) && !$this->inBand && !$this->inFootnote) {
+            $id = ++$this->bookmarkId;
+            $xml = '<w:bookmarkStart w:id="' . $id . '" w:name="' . Xml::attr($name) . '"/>' . $xml . '<w:bookmarkEnd w:id="' . $id . '"/>';
+        }
 
-        return $this->withLink($link, $this->renderRun($run, $deleted));
+        return $xml;
     }
 
+    /** A hyperlink around `$xml`: an anchor for an internal link (`#name`), a relationship for any other. */
     private function withLink(?string $link, string $xml): string
     {
         if ($link === null) {
             return $xml;
+        }
+        if (str_starts_with($link, '#') && Schema::isBookmarkName(substr($link, 1))) {
+            $anchor = $this->bookmarkNames[strtolower(substr($link, 1))] ?? substr($link, 1);
+
+            return '<w:hyperlink w:anchor="' . Xml::attr($anchor) . '" w:history="1">' . $xml . '</w:hyperlink>';
         }
         $rId = 'rId' . ++$this->relCounter;
         $this->rels[$rId] = ['type' => 'hyperlink', 'target' => $link];
