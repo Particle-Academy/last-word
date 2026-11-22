@@ -104,6 +104,8 @@ function colTexts(array $doc): array
                 }
             }
             $walk($b['blocks'] ?? []);
+            // List items are blocks enough here: their runs, then their children.
+            $walk(array_map(static fn (array $i): array => ['runs' => $i['runs'] ?? [], 'blocks' => $i['children'] ?? []], $b['items'] ?? []));
         }
     };
     $walk($doc['blocks'] ?? []);
@@ -290,6 +292,19 @@ describe('the round trip', function () {
         ]]],
     ]);
 
+    it('writes every width it accepts unscaled, so an exact fit reads back exactly', function (array $columns) {
+        $doc = ['page' => ['columns' => $columns], 'blocks' => [colP('a')]];
+        $bytes = colBytes($doc);
+        $read = Agent::read($bytes);
+
+        expect($read['page']['columns'] ?? null)->toBe($columns)
+            ->and(Agent::toBytes($read))->toBe($bytes);
+    })->with([
+        'to the twip, uneven' => [['count' => 2, 'widths' => [222.05, 221.95], 'space' => 24]],
+        'to the twip, three' => [['count' => 3, 'widths' => [144.05, 144, 143.95], 'space' => 18]],
+        'to the twip, own gaps' => [['count' => 3, 'widths' => [150.05, 150, 139.95], 'spaces' => [12, 16]]],
+    ]);
+
     it('reads what Word itself writes for unequal columns: w:equalWidth="0" and no w:num', function () {
         $read = Agent::read(colDocx(colTextP('Body') . '<w:sectPr>' . COL_LETTER
             . '<w:cols w:equalWidth="0"><w:col w:w="2640" w:space="720"/><w:col w:w="6000"/></w:cols></w:sectPr>'));
@@ -298,12 +313,29 @@ describe('the round trip', function () {
             ->and($read)->not->toHaveKey('unrepresented');
     });
 
-    it('reads a column break in the middle of a paragraph as the paragraph, then the break: no text lost', function () {
-        $read = Agent::read(colDocx('<w:p><w:r><w:t>Left</w:t><w:br w:type="column"/><w:t>Right</w:t></w:r></w:p>'
+    it('splits a paragraph at a column break in two columns, so the words either side stay apart', function (string $runs, array $blocks) {
+        $read = Agent::read(colDocx('<w:p>' . $runs . '</w:p>'
             . '<w:sectPr>' . COL_LETTER . '<w:cols w:num="2" w:space="720"/></w:sectPr>'));
 
-        expect($read['blocks'])->toBe([['type' => 'paragraph', 'runs' => [['text' => 'LeftRight']]], ['type' => 'columnBreak']]);
-    });
+        expect($read['blocks'])->toBe($blocks)
+            ->and($read)->not->toHaveKey('unrepresented');
+    })->with([
+        'one run' => ['<w:r><w:t>Left</w:t><w:br w:type="column"/><w:t>Right</w:t></w:r>', [
+            ['type' => 'paragraph', 'runs' => [['text' => 'Left']]], ['type' => 'columnBreak'], ['type' => 'paragraph', 'runs' => [['text' => 'Right']]],
+        ]],
+        'across runs, formatting kept' => ['<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:br w:type="column"/><w:t>plain</w:t></w:r>', [
+            ['type' => 'paragraph', 'runs' => [['text' => 'Bold', 'bold' => true]]], ['type' => 'columnBreak'], ['type' => 'paragraph', 'runs' => [['text' => 'plain']]],
+        ]],
+        'two breaks' => ['<w:r><w:t>A</w:t><w:br w:type="column"/><w:t>B</w:t><w:br w:type="column"/><w:t>C</w:t></w:r>', [
+            ['type' => 'paragraph', 'runs' => [['text' => 'A']]], ['type' => 'columnBreak'], ['type' => 'paragraph', 'runs' => [['text' => 'B']]], ['type' => 'columnBreak'], ['type' => 'paragraph', 'runs' => [['text' => 'C']]],
+        ]],
+        'text before only' => ['<w:r><w:t>Left</w:t><w:br w:type="column"/></w:r>', [
+            ['type' => 'paragraph', 'runs' => [['text' => 'Left']]], ['type' => 'columnBreak'],
+        ]],
+        'a page break and a column break, nothing else' => ['<w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>', [
+            ['type' => 'columnBreak'], ['type' => 'pageBreak'],
+        ]],
+    ]);
 });
 
 /* ---------------- what validation refuses ---------------- */
@@ -331,6 +363,8 @@ describe('the hostile set: validation', function () {
         '45 on Letter' => [['page' => ['columns' => ['count' => 45]], 'blocks' => []], ['columns_too_wide']],
         '27 at zero gap on Letter' => [['page' => ['columns' => ['count' => 27, 'space' => 0]], 'blocks' => []], ['columns_too_wide']],
         'widths past the page' => [['page' => ['columns' => ['count' => 2, 'widths' => [300, 300]]], 'blocks' => []], ['columns_too_wide']],
+        'past the page by one twip, which the writer could not write unscaled' => [['page' => ['columns' => ['count' => 2, 'widths' => [216.04, 216], 'space' => 36]], 'blocks' => []], ['columns_too_wide']],
+        'one twip over, in the widths alone' => [['page' => ['columns' => ['count' => 2, 'widths' => [216.05, 216], 'space' => 36]], 'blocks' => []], ['columns_too_wide']],
         'widths and gaps past the page by one point' => [['page' => ['columns' => ['count' => 2, 'widths' => [300, 151], 'space' => 18]], 'blocks' => []], ['columns_too_wide']],
         'an enormous width' => [['page' => ['columns' => ['count' => 2, 'widths' => [1.0E308, 100]]], 'blocks' => []], ['columns_too_wide']],
         'too few widths' => [['page' => ['columns' => ['count' => 3, 'widths' => [100, 100]]], 'blocks' => []], ['columns_width_invalid']],
@@ -479,18 +513,29 @@ describe('the hostile set: reading', function () {
             ->and($read['unrepresented'] ?? [])->toContain(['where' => '/page', 'kind' => 'layout-not-preserved', 'count' => 1]);
     });
 
-    it('keeps the text of a column break the model cannot hold, and reports the break', function (string $body) {
+    it('keeps a column break the model cannot hold as a line break, words apart, and reports it', function (string $body, array $texts) {
         $read = Agent::read(colDocx($body));
 
-        expect(colTexts($read))->toBe(['Before', 'After'])
+        // As main read it: the break is a newline, so "Before" and "After" never fuse.
+        expect(colTexts($read))->toBe($texts)
             ->and(array_column($read['blocks'], 'type'))->not->toContain('columnBreak')
             ->and($read['unrepresented'] ?? [])->toContain(['where' => '/blocks', 'kind' => 'layout-not-preserved', 'count' => 1])
             ->and(Agent::validate($read))->toBe([]);
     })->with([
-        'in a one-column section' => [colTextP('Before') . '<w:p><w:r><w:br w:type="column"/></w:r></w:p>' . colTextP('After') . '<w:sectPr>' . COL_LETTER . '</w:sectPr>'],
-        'in a table cell' => ['<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Before</w:t><w:br w:type="column"/></w:r></w:p></w:tc></w:tr></w:tbl>'
-            . colTextP('After') . '<w:sectPr>' . COL_LETTER . '<w:cols w:num="2" w:space="720"/></w:sectPr>'],
+        'mid-paragraph, one column' => ['<w:p><w:r><w:t>Before</w:t><w:br w:type="column"/><w:t>After</w:t></w:r></w:p><w:sectPr>' . COL_LETTER . '</w:sectPr>', ["Before\nAfter"]],
+        'its own paragraph, one column' => [colTextP('Before') . '<w:p><w:r><w:br w:type="column"/></w:r></w:p>' . colTextP('After') . '<w:sectPr>' . COL_LETTER . '</w:sectPr>', ['Before', "\n", 'After']],
+        'a table cell, two columns' => ['<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Before</w:t><w:br w:type="column"/><w:t>After</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+            . '<w:sectPr>' . COL_LETTER . '<w:cols w:num="2" w:space="720"/></w:sectPr>', ["Before\nAfter"]],
+        'a list item, two columns' => ['<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Before</w:t><w:br w:type="column"/><w:t>After</w:t></w:r></w:p>'
+            . '<w:sectPr>' . COL_LETTER . '<w:cols w:num="2" w:space="720"/></w:sectPr>', ["Before\nAfter"]],
     ]);
+
+    it('counts a column break beside a page break in one column, rather than losing it', function () {
+        $read = Agent::read(colDocx('<w:p><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r></w:p>' . colTextP('After') . '<w:sectPr>' . COL_LETTER . '</w:sectPr>'));
+
+        expect(array_column($read['blocks'], 'type'))->toContain('pageBreak')
+            ->and($read['unrepresented'] ?? [])->toContain(['where' => '/blocks', 'kind' => 'layout-not-preserved', 'count' => 1]);
+    });
 
     it('reads a continuous section that changes more than columns as the columns, and reports the rest', function () {
         $narrow = '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
