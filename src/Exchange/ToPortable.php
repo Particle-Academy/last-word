@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LastWord\Exchange;
 
+use LastWord\Schema\Revisions;
 use stdClass;
 
 /**
@@ -76,7 +77,12 @@ final class ToPortable
         $x = new self($limits['cellBytes'], $limits['columns']);
         foreach ($picked['indexes'] as $i) {
             if (is_array($blocks[$i])) {
-                $x->block($blocks[$i], '/blocks/'.$i);
+                // Portable content has no tracked changes: accepted, so deleted text is never live text.
+                [$block, $accepted] = Revisions::acceptBlock($blocks[$i]);
+                if ($accepted > 0) {
+                    $x->report->add('tracked-change', '/blocks/'.$i, $accepted);
+                }
+                $x->block($block, '/blocks/'.$i);
             } else {
                 $x->report->add('layout-not-preserved', '/blocks/'.$i);
             }

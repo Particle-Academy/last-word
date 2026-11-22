@@ -6,6 +6,7 @@ namespace LastWord\Markdown;
 
 use LastWord\Exchange\Report;
 use LastWord\Helpers\Chart;
+use LastWord\Schema\Revisions;
 
 /**
  * Doc model → GFM markdown. The Editor bridge's outbound half — hand-rolled
@@ -95,6 +96,11 @@ final class ToMarkdown
             $block = $blocks[$i] ?? null;
             if (!is_array($block)) {
                 continue;
+            }
+            // GFM has no tracked changes: accepted, so deleted text is never live text.
+            [$block, $accepted] = Revisions::acceptBlock($block);
+            if ($accepted > 0) {
+                $this->report?->add('tracked-change', '/blocks/' . $i, $accepted);
             }
             $md = $this->block($block, '/blocks/' . $i);
             if ($md !== null && $md !== '') {

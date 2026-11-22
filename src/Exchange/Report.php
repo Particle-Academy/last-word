@@ -45,6 +45,7 @@ final class Report
         'merge-unread' => 'approximated',
         'quote-flattened' => 'approximated',
         'structure-not-recovered' => 'approximated',
+        'tracked-change' => 'approximated',
         'typed-as-text' => 'approximated',
     ];
 

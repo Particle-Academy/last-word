@@ -373,6 +373,7 @@ final class Schema
                 'letterSpacing' => ['type' => 'number', 'description' => 'Tracking in points; may be negative.'],
                 'footnote' => ['$ref' => '#/$defs/footnote'],
                 'comments' => Comments::runJsonSchema(),
+                'revision' => Revisions::runJsonSchema(),
             ],
         ];
 
@@ -385,6 +386,7 @@ final class Schema
             'properties' => [
                 'runs' => $runs,
                 'children' => ['type' => 'array', 'items' => ['$ref' => '#/$defs/listItem']],
+                'revision' => Revisions::paragraphJsonSchema(Revisions::ITEM_KINDS),
             ] + $paragraphProps,
         ];
 
@@ -403,6 +405,7 @@ final class Schema
                     'type' => ['const' => 'heading'],
                     'level' => ['type' => 'integer', 'minimum' => 1, 'maximum' => self::MAX_HEADING_LEVEL],
                     'runs' => $runs,
+                    'revision' => Revisions::paragraphJsonSchema(Revisions::PARAGRAPH_KINDS),
                 ] + $paragraphProps,
             ],
             'paragraph' => [
@@ -411,6 +414,7 @@ final class Schema
                 'properties' => [
                     'type' => ['const' => 'paragraph'],
                     'runs' => $runs,
+                    'revision' => Revisions::paragraphJsonSchema(Revisions::PARAGRAPH_KINDS),
                 ] + $paragraphProps,
             ],
             'list' => [
@@ -573,6 +577,7 @@ final class Schema
             '$defs' => [
                 'run' => $run,
                 'comment' => Comments::jsonSchemaDef(),
+                'revisionEntry' => Revisions::entryJsonSchema(),
                 'listItem' => $listItem,
                 'border' => $border,
                 'boxBorders' => $boxBorders,

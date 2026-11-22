@@ -37,7 +37,7 @@ Static façade `LastWord\Agent`, mirrored exactly in the Node package:
 | `Agent::toBytes($doc)` | DOCX bytes; throws `SchemaException` when invalid |
 | `Agent::write($doc, $path)` | write to disk → `{path, bytes, blocks}` |
 | `Agent::toBytes($doc, ['template' => $dotx])` | render onto a house template's styles + theme |
-| `Agent::read($bytesOrPath, $options)` / `Agent::fromBytes($bytes, $options)` | parse a .docx, .doc, .odt or .rtf back into the model; see *Tracked changes* below |
+| `Agent::read($bytesOrPath, $options)` / `Agent::fromBytes($bytes, $options)` | parse a .docx, .doc, .odt or .rtf back into the model; see the two *Tracked changes* sections below |
 | `Agent::toMarkdown($doc)` / `Agent::fromMarkdown($md)` | the Editor bridge |
 | `Agent::describe($doc)` | plain-text summary (title, block counts, word count) |
 | `Agent::jsonSchema()` | JSON Schema for LLM tool registration |
@@ -87,6 +87,7 @@ if ($read['trackedChanges']['present'] ?? false) {
   `formatChanges` hold the counts (the message names them too). A clean file
   reads normally. A non-boolean value throws `InvalidArgumentException`.
 - **The default is unchanged:** without the option, revisions are still accepted.
+  To keep them instead, see *Tracked changes (writing and keeping)* below.
 - **.docx and .dotx only.** The .doc, .odt and .rtf readers do not detect
   revisions, so neither the field nor the option says anything about them.
 - **The Node package (`last-word-js`) does not have this yet.**
@@ -200,6 +201,86 @@ $doc = [
   `toPortable()` report them with kind `comment`.
 - **.docx only, PHP only.** The .doc, .odt and .rtf readers read no comments, and
   the Node and Python packages do not have them yet.
+
+## Tracked changes (writing and keeping)
+
+**To keep a person's tracked changes through read-edit-write, read with
+`preserveTrackedChanges`.** The revisions then come back in the model, and
+writing it produces them again:
+
+```php
+$read = LastWord\Agent::read($docx, ['preserveTrackedChanges' => true]);
+$doc = [
+    'blocks' => [
+        ['type' => 'paragraph', 'runs' => [
+            ['text' => 'The fee is '],
+            ['text' => 'ten', 'revision' => ['delete' => ['id' => 'r1', 'author' => 'Ann Editor', 'date' => '2026-11-20T10:00:00Z']]],
+            ['text' => 'twelve', 'revision' => ['insert' => ['id' => 'r2', 'author' => 'Ann Editor']]],
+            ['text' => ' pounds', 'bold' => true, 'revision' => ['format' => ['id' => 'r3', 'author' => 'Bo', 'from' => []]]],
+        ]],
+        ['type' => 'paragraph', 'runs' => [['text' => 'A new clause.']], 'revision' => ['insert' => ['id' => 'r4', 'author' => 'Ann Editor']]],
+    ],
+];
+```
+
+- **A run's `revision`:** `insert` (typed with tracking on), `delete` (deleted;
+  the text stays in the run), `moveFrom` / `moveTo` (moved away from here / to
+  here, with a `name` that is the same on both ends), `format` (formatting
+  changed; `from` is the run's formatting before, as run keys, `{}` for none).
+  `insert` with `delete` is a deletion inside an insertion. Refused together:
+  `insert` + `moveTo`, `delete` + `moveFrom`, `moveFrom` + anything but `format`.
+- **A paragraph's or heading's `revision`:** `insert` / `delete` are its
+  paragraph MARK (a new paragraph; one joined to the next when accepted), and
+  `format` is a paragraph-properties change, `from` holding the properties
+  before. The style is kept as it is. A list item takes `insert` / `delete`.
+- **Entry fields:** `id` (ASCII, `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`), `author`
+  (required), `date` (ISO 8601 date-time), and `name` on a move (same pattern).
+  Runs that carry the same id are ONE revision: consecutive runs of one paragraph
+  with the same link (a deletion inside an insertion also keeps one insertion).
+  A move's runs, each direction, are consecutive in reading order and may cross
+  paragraphs. Anything else is refused (`revision_range_broken`); give the run
+  its own id.
+- **Where:** body text, table cells, quotes and footnotes. A move is body text
+  only (`revision_move_outside_body`). Headers and footers carry none
+  (`revision_in_band`): on read they come back as the default read gives them,
+  with the count in `unrepresented` at `/page`.
+- **`author` is a label, not an identity.** Nothing here trusts it. It is still
+  refused when it holds control characters, bidi controls, zero-width
+  characters, line or paragraph separators, or a space of any kind at either end.
+  `validateAndRepair()` strips those, drops a bad date and gives a missing id
+  one; it never drops a revision (dropping a `delete` would make deleted text
+  live), so anything else stays an error.
+- **Caps:** `Revisions::MAX_REVISIONS` (10,000) per document, `MAX_AUTHOR` 255.
+- **Errors carry a `code`:** `revision_invalid`, `revision_id_invalid`,
+  `revision_id_duplicate`, `revision_author_invalid`, `revision_date_invalid`,
+  `revision_name_invalid`, `revision_from_invalid`,
+  `revision_combination_invalid`, `revision_text_empty`, `revision_range_broken`,
+  `revision_move_unpaired`, `revision_move_outside_body`, `revision_in_band`,
+  `revision_count_exceeded`.
+- **Reading:** ids come back as `r1`, `r2` ... in reading order (a paragraph's
+  before its runs'; a run's in the order insert, delete, moveFrom, moveTo,
+  format), so a document that uses those ids reads back as it was written and
+  writes the same bytes. A move keeps its file name when it is a valid one. What
+  cannot be kept is never dropped as text: a move without its pair reads as a
+  deletion or an insertion, an insertion nested in an insertion keeps the outer
+  one, an author with refused characters is cleaned (`Unknown` when nothing is
+  left), a bad date is dropped. Past the cap, and wherever the model has no slot
+  (row, cell, table, section and numbering changes, a paragraph mark's
+  formatting, a revision in a code block or the title), the revision is accepted,
+  as the default read accepts it. A deleted picture or page break is not made
+  live. All of it is counted in `unrepresented` as
+  `{where: "/blocks", kind: "tracked-change", count}`.
+- **Everything that has no notion of revisions sees them accepted:**
+  `toMarkdownWithReport()`, `toPortable()`, `catalog()` and the exports leave a
+  deleted or moved-away run out and report kind `tracked-change`; `describe()`
+  says `Tracked changes: N (...)` and counts words of the accepted text.
+  `Agent::layout()` measures every run, deleted ones included, as Word's All
+  Markup view draws them. Another renderer (fine-print, last-word-ui) does not
+  know `revision` yet and would draw a deleted run as text: accept first.
+- **No timestamp is added.** `w:date` is written only when the model has a
+  `date`, and every `w:id` is numbered from 1 in the order written, so
+  `toBytes()` stays deterministic.
+- **.docx only, PHP only.** The Node and Python packages do not have this yet.
 
 ## Agent guide
 

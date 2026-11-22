@@ -8,6 +8,7 @@ use LastWord\Helpers\Chart;
 use LastWord\Helpers\ImageSize;
 use LastWord\Helpers\Xml;
 use LastWord\Schema\RunWalk;
+use LastWord\Schema\Revisions;
 use LastWord\Schema\Schema;
 use RuntimeException;
 use ZipArchive;
@@ -239,6 +240,18 @@ final class DocxWriter
     /** True while a footnote's blocks render: a footnote run inside one renders as nothing. */
     private bool $inFootnote = false;
 
+    /** The last `w:id` given to a tracked change or a move range: they number from 1, in the order written. */
+    private int $revisionId = 0;
+
+    /**
+     * Each move's runs, per direction (`from|name`, `to|name`): how many the body
+     * holds, how many are written, and the id of its range, so the range opens
+     * before the first and closes after the last.
+     *
+     * @var array<string, array{total: int, seen: int, id: int}>
+     */
+    private array $moveRanges = [];
+
     /** Whether this document needs word/settings.xml (a page colour, even/odd headers, or footnotes). */
     private bool $hasSettings = false;
 
@@ -398,6 +411,7 @@ final class DocxWriter
                 $this->tocLevels = max($this->tocLevels, self::tocLevelsOf($block));
             }
         }
+        $this->startRevisions($doc);
 
         $hasTitle = array_key_exists('title', $doc);
         // meta.author (0.16.0) is dc:creator, beside the title in the core
@@ -1343,7 +1357,12 @@ final class DocxWriter
         if (str_starts_with($content, '<w:p>')) {
             $at = strlen('<w:p>');
             if (substr($content, $at, strlen('<w:pPr>')) === '<w:pPr>') {
-                $at = strpos($content, '</w:pPr>') + strlen('</w:pPr>');
+                // A formatting change holds the old properties in a w:pPr of its own: skip it.
+                $close = (int) strpos($content, '</w:pPr>');
+                if (substr($content, $close + strlen('</w:pPr>'), strlen('</w:pPrChange>')) === '</w:pPrChange>') {
+                    $close = (int) strpos($content, '</w:pPr>', $close + 1);
+                }
+                $at = $close + strlen('</w:pPr>');
             }
             $content = substr($content, 0, $at) . $mark . substr($content, $at);
         } else {
@@ -1452,7 +1471,7 @@ final class DocxWriter
             $runs = '<w:bookmarkStart w:id="' . $id . '" w:name="' . $name . '"/>' . $runs . '<w:bookmarkEnd w:id="' . $id . '"/>';
         }
 
-        return '<w:p>' . self::pPrXml($block, 'Heading' . $level) . $runs . '</w:p>';
+        return '<w:p>' . $this->revisedPPr($block, 'Heading' . $level) . $runs . '</w:p>';
     }
 
     /** A toc block's levels: its own when valid, else the default. */
@@ -1472,7 +1491,9 @@ final class DocxWriter
     {
         $text = '';
         foreach (is_array($runs) ? $runs : [] as $run) {
-            if (is_array($run) && !array_key_exists('footnote', $run) && is_string($run['text'] ?? null)) {
+            // A deleted or moved-away run is not in the heading Word lists.
+            $gone = is_array($run['revision'] ?? null) && (isset($run['revision']['delete']) || isset($run['revision']['moveFrom']));
+            if (is_array($run) && !$gone && !array_key_exists('footnote', $run) && is_string($run['text'] ?? null)) {
                 $text .= $run['text'];
             }
         }
@@ -1517,7 +1538,7 @@ final class DocxWriter
     /** @param  array<string, mixed>  $block */
     private function renderParagraph(array $block, ?string $styleOverride = null): string
     {
-        return '<w:p>' . self::pPrXml($block, $styleOverride)
+        return '<w:p>' . $this->revisedPPr($block, $styleOverride)
             . $this->renderRuns($block['runs'] ?? [])
             . '</w:p>';
     }
@@ -1546,6 +1567,7 @@ final class DocxWriter
             }
             $xml .= '<w:p><w:pPr><w:pStyle w:val="ListParagraph"/>'
                 . '<w:numPr><w:ilvl w:val="' . $lvl . '"/><w:numId w:val="' . $numId . '"/></w:numPr>'
+                . $this->markRevisionXml($item)
                 . '</w:pPr>'
                 . $this->renderRuns($item['runs'] ?? [])
                 . '</w:p>';
@@ -2014,6 +2036,9 @@ final class DocxWriter
      */
     private function renderRuns(array $runs): string
     {
+        if (!$this->inBand && self::hasRunRevision($runs)) {
+            return $this->renderRevisedRuns($runs);
+        }
         $xml = '';
         if (!$this->inBand && !$this->inFootnote && $this->commentsPart !== null) {
             $runs = $this->commentsPart->marks($runs); // review comments: range markers, body only
@@ -2065,8 +2090,58 @@ final class DocxWriter
         return $xml;
     }
 
-    /** @param  array<string, mixed>  $run */
-    private function renderRun(array $run): string
+    /**
+     * @param  array<string, mixed>  $run
+     * @param  bool  $deleted  inside a w:del or w:moveFrom: the text is w:delText
+     */
+    private function renderRun(array $run, bool $deleted = false): string
+    {
+        $rPr = self::rPrInner($run);
+        // A tracked formatting change: the properties the run had before, last in its rPr.
+        $format = !$this->inBand && is_array($run['revision'] ?? null) ? ($run['revision']['format'] ?? null) : null;
+        if (is_array($format)) {
+            $old = array_intersect_key(is_array($format['from'] ?? null) ? $format['from'] : [], array_flip(Revisions::RUN_FORMAT_KEYS));
+            if (isset($run['link'])) {
+                $old['link'] = $run['link']; // the link's own style is not part of the change
+            }
+            $oldPr = self::rPrInner($old);
+            $rPr .= '<w:rPrChange' . $this->revisionAttrs($format) . '>' . ($oldPr === '' ? '<w:rPr/>' : '<w:rPr>' . $oldPr . '</w:rPr>') . '</w:rPrChange>';
+        }
+
+        $text = (string) ($run['text'] ?? '');
+        $open = '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '');
+        if ($deleted) {
+            return $open . self::runBody($text, 'delText') . '</w:r>';
+        }
+
+        // A run's `field`: one allow-listed token as a live field, its text the
+        // cached result. Only a token reaches here, so the instruction is
+        // always one {@see Schema::splitFieldTokens()} built.
+        if (Schema::isFieldToken($run['field'] ?? null)) {
+            return $this->fieldRuns(Schema::splitFieldTokens($run['field'])[0], $open, $text !== '' ? $text : null);
+        }
+
+        // In a `{blocks}` band (last-word#6) the field tokens are live fields,
+        // as in a band's slots: complex fields, every piece in this run's
+        // formatting. In the body they are literal text, as always.
+        if ($this->inBand && preg_match(Schema::FIELD_TOKEN, $text) === 1) {
+            $out = '';
+            foreach (Schema::splitFieldTokens($text) as $piece) {
+                $out .= is_array($piece) ? $this->fieldRuns($piece, $open) : $open . self::runBody($piece) . '</w:r>';
+            }
+
+            return $out;
+        }
+
+        return $open . self::runBody($text) . '</w:r>';
+    }
+
+    /**
+     * A run's rPr children, without the wrapper: '' for a plain run.
+     *
+     * @param  array<string, mixed>  $run
+     */
+    private static function rPrInner(array $run): string
     {
         // rPr children in CT_RPr schema order — it is an xsd:sequence, so this
         // is the schema's order and not a preference:
@@ -2123,33 +2198,11 @@ final class DocxWriter
         // colors; the reader maps both back to `highlight`.
         $rPr .= self::shadingXml($run['highlight'] ?? null);
 
-        $text = (string) ($run['text'] ?? '');
-        $open = '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '');
-
-        // A run's `field`: one allow-listed token as a live field, its text the
-        // cached result. Only a token reaches here, so the instruction is
-        // always one {@see Schema::splitFieldTokens()} built.
-        if (Schema::isFieldToken($run['field'] ?? null)) {
-            return $this->fieldRuns(Schema::splitFieldTokens($run['field'])[0], $open, $text !== '' ? $text : null);
-        }
-
-        // In a `{blocks}` band (last-word#6) the field tokens are live fields,
-        // as in a band's slots: complex fields, every piece in this run's
-        // formatting. In the body they are literal text, as always.
-        if ($this->inBand && preg_match(Schema::FIELD_TOKEN, $text) === 1) {
-            $out = '';
-            foreach (Schema::splitFieldTokens($text) as $piece) {
-                $out .= is_array($piece) ? $this->fieldRuns($piece, $open) : $open . self::runBody($piece) . '</w:r>';
-            }
-
-            return $out;
-        }
-
-        return $open . self::runBody($text) . '</w:r>';
+        return $rPr;
     }
 
-    /** Run text as w:t pieces, a line break as w:br. */
-    private static function runBody(string $text): string
+    /** Run text as w:t pieces (w:delText in a deletion), a line break as w:br. */
+    private static function runBody(string $text, string $tag = 't'): string
     {
         $parts = explode("\n", str_replace("\r\n", "\n", $text));
         $body = '';
@@ -2158,11 +2211,11 @@ final class DocxWriter
                 $body .= '<w:br/>';
             }
             if ($part !== '') {
-                $body .= '<w:t xml:space="preserve">' . Xml::text($part) . '</w:t>';
+                $body .= '<w:' . $tag . ' xml:space="preserve">' . Xml::text($part) . '</w:' . $tag . '>';
             }
         }
         if ($body === '') {
-            $body = '<w:t xml:space="preserve"></w:t>';
+            $body = '<w:' . $tag . ' xml:space="preserve"></w:' . $tag . '>';
         }
 
         return $body;
@@ -2399,6 +2452,18 @@ final class DocxWriter
      */
     private static function pPrXml(array $block, ?string $style = null, string $numPr = ''): string
     {
+        $inner = self::pPrInner($block, $style, $numPr);
+
+        return $inner === '' ? '' : '<w:pPr>' . $inner . '</w:pPr>';
+    }
+
+    /**
+     * A paragraph's pPr children, without the wrapper: '' when it has none.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private static function pPrInner(array $block, ?string $style = null, string $numPr = ''): string
+    {
         $inner = '';
         if ($style !== null) {
             $inner .= '<w:pStyle w:val="' . $style . '"/>';
@@ -2457,7 +2522,277 @@ final class DocxWriter
             }
         }
 
+        return $inner;
+    }
+
+    // ─── Tracked changes ─────────────────────────────────────────────────
+    //
+    // A run's `revision` becomes the element Word wraps it in: w:ins and
+    // w:moveTo outermost, a w:del or w:moveFrom inside them (a deletion inside
+    // an insertion), a hyperlink outside both. Runs sharing an id are one
+    // element; a move's runs, in each direction, sit inside one range. The
+    // model's ids only group runs: every w:id is numbered from 1 in the order
+    // written, so the bytes never depend on the ids chosen.
+
+    /** @param  array<string, mixed>  $doc */
+    private function startRevisions(array $doc): void
+    {
+        $this->revisionId = 0;
+        $this->moveRanges = [];
+        Revisions::map($doc, null, function (array $run, string $path, string $where): array {
+            foreach (['moveFrom' => 'from', 'moveTo' => 'to'] as $kind => $dir) {
+                $name = is_array($run['revision'] ?? null) && is_array($run['revision'][$kind] ?? null) ? ($run['revision'][$kind]['name'] ?? null) : null;
+                if ($where === 'body' && is_string($name)) {
+                    $key = $dir . '|' . $name;
+                    $this->moveRanges[$key] ??= ['total' => 0, 'seen' => 0, 'id' => 0];
+                    $this->moveRanges[$key]['total']++;
+                }
+            }
+
+            return $run;
+        });
+    }
+
+    /** @param  array<mixed>  $runs */
+    private static function hasRunRevision(array $runs): bool
+    {
+        foreach ($runs as $run) {
+            if (is_array($run) && is_array($run['revision'] ?? null)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * A run's arrival (insert or moveTo) and departure (delete or moveFrom).
+     *
+     * @param  array<string, mixed>  $run
+     * @return array{0: ?string, 1: ?array<string, mixed>, 2: ?string, 3: ?array<string, mixed>}
+     */
+    private static function revisionParts(array $run): array
+    {
+        $rev = is_array($run['revision'] ?? null) ? $run['revision'] : [];
+        $pick = static function (array $kinds) use ($rev): array {
+            foreach ($kinds as $kind) {
+                if (is_array($rev[$kind] ?? null)) {
+                    return [$kind, $rev[$kind]];
+                }
+            }
+
+            return [null, null];
+        };
+
+        return [...$pick(['insert', 'moveTo']), ...$pick(['delete', 'moveFrom'])];
+    }
+
+    /** @param  array<string, mixed>  $run */
+    private static function linkOf(array $run): ?string
+    {
+        return is_string($run['link'] ?? null) && $run['link'] !== '' && !array_key_exists('footnote', $run) ? $run['link'] : null;
+    }
+
+    /**
+     * ` w:id="N" w:author="..." w:date="..."`, the next id taken. No date unless the model has one.
+     *
+     * @param  array<string, mixed>  $entry
+     */
+    private function revisionAttrs(array $entry): string
+    {
+        $attrs = ' w:id="' . ++$this->revisionId . '" w:author="' . Xml::attr((string) ($entry['author'] ?? '')) . '"';
+        if (is_string($entry['date'] ?? null) && $entry['date'] !== '') {
+            $attrs .= ' w:date="' . Xml::attr($entry['date']) . '"';
+        }
+
+        return $attrs;
+    }
+
+    private const REVISION_TAGS = ['insert' => 'ins', 'delete' => 'del', 'moveFrom' => 'moveFrom', 'moveTo' => 'moveTo'];
+
+    /**
+     * Runs, some carrying a revision, grouped into the elements Word wraps them in.
+     *
+     * @param  array<mixed>  $runs
+     */
+    private function renderRevisedRuns(array $runs): string
+    {
+        $runs = array_values($runs);
+        $n = count($runs);
+        $xml = '';
+        $i = 0;
+        while ($i < $n) {
+            $run = $runs[$i];
+            if (!is_array($run)) {
+                $i++;
+
+                continue;
+            }
+            [$arrKind, $arr, $depKind, $dep] = self::revisionParts($run);
+            if ($arr === null && $dep === null) {
+                $xml .= $this->renderOneRun($run, self::linkOf($run), false); // plain, or a formatting change only
+                $i++;
+
+                continue;
+            }
+            [$kind, $outer] = $arr !== null ? [$arrKind, $arr] : [$depKind, $dep];
+            $link = self::linkOf($run);
+            $group = [];
+            while ($i < $n && is_array($runs[$i])) {
+                [$ak, $a, $dk, $d] = self::revisionParts($runs[$i]);
+                [$k, $o] = $arr !== null ? [$ak, $a] : ($a === null ? [$dk, $d] : [null, null]);
+                if ($k !== $kind || $o === null || ($o['id'] ?? null) !== ($outer['id'] ?? null) || self::linkOf($runs[$i]) !== $link) {
+                    break;
+                }
+                $group[] = $runs[$i];
+                $i++;
+            }
+            if ($group === []) {
+                $group[] = $run;
+                $i++;
+            }
+
+            $start = $this->moveRangeStart($kind, $outer);
+            $tag = self::REVISION_TAGS[$kind];
+            $body = '<w:' . $tag . $this->revisionAttrs($outer) . '>';
+            if ($arr === null) {
+                foreach ($group as $g) {
+                    $body .= $this->renderOneRun($g, null, true);
+                }
+            } else {
+                $m = count($group);
+                for ($k = 0; $k < $m;) {
+                    [, , $dk, $d] = self::revisionParts($group[$k]);
+                    if ($d === null) {
+                        $body .= $this->renderOneRun($group[$k], null, false);
+                        $k++;
+
+                        continue;
+                    }
+                    $body .= '<w:' . self::REVISION_TAGS[$dk] . $this->revisionAttrs($d) . '>';
+                    while ($k < $m) {
+                        [, , $dk2, $d2] = self::revisionParts($group[$k]);
+                        if ($d2 === null || $dk2 !== $dk || ($d2['id'] ?? null) !== ($d['id'] ?? null)) {
+                            break;
+                        }
+                        $body .= $this->renderOneRun($group[$k], null, true);
+                        $k++;
+                    }
+                    $body .= '</w:' . self::REVISION_TAGS[$dk] . '>';
+                }
+            }
+            $body .= '</w:' . $tag . '>';
+            $xml .= $start . $this->withLink($link, $body) . $this->moveRangeEnd($kind, $outer, count($group));
+        }
+
+        return $xml;
+    }
+
+    /**
+     * One run with no revision element around it: a footnote mark, or a run,
+     * in a hyperlink when `$link` names one.
+     *
+     * @param  array<string, mixed>  $run
+     */
+    private function renderOneRun(array $run, ?string $link, bool $deleted): string
+    {
+        if (array_key_exists('footnote', $run)) {
+            return $this->renderFootnoteRun($run);
+        }
+
+        return $this->withLink($link, $this->renderRun($run, $deleted));
+    }
+
+    private function withLink(?string $link, string $xml): string
+    {
+        if ($link === null) {
+            return $xml;
+        }
+        $rId = 'rId' . ++$this->relCounter;
+        $this->rels[$rId] = ['type' => 'hyperlink', 'target' => $link];
+
+        return '<w:hyperlink r:id="' . $rId . '">' . $xml . '</w:hyperlink>';
+    }
+
+    /** @param  array<string, mixed>  $entry */
+    private function moveRangeStart(string $kind, array $entry): string
+    {
+        $key = self::moveKey($kind, $entry);
+        if ($key === null || $this->inFootnote || !isset($this->moveRanges[$key]) || $this->moveRanges[$key]['seen'] > 0) {
+            return '';
+        }
+        $tag = $kind === 'moveFrom' ? 'moveFromRangeStart' : 'moveToRangeStart';
+        $attrs = $this->revisionAttrs($entry);
+        $this->moveRanges[$key]['id'] = $this->revisionId;
+
+        return '<w:' . $tag . $attrs . ' w:name="' . Xml::attr((string) $entry['name']) . '"/>';
+    }
+
+    /** @param  array<string, mixed>  $entry */
+    private function moveRangeEnd(string $kind, array $entry, int $runs): string
+    {
+        $key = self::moveKey($kind, $entry);
+        if ($key === null || $this->inFootnote || !isset($this->moveRanges[$key])) {
+            return '';
+        }
+        $this->moveRanges[$key]['seen'] += $runs;
+        if ($this->moveRanges[$key]['seen'] < $this->moveRanges[$key]['total']) {
+            return '';
+        }
+
+        return '<w:' . ($kind === 'moveFrom' ? 'moveFromRangeEnd' : 'moveToRangeEnd') . ' w:id="' . $this->moveRanges[$key]['id'] . '"/>';
+    }
+
+    /** @param  array<string, mixed>  $entry */
+    private static function moveKey(string $kind, array $entry): ?string
+    {
+        if (($kind !== 'moveFrom' && $kind !== 'moveTo') || !is_string($entry['name'] ?? null)) {
+            return null;
+        }
+
+        return ($kind === 'moveFrom' ? 'from' : 'to') . '|' . $entry['name'];
+    }
+
+    /**
+     * A paragraph's pPr with its tracked changes: the mark's insertion or
+     * deletion in the mark's rPr, then a w:pPrChange holding the properties it
+     * had before, with the style unchanged. Exactly {@see pPrXml()} for a
+     * paragraph without any.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private function revisedPPr(array $block, ?string $style = null, string $numPr = ''): string
+    {
+        $rev = !$this->inBand && is_array($block['revision'] ?? null) ? $block['revision'] : null;
+        if ($rev === null) {
+            return self::pPrXml($block, $style, $numPr);
+        }
+        $inner = self::pPrInner($block, $style, $numPr) . $this->markRevisionXml($block);
+        if (is_array($rev['format'] ?? null)) {
+            $from = array_intersect_key(is_array($rev['format']['from'] ?? null) ? $rev['format']['from'] : [], array_flip(Revisions::PARAGRAPH_FORMAT_KEYS));
+            $old = self::pPrInner($from, $style, $numPr);
+            $inner .= '<w:pPrChange' . $this->revisionAttrs($rev['format']) . '>' . ($old === '' ? '<w:pPr/>' : '<w:pPr>' . $old . '</w:pPr>') . '</w:pPrChange>';
+        }
+
         return $inner === '' ? '' : '<w:pPr>' . $inner . '</w:pPr>';
+    }
+
+    /**
+     * The paragraph mark's rPr when its insertion or deletion is tracked, else ''.
+     *
+     * @param  array<string, mixed>  $owner
+     */
+    private function markRevisionXml(array $owner): string
+    {
+        $rev = !$this->inBand && is_array($owner['revision'] ?? null) ? $owner['revision'] : [];
+        $mark = '';
+        foreach (['insert' => 'ins', 'delete' => 'del'] as $kind => $tag) {
+            if (is_array($rev[$kind] ?? null)) {
+                $mark .= '<w:' . $tag . $this->revisionAttrs($rev[$kind]) . '/>';
+            }
+        }
+
+        return $mark === '' ? '' : '<w:rPr>' . $mark . '</w:rPr>';
     }
 
     // ─── Static parts ────────────────────────────────────────────────────

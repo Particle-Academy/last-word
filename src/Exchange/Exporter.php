@@ -91,7 +91,7 @@ final class Exporter
                         break;
                     }
                 }
-                $current = $guard->strip(ToPortable::runText($b['runs'] ?? null));
+                $current = $guard->strip(ToPortable::runText(is_array($b['runs'] ?? null) ? \LastWord\Schema\Revisions::acceptRuns($b['runs']) : null));
                 $headings[] = ['index' => $i, 'level' => $level($b), 'text' => $current, 'selector' => ['blocks' => [$i, $end]]];
             } elseif ($type($b) === 'table') {
                 $rows = is_array($b['rows'] ?? null) ? array_values($b['rows']) : [];
