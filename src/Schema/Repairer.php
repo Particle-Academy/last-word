@@ -1131,7 +1131,7 @@ final class Repairer
             $columns = is_array($own) && array_key_exists('columns', $own) ? $own['columns'] : $carried;
             if (is_array($columns)) {
                 $width = Schema::textWidth($stretch['doc']);
-                $fitted = Schema::fitColumns($columns, $width);
+                $fitted = Schema::fitColumns($columns, Schema::textTwips($stretch['doc']));
                 if ($fitted !== $columns) {
                     $path = $at === null ? 'page.columns' : "blocks[{$at}].page.columns";
                     $this->note($path, 'set columns to ' . json_encode($fitted) . ': as given they do not fit the text width of ' . round($width, 2) . 'pt');

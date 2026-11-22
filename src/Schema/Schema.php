@@ -109,9 +109,6 @@ final class Schema
     /** What a continuous break may change: the columns, and nothing that needs a new page. */
     public const CONTINUOUS_KEYS = ['start', 'columns'];
 
-    /** Slack when columns are measured against the text width: one twip, the writer's unit. */
-    private const COLUMN_FIT_SLACK = 0.05;
-
     /** Whether a value is a finite number (int or float, not a numeric string). */
     public static function isFiniteNumber(mixed $v): bool
     {
@@ -130,6 +127,27 @@ final class Schema
         $m = self::pageMargins($doc);
 
         return $w - $m['left'] - $m['right'];
+    }
+
+    /**
+     * The same text width in twips, rounded the way the writer rounds it: the page
+     * and each margin to the twip, then subtracted. Columns are measured against
+     * this, so what validates is exactly what the writer can write unscaled.
+     *
+     * @param  array<string, mixed>  $doc
+     */
+    public static function textTwips(array $doc): int
+    {
+        [$w] = self::pageSize($doc);
+        $m = self::pageMargins($doc);
+
+        return (int) round($w * 20) - (int) round($m['left'] * 20) - (int) round($m['right'] * 20);
+    }
+
+    /** Points to twips as the writer rounds them, or null for a value no twip count can hold. */
+    private static function twipsOf(float $pt): ?int
+    {
+        return is_finite($pt) && abs($pt) < 1.0E12 ? (int) round($pt * 20) : null;
     }
 
     /** The column count a `columns` value means: 1 for none, or for anything that is not a valid count. */
@@ -168,26 +186,44 @@ final class Schema
     }
 
     /**
-     * Whether a valid-shaped `columns` object fits a text width: every column at
-     * least {@see MIN_COLUMN_WIDTH}, and the columns and gaps no wider than the
-     * text, to within a twip.
+     * Whether a valid-shaped `columns` object fits a text width in twips: every
+     * column at least {@see MIN_COLUMN_WIDTH}, and the columns and gaps, each
+     * rounded to the twip as the writer writes it, no wider than the text. There is
+     * no slack: a total one twip over is refused, because the writer could only
+     * write it by scaling, and the read-back would not be the model.
      *
      * @param  array<string, mixed>  $columns
      */
-    public static function columnsFit(array $columns, float $textWidth): bool
+    public static function columnsFit(array $columns, int $textTwips): bool
     {
-        if (self::columnCount($columns) === 1) {
+        $count = self::columnCount($columns);
+        if ($count === 1) {
             return true;
         }
-        $g = self::columnGeometry($columns, $textWidth);
-        foreach ($g['widths'] as $w) {
-            if (! is_finite($w) || $w < self::MIN_COLUMN_WIDTH - self::COLUMN_FIT_SLACK) {
+        $g = self::columnGeometry($columns, $textTwips / 20);
+        $gaps = 0;
+        foreach ($g['spaces'] as $gap) {
+            $tw = self::twipsOf($gap);
+            if ($tw === null) {
                 return false;
             }
+            $gaps += $tw;
         }
-        $total = array_sum($g['widths']) + array_sum($g['spaces']);
+        $min = (int) round(self::MIN_COLUMN_WIDTH * 20);
+        if (! is_array($columns['widths'] ?? null) || count($columns['widths']) !== $count) {
+            // Equal columns: Word divides what the gaps leave.
+            return intdiv(max(0, $textTwips - $gaps), $count) >= $min && $gaps + $count * $min <= $textTwips;
+        }
+        $total = $gaps;
+        foreach ($g['widths'] as $w) {
+            $tw = self::twipsOf($w);
+            if ($tw === null || $tw < $min) {
+                return false;
+            }
+            $total += $tw;
+        }
 
-        return is_finite($total) && $total <= $textWidth + self::COLUMN_FIT_SLACK;
+        return $total <= $textTwips;
     }
 
     /**
@@ -201,9 +237,9 @@ final class Schema
      * @param  array<string, mixed>  $columns
      * @return array<string, mixed>
      */
-    public static function fitColumns(array $columns, float $textWidth): array
+    public static function fitColumns(array $columns, int $textTwips): array
     {
-        if (self::columnsFit($columns, $textWidth)) {
+        if (self::columnsFit($columns, $textTwips)) {
             return $columns;
         }
         unset($columns['widths']);
@@ -214,17 +250,18 @@ final class Schema
                 unset($columns['space']);
             }
         }
-        if (self::columnsFit($columns, $textWidth)) {
+        if (self::columnsFit($columns, $textTwips)) {
             return $columns;
         }
         $count = self::columnCount($columns);
-        $room = $textWidth - $count * self::MIN_COLUMN_WIDTH;
+        $min = (int) round(self::MIN_COLUMN_WIDTH * 20);
+        $room = $textTwips - $count * $min;
         if ($count > 1 && $room >= 0) {
-            $columns['space'] = self::tidyPoints(floor($room / ($count - 1) * 20) / 20);
+            $columns['space'] = self::tidyPoints(intdiv($room, $count - 1) / 20);
 
             return $columns;
         }
-        $fits = (int) floor(($textWidth + self::COLUMN_FIT_SLACK) / self::MIN_COLUMN_WIDTH);
+        $fits = intdiv(max(0, $textTwips), $min);
         if ($fits < 2) {
             return ['count' => 1];
         }

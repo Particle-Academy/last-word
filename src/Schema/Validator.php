@@ -354,7 +354,7 @@ final class Validator
                 }
             }
         }
-        if ($view !== null && count($errors) === $before && !Schema::columnsFit($columns, Schema::textWidth($view))) {
+        if ($view !== null && count($errors) === $before && !Schema::columnsFit($columns, Schema::textTwips($view))) {
             $bad($path, self::tooWide($count, Schema::textWidth($view)), 'columns_too_wide');
         }
     }
@@ -388,7 +388,7 @@ final class Validator
         if ($probe !== []) {
             return; // its own page reports what is wrong with it
         }
-        if (!Schema::columnsFit($columns, Schema::textWidth($stretch['doc']))) {
+        if (!Schema::columnsFit($columns, Schema::textTwips($stretch['doc']))) {
             $errors[] = self::error("blocks[{$at}].page.columns", 'the columns this break carries on from before it: ' . self::tooWide(Schema::columnCount($columns), Schema::textWidth($stretch['doc'])) . '; set columns on this break') + ['code' => 'columns_too_wide'];
         }
     }

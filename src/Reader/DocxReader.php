@@ -148,6 +148,14 @@ final class DocxReader
 
     private int $sectionCursor = 0;
 
+    /**
+     * The key a run carries when it is a column break: its text is the "\n" the
+     * break reads as wherever it cannot be a block, and the paragraph splits there
+     * where it can. Only this reader makes runs, so no document can forge it, and
+     * it never leaves {@see parseParagraphNode()}.
+     */
+    private const COLUMN_MARK = "\0columnBreak";
+
     /** How many columns the section being read has, as the model holds it: where a column break can be a block. */
     private int $sectionColumns = 1;
 
@@ -705,7 +713,7 @@ final class DocxReader
             $columns['separator'] = true;
         }
         if ($count > 1) {
-            $fitted = Schema::fitColumns($columns, $this->contentWidthOf($sectPr) / 20);
+            $fitted = Schema::fitColumns($columns, $this->contentWidthOf($sectPr));
             if ($fitted !== $columns) {
                 $degraded = true;
                 $columns = $fitted;
@@ -2031,14 +2039,20 @@ final class DocxReader
             }
 
             $p = $this->parseParagraphNode($node);
-            // A column break is a block only where the model can hold one: the top
-            // level of the body, in a section it reads with columns. Anywhere else
-            // the paragraph keeps its text and the break is reported.
-            $columnBreak = false;
-            if ($p['columnBreak']) {
-                $columnBreak = $topLevel && !$this->inBand && !$this->inFootnote && $this->sectionColumns > 1;
-                if (!$columnBreak) {
-                    $this->noteColumnBreak();
+            // A column break is a block only where the model can hold one: a body
+            // paragraph or heading at the top level, in a section it reads with
+            // columns. Anywhere else (a list item, code, a quote, a table cell, a
+            // header, a footnote, one column) it stays the newline it reads as, so
+            // the words either side stay apart, and each break is reported.
+            $split = false;
+            if ($p['columnBreaks'] > 0) {
+                $split = $topLevel && !$this->inBand && !$this->inFootnote && $this->sectionColumns > 1
+                    && $p['numPr'] === null && $p['style'] !== 'CodeBlock' && !($p['style'] === 'Quote' && !$insideQuote)
+                    && !($p['style'] === 'Title' && $this->title === null);
+                if (!$split) {
+                    for ($n = 0; $n < $p['columnBreaks']; $n++) {
+                        $this->noteColumnBreak();
+                    }
                 }
             }
 
@@ -2116,22 +2130,53 @@ final class DocxReader
             }
             $revision = $kept ? ['revision' => $p['revision']] : [];
 
-            if ($p['pageBreak'] && !$hasText && $p['images'] === []) {
-                $blocks[] = ['type' => 'pageBreak'];
-
-                continue;
-            }
-            if ($columnBreak && !$p['pageBreak'] && !$hasText && $p['images'] === []) {
-                $blocks[] = ['type' => 'columnBreak'];
-
-                continue;
-            }
-
             $level = null;
             if ($p['style'] !== null && preg_match('/^Heading([1-9])$/', $p['style'], $m) === 1) {
                 $level = min((int) $m[1], 6);
             } elseif ($p['outlineLvl'] !== null) {
                 $level = min($p['outlineLvl'] + 1, 6);
+            }
+
+            if ($split) {
+                // The paragraph between breaks, each break a block. The paragraph
+                // mark ends the last piece, so its revision goes there; its pictures
+                // and any page break follow, as for a paragraph that does not split.
+                $last = count($p['segments']) - 1;
+                $markKept = false;
+                foreach ($p['segments'] as $k => $seg) {
+                    if ($k > 0) {
+                        $blocks[] = ['type' => 'columnBreak'];
+                    }
+                    if ($seg === []) {
+                        continue;
+                    }
+                    $mark = $k === $last && $p['revision'] !== null ? ['revision' => $p['revision']] : [];
+                    $markKept = $markKept || $mark !== [];
+                    $piece = $level !== null && $this->plainText($seg) !== ''
+                        ? ['type' => 'heading', 'level' => $level, 'runs' => $seg]
+                        : ['type' => 'paragraph', 'runs' => $seg];
+                    if ($p['align'] !== null) {
+                        $piece['align'] = $p['align'];
+                    }
+                    $blocks[] = $piece + $p['props'] + $mark;
+                }
+                if ($p['revision'] !== null && !$markKept) {
+                    $this->revUnkept += count($p['revision']);
+                }
+                foreach ($p['images'] as $image) {
+                    $blocks[] = $image;
+                }
+                if ($p['pageBreak']) {
+                    $blocks[] = ['type' => 'pageBreak'];
+                }
+
+                continue;
+            }
+
+            if ($p['pageBreak'] && !$hasText && $p['images'] === []) {
+                $blocks[] = ['type' => 'pageBreak'];
+
+                continue;
             }
 
             if ($level !== null && $hasText) {
@@ -2156,9 +2201,6 @@ final class DocxReader
 
             if ($p['pageBreak'] && ($hasText || $p['images'] !== [])) {
                 $blocks[] = ['type' => 'pageBreak'];
-            }
-            if ($columnBreak && ($p['pageBreak'] || $hasText || $p['images'] !== [])) {
-                $blocks[] = ['type' => 'columnBreak'];
             }
         }
 
@@ -2601,7 +2643,7 @@ final class DocxReader
         if ($fieldsOff) {
             $this->noteStructure();
         }
-        $state = ['pageBreak' => false, 'columnBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
+        $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
         $revision = $this->paragraphRevision($pPr, $style); // before its runs: the order ids are read in
         if ($revision === null && !$this->preserveTrackedChanges && !$this->inBand && $this->markDeleted($pPr)) {
             // The default read accepts a deleted paragraph mark too: carried this far,
@@ -2617,6 +2659,22 @@ final class DocxReader
         }
         $runs = $this->resolveBookmarks($runs);
 
+        // The runs between column breaks, for a paragraph that splits there; and
+        // the runs with each break a newline, for one that cannot.
+        $joined = [];
+        $segments = [[]];
+        foreach ($runs as $run) {
+            if (isset($run[self::COLUMN_MARK])) {
+                unset($run[self::COLUMN_MARK]);
+                $joined[] = $run;
+                $segments[] = [];
+
+                continue;
+            }
+            $joined[] = $run;
+            $segments[count($segments) - 1][] = $run;
+        }
+
         return [
             'revision' => $revision,
             'style' => $style,
@@ -2626,9 +2684,10 @@ final class DocxReader
             'numPr' => $numPr,
             'bottomBorder' => $bottomBorder,
             'pageBreak' => $state['pageBreak'],
-            'columnBreak' => $state['columnBreak'],
+            'columnBreaks' => count($segments) - 1,
+            'segments' => count($segments) > 1 ? array_map(fn (array $seg): array => $this->mergeRuns($seg), $segments) : null,
             'codeLanguage' => $codeLanguage,
-            'runs' => $this->mergeRuns($runs),
+            'runs' => $this->mergeRuns($joined),
             'images' => $state['images'],
             'leading' => $state['leading'],
         ];
@@ -2831,6 +2890,7 @@ final class DocxReader
                             static fn (array $r): bool => !isset($r['__bookmark']) && is_string($r['text'] ?? null),
                         ));
                         $run = $inner[0] ?? ['text' => ''];
+                        unset($run[self::COLUMN_MARK]);
                         $run['text'] = implode('', array_column($inner, 'text'));
                         $runs[] = $run + ['field' => $token];
                         $state['seenText'] = true;
@@ -2839,7 +2899,7 @@ final class DocxReader
                     }
                     // The cached result's formatting, the field's token as text.
                     $inner = $this->parseInlineContainer($node, $link, $state);
-                    $runs[] = ['text' => $token] + ($inner[0] ?? []);
+                    $runs[] = ['text' => $token] + array_diff_key($inner[0] ?? [], [self::COLUMN_MARK => true]);
                     $state['seenText'] = true;
 
                     break;
@@ -3009,15 +3069,21 @@ final class DocxReader
 
                     break;
                 case 'br':
-                    if ($deleted && $this->wAttr($node, 'type') === 'page') {
-                        $this->revUnkept++; // a deleted page break: not made live
+                    if ($deleted && in_array($this->wAttr($node, 'type'), ['page', 'column'], true)) {
+                        $this->revUnkept++; // a deleted page or column break: not made live
 
                         break;
                     }
                     if ($this->wAttr($node, 'type') === 'page') {
                         $state['pageBreak'] = true;
                     } elseif ($this->wAttr($node, 'type') === 'column') {
-                        $state['columnBreak'] = true; // a block, or a report: the paragraph decides
+                        // A run of its own, so the words either side never fuse: a
+                        // block where the paragraph can split, a newline where not.
+                        if ($text !== '') {
+                            $out[] = $this->runFrom($text, $props, $link, $state);
+                            $text = '';
+                        }
+                        $out[] = $this->runFrom("\n", $props, $link, $state) + [self::COLUMN_MARK => true];
                     } else {
                         $text .= "\n";
                     }

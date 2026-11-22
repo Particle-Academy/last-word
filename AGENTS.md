@@ -321,7 +321,9 @@ a break's `page`; a `columnBreak` block moves on to the next column early:
   `spaces` (count - 1 gaps) instead of `space` when the gaps differ. `{"count": 1}`
   goes back to one column. Nothing else.
 - **They must fit:** every column at least 18pt, and columns plus gaps no wider
-  than the text width of that page (page width less the side margins). Columns a
+  than the text width of that page (page width less the side margins), measured
+  to the twip as written, with no slack: what validates is written unscaled and
+  reads back exactly. Columns a
   later break inherits are checked against ITS page, so landscape widths carried
   onto a portrait page are refused there.
 - **`start` on a break:** `"nextPage"` (the default) starts a new page;
@@ -342,8 +344,11 @@ a break's `page`; a `columnBreak` block moves on to the next column early:
   break with `start: "continuous"`. A gap list whose gaps are all equal reads
   back as `space`, and a 36pt gap is not written out. Malformed or oversized
   columns degrade to the nearest the model holds and are counted in
-  `unrepresented` (`layout-not-preserved`); so is a column break the model
-  cannot hold where it is, whose paragraph is kept.
+  `unrepresented` (`layout-not-preserved`). A column break inside a body
+  paragraph or heading of a section with columns splits it: the text before, a
+  `columnBreak`, the text after. Where the model cannot hold one (one column, a
+  list item, a table cell, a quote, code, a header, a footnote) it reads as a
+  newline, so no words fuse, and is counted the same way.
 - **Tables, charts and images** in a section with columns size against the
   narrowest column.
 - **Which renderers draw columns today.** Only the .docx does. Columns, a
