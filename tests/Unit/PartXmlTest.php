@@ -345,6 +345,75 @@ it('leaves the caller\'s libxml error handling as it found it', function (): voi
     expect($after)->toBeFalse();
 });
 
+/* ---------------- the nesting limit is ours, not libxml's ---------------- */
+
+/** A part whose elements nest exactly $depth deep, the root counted as 1. */
+function pxNested(int $depth, string $prefix = '<?xml version="1.0" encoding="UTF-8"?>'): string
+{
+    return $prefix . str_repeat('<e>', $depth) . 'deep' . str_repeat('</e>', $depth);
+}
+
+it('documents a nesting limit of 257', function (): void {
+    expect(PartXml::MAX_DEPTH)->toBe(257);
+});
+
+it('counts nesting itself, the root as 1, a self-closed element as a level', function (string $xml, int $depth): void {
+    expect(PartXml::nestingDepth($xml))->toBe($depth);
+})->with([
+    'a lone root' => ['<r/>', 1],
+    'a child' => ['<r><c>t</c></r>', 2],
+    'a self-closed leaf' => ['<r><c><d/></c></r>', 3],
+    'siblings do not add' => ['<r><c/><c/><c><d/></c></r>', 3],
+    'markup in a comment' => ['<r><!-- <a><b><c> --></r>', 1],
+    'markup in CDATA' => ['<r><![CDATA[<a><b><c>]]></r>', 1],
+    'markup in a processing instruction' => ['<?pi <a><b>?><r/>', 1],
+    'a > and a / in an attribute' => ['<r a="x>/" b=\'/>\'><c/></r>', 2],
+    'after a declaration and a BOM' => ["\xEF\xBB\xBF" . '<?xml version="1.0"?><r><c/></r>', 2],
+    '257 deep' => [pxNested(257), 257],
+    '258 deep' => [pxNested(258), 258],
+]);
+
+it('vouches only for what a byte walk can read, so anything else gets the strict parse', function (string $xml): void {
+    expect(PartXml::nestingDepth($xml))->toBeNull();
+})->with([
+    'UTF-16' => [mb_convert_encoding('<?xml version="1.0" encoding="UTF-16"?><r/>', 'UTF-16LE', 'UTF-8')],
+    'UTF-16 with a BOM' => ["\xFF\xFE" . mb_convert_encoding('<r/>', 'UTF-16LE', 'UTF-8')],
+    'a declared UTF-7' => [pxUtf7Doctype()],
+    'EBCDIC' => ["\x4C\x6F\xA7\x94\x93\x40"],
+    'a DOCTYPE' => [PX_DOCTYPE . '<r/>'],
+    'a declaration after the root' => ['<r/><!ENTITY x "y">'],
+    'an unclosed element' => ['<r><c>'],
+    'a stray close' => ['<r/></c>'],
+    'an unterminated comment' => ['<r><!-- </r>'],
+    'an unterminated attribute' => ['<r a="x></r>'],
+    'text before the root' => ['x<r/>'],
+]);
+
+it('parses a part nested 257 deep and refuses one nested 258', function (): void {
+    expect(PartXml::dom(pxNested(257))?->documentElement?->nodeName)->toBe('e')
+        ->and(PartXml::dom(pxNested(258)))->toBeNull()
+        ->and(PartXml::dom("\xEF\xBB\xBF" . pxNested(258)))->toBeNull();
+});
+
+it('refuses past the limit by its own count, not by libxml\'s', function (): void {
+    // The limit moved: with it lifted, a part far past libxml's own default
+    // ceiling (256 or 257, by version) parses, so libxml is not what refuses at
+    // 258. A libxml that refused earlier than ours would fail this.
+    expect(PartXml::dom(pxNested(1000), maxDepth: 1000)?->documentElement?->nodeName)->toBe('e')
+        ->and(PartXml::dom(pxNested(1000), maxDepth: 999))->toBeNull()
+        ->and(PartXml::dom(pxNested(300), maxDepth: 299))->toBeNull()
+        ->and(PartXml::dom(pxNested(300), maxDepth: 300))->not->toBeNull();
+});
+
+it('still refuses a DOCTYPE and expands no entity in a part deep enough to need the relaxed parse', function (): void {
+    $deep = str_repeat('<e>', 256) . '&x;' . str_repeat('</e>', 256);
+
+    expect(PartXml::dom('<?xml version="1.0"?>' . PX_DOCTYPE . $deep))->toBeNull()
+        ->and(PartXml::dom(PX_DOCTYPE . $deep))->toBeNull()
+        ->and(PartXml::dom('<r>' . $deep . '</r><!DOCTYPE r>'))->toBeNull()
+        ->and(PartXml::dom(pxUtf7Doctype()))->toBeNull();
+});
+
 /* ---------------- nothing else parses ---------------- */
 
 /** @return list<string> "file: what" for each way past the gate in a PHP source tree */

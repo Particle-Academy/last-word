@@ -308,9 +308,9 @@ describe('damaged and hostile files fail fast, and say what is wrong', function 
     });
 
     it('parses an ODT part nested 257 elements deep and refuses one nested 258', function () use ($damaged) {
-        // libxml's limit without XML_PARSE_HUGE, which the Node and Python
-        // engines reproduce. The part's own wrappers are four deep
-        // (document-content, body, text, p).
+        // PartXml::MAX_DEPTH, counted by PartXml itself so it holds on any
+        // libxml, and reproduced by the Node and Python engines. The part's own
+        // wrappers are four deep (document-content, body, text, p).
         $nested = fn (int $spans): string => LegacyFiles::odt(
             '<text:p>'.str_repeat('<text:span>', $spans).'deep'.str_repeat('</text:span>', $spans).'</text:p>'
         );
