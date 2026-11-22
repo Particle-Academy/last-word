@@ -69,8 +69,11 @@ use ZipArchive;
  *
  * Mixed pages: each stretch (Schema::stretches()) is a Word section. A section's
  * w:sectPr goes in a dedicated empty paragraph after its last block, and the body's
- * own w:sectPr is the last stretch's. No w:type is written: absent is nextPage, so
- * the section break is the page break and no w:br goes with it. A one-line band has
+ * own w:sectPr is the last stretch's. No w:type is written for a new page: absent is
+ * nextPage, so the section break is the page break and no w:br goes with it. A break
+ * whose page says `start: "continuous"` writes w:type continuous, so the next stretch
+ * (its columns) starts on the same page. A stretch's `columns` is its w:cols, and a
+ * columnBreak block a w:br w:type="column". A one-line band has
  * tab stops at the text width and a table band a grid against it, so each width
  * gets its own part. The first stretch keeps the parts a document of one stretch
  * has, by slot; later ones number from {@see LATER_PART_NUMBER}.
@@ -969,10 +972,13 @@ final class DocxWriter
         // The title lives in docProps/core.xml (dc:title) — the cross-language
         // slot shared with the Node mirror — not in a body paragraph.
         $geometry = [];
+        $columns = [];
         $bodies = [];
         foreach ($stretches as $k => $stretch) {
             $geometry[$k] = self::pageGeometry($stretch['doc']['page'] ?? null, $section?->page());
-            $this->contentWidth = $geometry[$k]['w'] - $geometry[$k]['left'] - $geometry[$k]['right'];
+            $columns[$k] = self::columnsXml($stretch['doc']['page']['columns'] ?? null, $geometry[$k]['w'] - $geometry[$k]['left'] - $geometry[$k]['right']);
+            // In columns, a block is laid out against the narrowest column it may land in.
+            $this->contentWidth = $columns[$k][1];
             $bodies[$k] = $this->renderBlocks(array_values($stretch['blocks']));
         }
         if ($this->tocBlocks !== []) {
@@ -1037,6 +1043,8 @@ final class DocxWriter
             $orient = $page['orientation'] === 'landscape' ? ' w:orient="landscape"' : '';
             $sectPr = '<w:sectPr>'
                 . $references
+                // CT_SectPr: w:type follows the references (and footnotePr/endnotePr).
+                . (($stretch['doc']['page']['start'] ?? null) === 'continuous' && $k > 0 ? '<w:type w:val="continuous"/>' : '')
                 . '<w:pgSz w:w="' . $page['w'] . '" w:h="' . $page['h'] . '"' . $orient . '/>'
                 . '<w:pgMar w:top="' . $page['top'] . '" w:right="' . $page['right'] . '"'
                 . ' w:bottom="' . $page['bottom'] . '" w:left="' . $page['left'] . '"'
@@ -1044,6 +1052,8 @@ final class DocxWriter
                 // CT_SectPr is a sequence: pgBorders follows pgMar (and paperSrc),
                 // and titlePg comes after both.
                 . self::pageBordersXml($stretch['doc'], $page)
+                // ... then lnNumType, pgNumType, and w:cols, all before titlePg.
+                . $columns[$k][0]
                 . ($titlePg[$k] ? '<w:titlePg/>' : '')
                 . '</w:sectPr>';
             if ($k < $last) {
@@ -1442,6 +1452,7 @@ final class DocxWriter
                 'image' => $this->renderImage($block),
                 'chart' => $this->renderChart($block),
                 'pageBreak' => '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
+                'columnBreak' => '<w:p><w:r><w:br w:type="column"/></w:r></w:p>',
                 'hr' => '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>',
                 // Raw markup no escaped text can contain, replaced once the body is done.
                 'toc' => '<lastword:toc n="' . array_push($this->tocBlocks, self::tocLevelsOf($block)) - 1 . '"/>',
@@ -2394,6 +2405,46 @@ final class DocxWriter
             'footer' => $distance('footer', 720),
             'gutter' => $distance('gutter', 0),
         ];
+    }
+
+    /**
+     * A stretch's w:cols and the width, in twips, its blocks lay out against (the
+     * narrowest column). Nothing for one column: absent w:cols is one column, so a
+     * document without columns writes the bytes it always did. Equal columns are
+     * w:num and w:space; unequal ones w:equalWidth="0" with a w:col each, the gap
+     * after each but the last. Widths that do not fit the page actually written --
+     * a template's, which validation never saw -- are scaled down to fit it.
+     *
+     * @return array{0: string, 1: int}
+     */
+    private static function columnsXml(mixed $columns, int $textTwips): array
+    {
+        $count = Schema::columnCount($columns);
+        if (!is_array($columns) || $count === 1) {
+            return ['', $textTwips];
+        }
+        $tw = static fn (float $pt): int => max(0, (int) round($pt * 20));
+        $space = $tw(Schema::isFiniteNumber($columns['space'] ?? null) ? (float) $columns['space'] : Schema::COLUMN_SPACE_DEFAULT);
+        $sep = ($columns['separator'] ?? null) === true ? ' w:sep="1"' : '';
+        $open = '<w:cols w:num="' . $count . '"' . $sep . ' w:space="' . $space . '"';
+        $g = Schema::columnGeometry($columns, $textTwips / 20);
+        if (!is_array($columns['widths'] ?? null) || count($columns['widths']) !== $count) {
+            return [$open . '/>', Schema::columnTextTwips($columns, $textTwips)];
+        }
+        $widths = array_map($tw, $g['widths']);
+        $gaps = array_map($tw, $g['spaces']);
+        $total = array_sum($widths) + array_sum($gaps);
+        if ($total > $textTwips && $total > 0) {
+            $f = $textTwips / $total;
+            $widths = array_map(static fn (int $w): int => max(1, (int) floor($w * $f)), $widths);
+            $gaps = array_map(static fn (int $w): int => (int) floor($w * $f), $gaps);
+        }
+        $xml = $open . ' w:equalWidth="0">';
+        foreach ($widths as $i => $w) {
+            $xml .= '<w:col w:w="' . $w . '"' . (isset($gaps[$i]) ? ' w:space="' . $gaps[$i] . '"' : '') . '/>';
+        }
+
+        return [$xml . '</w:cols>', max(1, min($widths))];
     }
 
     /**

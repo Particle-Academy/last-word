@@ -60,8 +60,13 @@ final class Repairer
         $doc = Revisions::repair($doc, $this->notes); // tracked changes: only what is safe to fix
 
         if (is_array($doc['page'] ?? null)) {
+            if (array_key_exists('start', $doc['page'])) {
+                unset($doc['page']['start']);
+                $this->note('page.start', 'removed start from the document page: it says how a break\'s stretch begins');
+            }
             $doc['page'] = $this->repairPage($doc['page'], 'page');
         }
+        $doc = $this->repairColumnsFit($doc);
 
         return ['doc' => $this->repairBookmarks($doc), 'notes' => $this->notes];
     }
@@ -163,6 +168,14 @@ final class Repairer
     private function repairPage(array $page, string $at): array
     {
         $page = $this->repairPageDecoration($page, $at);
+        if (array_key_exists('columns', $page)) {
+            $columns = $this->repairColumnsShape($page['columns'], "{$at}.columns");
+            if ($columns === null) {
+                unset($page['columns']);
+            } else {
+                $page['columns'] = $columns;
+            }
+        }
         foreach (Schema::PAGE_BANDS as $kind) {
             $band = $page[$kind] ?? null;
             if (is_array($band) && is_array($band['blocks'] ?? null) && array_is_list($band['blocks'])) {
@@ -357,6 +370,7 @@ final class Repairer
             'pageBreak' => $this->repairPageBreak($block, $path),
             'hr' => ['type' => 'hr'],
             'toc' => $this->repairToc($block, $path),
+            'columnBreak' => $this->repairColumnBreak($path),
         };
     }
 
@@ -405,6 +419,16 @@ final class Repairer
         if (array_key_exists('background', $page)) {
             unset($page['background']);
             $this->note("{$path}.page.background", 'removed background from the break: a document has one page colour');
+        }
+        if (array_key_exists('start', $page)) {
+            $start = $page['start'];
+            if (!is_string($start) || !in_array($start, Schema::SECTION_STARTS, true)) {
+                unset($page['start']);
+                $this->note("{$path}.page.start", 'removed a start that is not nextPage or continuous: the break starts a new page');
+            } elseif ($start === 'continuous' && array_diff(array_intersect(array_map('strval', array_keys($page)), Schema::PAGE_BREAK_NEAR_MISS_KEYS), Schema::CONTINUOUS_KEYS) !== []) {
+                unset($page['start']);
+                $this->note("{$path}.page.start", 'removed start continuous: the break changes more than columns, so it starts a new page and keeps every change');
+            }
         }
 
         return ['type' => 'pageBreak', 'page' => $this->repairPage($page, "{$path}.page")];
@@ -965,6 +989,178 @@ final class Repairer
         }
 
         return $out;
+    }
+
+    /**
+     * A column break nested in a quote, a table cell, a header or a footnote is
+     * dropped, with a note: Word breaks the section's columns, not a box's. One in
+     * a stretch with a single column goes in {@see repairColumnsFit()}.
+     *
+     * @return array{type: string}|null
+     */
+    private function repairColumnBreak(string $path): ?array
+    {
+        if ($this->context !== 'body' || preg_match('/^blocks\[\d+\]$/', $path) !== 1) {
+            $this->note($path, 'dropped a columnBreak: it goes at the top level of the body, not in a quote or a table cell');
+
+            return null;
+        }
+
+        return ['type' => 'columnBreak'];
+    }
+
+    /**
+     * A `columns` value's shape: not an object, or no usable count, and it goes; a
+     * count past {@see Schema::MAX_COLUMNS} is clamped; unknown keys go; a negative
+     * or non-numeric gap becomes 0 or the default; bad `widths` or `spaces` go, so
+     * the columns are equal. Whether it FITS is the page's question, answered once
+     * every page is known ({@see repairColumnsFit()}). Each change with a note.
+     *
+     * @return array<string, mixed>|null null = no columns
+     */
+    private function repairColumnsShape(mixed $columns, string $path): ?array
+    {
+        if (!is_array($columns) || $columns === [] || array_is_list($columns)) {
+            $this->note($path, 'removed columns that are not an object: one column');
+
+            return null;
+        }
+        $count = $columns['count'] ?? null;
+        if (is_string($count) && preg_match('/^\s*\d+\s*$/', $count) === 1) {
+            $count = (int) $count;
+        } elseif (is_float($count) && is_finite($count) && $count == floor($count) && abs($count) < 1.0E9) {
+            $count = (int) $count;
+        }
+        if (!is_int($count) || $count < 1) {
+            $this->note($path, 'removed columns with no whole count of 1 or more: one column');
+
+            return null;
+        }
+        if ($count > Schema::MAX_COLUMNS) {
+            $this->note("{$path}.count", "set columns count {$count} to " . Schema::MAX_COLUMNS . ', the most Word allows');
+            $count = Schema::MAX_COLUMNS;
+        }
+        $unknown = count(array_diff(array_map('strval', array_keys($columns)), Schema::COLUMNS_KEYS));
+        if ($unknown > 0) {
+            // The keys are the document's own strings: counted, never echoed.
+            $this->note($path, "dropped {$unknown} key" . ($unknown === 1 ? '' : 's') . ' columns does not take (count, space, separator, widths, spaces)');
+        }
+        if ($count === 1) {
+            if (count($columns) > 1) {
+                $this->note($path, 'one column takes no other key: kept {"count": 1}');
+            }
+
+            return ['count' => 1];
+        }
+        $out = ['count' => $count];
+        if (array_key_exists('space', $columns)) {
+            $space = $columns['space'];
+            if (Schema::isFiniteNumber($space) && $space >= 0) {
+                $out['space'] = $space;
+            } elseif (Schema::isFiniteNumber($space)) {
+                $out['space'] = 0;
+                $this->note("{$path}.space", 'set a negative column gap to 0');
+            } else {
+                $this->note("{$path}.space", 'dropped a column gap that is not a number: ' . Schema::COLUMN_SPACE_DEFAULT . 'pt');
+            }
+        }
+        if (array_key_exists('separator', $columns)) {
+            $out['separator'] = (bool) $columns['separator'];
+            if (!is_bool($columns['separator'])) {
+                $this->note("{$path}.separator", 'coerced the column separator to true or false');
+            }
+            if ($out['separator'] === false) {
+                unset($out['separator']);
+            }
+        }
+        $widths = $columns['widths'] ?? null;
+        if ($widths !== null) {
+            $ok = is_array($widths) && array_is_list($widths) && count($widths) === $count;
+            foreach ($ok ? $widths : [] as $w) {
+                $ok = $ok && Schema::isFiniteNumber($w) && $w >= Schema::MIN_COLUMN_WIDTH;
+            }
+            if ($ok) {
+                $out['widths'] = $widths;
+            } else {
+                $this->note("{$path}.widths", 'dropped column widths that are not one number of at least ' . Schema::MIN_COLUMN_WIDTH . 'pt per column: equal columns');
+            }
+        }
+        if (array_key_exists('spaces', $columns)) {
+            $spaces = $columns['spaces'];
+            $ok = isset($out['widths']) && !array_key_exists('space', $columns)
+                && is_array($spaces) && array_is_list($spaces) && count($spaces) === $count - 1;
+            foreach ($ok ? $spaces : [] as $gap) {
+                $ok = $ok && Schema::isFiniteNumber($gap) && $gap >= 0;
+            }
+            if ($ok) {
+                $out['spaces'] = $spaces;
+            } else {
+                $this->note("{$path}.spaces", 'dropped column gaps that are not one number of 0 or more per gap, with widths and without space');
+            }
+        }
+
+        // In the agent's own order: a repair changes values, not the layout of the JSON.
+        $ordered = [];
+        foreach (array_keys($columns) as $key) {
+            if (array_key_exists($key, $out)) {
+                $ordered[$key] = $out[$key];
+            }
+        }
+
+        return $ordered + $out;
+    }
+
+    /**
+     * What only the whole document can say about columns: each stretch's columns
+     * fit ITS text width -- inherited ones included, fixed on the break that
+     * narrows the page -- and a column break sits in a stretch that has columns.
+     * Columns that do not fit become the nearest that do ({@see Schema::fitColumns()});
+     * a column break with one column is dropped. Nothing else moves, so no text is
+     * lost. One pass over the stretches.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array<string, mixed>
+     */
+    private function repairColumnsFit(array $doc): array
+    {
+        $counts = [];
+        $carried = is_array($doc['page'] ?? null) ? ($doc['page']['columns'] ?? null) : null;
+        foreach (Schema::stretches($doc) as $stretch) {
+            $at = $stretch['break'];
+            $own = $at === null ? ($doc['page'] ?? null) : ($doc['blocks'][$at]['page'] ?? null);
+            $columns = is_array($own) && array_key_exists('columns', $own) ? $own['columns'] : $carried;
+            if (is_array($columns)) {
+                $width = Schema::textWidth($stretch['doc']);
+                $fitted = Schema::fitColumns($columns, $width);
+                if ($fitted !== $columns) {
+                    $path = $at === null ? 'page.columns' : "blocks[{$at}].page.columns";
+                    $this->note($path, 'set columns to ' . json_encode($fitted) . ': as given they do not fit the text width of ' . round($width, 2) . 'pt');
+                    if ($at === null) {
+                        $doc['page']['columns'] = $fitted;
+                    } else {
+                        $doc['blocks'][$at]['page']['columns'] = $fitted;
+                    }
+                    $columns = $fitted;
+                }
+            }
+            $carried = $columns;
+            $count = Schema::columnCount($columns);
+            foreach (array_keys($stretch['blocks']) as $i) {
+                $counts[$i] = $count;
+            }
+        }
+        $kept = [];
+        foreach ($doc['blocks'] as $i => $block) {
+            if (is_array($block) && ($block['type'] ?? null) === 'columnBreak' && ($counts[$i] ?? 1) < 2) {
+                $this->note("blocks[{$i}]", 'dropped a columnBreak: its stretch has one column');
+
+                continue;
+            }
+            $kept[] = $block;
+        }
+        $doc['blocks'] = $kept;
+
+        return $doc;
     }
 
     private function note(string $path, string $message): void

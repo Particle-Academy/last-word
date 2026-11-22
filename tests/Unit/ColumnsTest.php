@@ -264,7 +264,7 @@ describe('the round trip', function () {
         'zero gap' => [['page' => ['columns' => ['count' => 2, 'space' => 0]], 'blocks' => [colP('a')]]],
         'unequal' => [['page' => ['columns' => ['count' => 2, 'widths' => [300, 150], 'space' => 18]], 'blocks' => [colP('Main'), ['type' => 'columnBreak'], colP('Sidebar')]]],
         'unequal, own gaps' => [['page' => ['columns' => ['count' => 3, 'widths' => [150, 150, 140], 'spaces' => [12, 16]]], 'blocks' => [colP('a')]]],
-        'unequal, a line between' => [['page' => ['columns' => ['count' => 2, 'widths' => [234, 198], 'space' => 36, 'separator' => true]], 'blocks' => [colP('a')]]],
+        'unequal, a line between' => [['page' => ['columns' => ['count' => 2, 'widths' => [234, 198], 'space' => 24, 'separator' => true]], 'blocks' => [colP('a')]]],
         'a newsletter: one column, three, one, on one page' => [['blocks' => [
             ['type' => 'heading', 'level' => 1, 'runs' => [['text' => 'The Quarterly']]],
             ['type' => 'pageBreak', 'page' => ['start' => 'continuous', 'columns' => ['count' => 3, 'space' => 12, 'separator' => true]]],
@@ -373,6 +373,20 @@ describe('the hostile set: validation', function () {
         'header' => [['page' => ['columns' => ['count' => 2], 'header' => ['blocks' => [colP('H'), ['type' => 'columnBreak']]]], 'blocks' => [colP('a')]], 'a header or footer cannot hold a columnBreak block'],
         'footnote' => [['page' => ['columns' => ['count' => 2]], 'blocks' => [['type' => 'paragraph', 'runs' => [['text' => 'a'], ['text' => '', 'footnote' => ['blocks' => [colP('n'), ['type' => 'columnBreak']]]]]]]], 'a footnote cannot hold a columnBreak block'],
     ]);
+
+    it('never echoes a key the document made up, in an error or a repair note', function () {
+        $hostile = "<w:t>\u{202E}evil-key";
+        $doc = ['blocks' => [
+            colP('a'),
+            ['type' => 'pageBreak', 'page' => ['start' => 'continuous', 'orientation' => 'landscape', $hostile => 1, 'columns' => ['count' => 2, $hostile => 1]]],
+            colP('b'),
+        ]];
+        $r = Agent::validateAndRepair($doc);
+
+        expect(json_encode(Agent::validate($doc)))->not->toContain('evil-key')
+            ->and(json_encode($r['errors']))->not->toContain('evil-key')
+            ->and(array_column(Agent::validate($doc), 'code'))->toBe(['section_continuous_invalid', 'columns_invalid']);
+    });
 
     it('refuses columns typed on the break itself, as for any page key', function () {
         expect(array_column(Agent::validate(['blocks' => [colP('a'), ['type' => 'pageBreak', 'columns' => ['count' => 2]], colP('b')]]), 'message'))

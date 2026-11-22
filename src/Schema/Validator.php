@@ -45,6 +45,14 @@ final class Validator
     private array $stretchAt = [];
 
     /**
+     * A top-level block's index => how many columns its stretch has: where a
+     * columnBreak can go.
+     *
+     * @var array<int, int>
+     */
+    private array $columnsAt = [];
+
+    /**
      * @param  list<string>  $imageNames  the images the host registered (CC-fancy-0039):
      *   an image `src` of `image:<name>` is valid for exactly these, and refused with
      *   the code `image_unknown` for any other name -- including when there are none
@@ -104,10 +112,16 @@ final class Validator
 
         // Each break is judged against the document as its stretch sees it: margins
         // it inherits, on the paper it turns to.
+        $this->columnsAt = [];
         foreach (Schema::stretches($doc) as $stretch) {
             if ($stretch['break'] !== null) {
                 $this->stretchAt["blocks[{$stretch['break']}]"] = $stretch['doc'];
             }
+            $count = Schema::columnCount($stretch['doc']['page']['columns'] ?? null);
+            foreach (array_keys($stretch['blocks']) as $i) {
+                $this->columnsAt[$i] = $count;
+            }
+            $this->validateInheritedColumns($stretch, $doc, $errors);
         }
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
         $this->validateBookmarks($doc, $errors);
@@ -246,6 +260,155 @@ final class Validator
             }
         }
         $this->validatePageDecoration($page, $view, $at, $errors);
+        if ($at === 'page' && array_key_exists('start', $page)) {
+            $errors[] = self::error('page.start', 'start says how a break\'s stretch begins: put it on a pageBreak\'s page, not the document\'s') + ['code' => 'section_start_invalid'];
+        }
+        if (array_key_exists('columns', $page)) {
+            $this->validateColumns($page['columns'], $view, "{$at}.columns", $errors);
+        }
+    }
+
+    /**
+     * A page's `columns` (Word's `w:cols`): a closed object, a whole `count` of 1 to
+     * {@see Schema::MAX_COLUMNS}, a gap of 0 or more, `widths` (one per column, each
+     * at least {@see Schema::MIN_COLUMN_WIDTH}) and `spaces` (with widths, instead of
+     * space, one per gap), and all of it inside the text width of the page it is
+     * on. Every refusal carries a `code`.
+     *
+     * @param  array<string, mixed>|null  $view  the document as this page sees it; null checks the shape alone
+     * @param  list<array{path: string, message: string, code?: string}>  $errors
+     */
+    private function validateColumns(mixed $columns, ?array $view, string $path, array &$errors): void
+    {
+        $bad = static function (string $where, string $message, string $code) use (&$errors): void {
+            $errors[] = self::error($where, $message) + ['code' => $code];
+        };
+        if (!is_array($columns) || $columns === [] || array_is_list($columns)) {
+            $bad($path, 'columns must be an object ({count, space?, separator?, widths?, spaces?})', 'columns_invalid');
+
+            return;
+        }
+        $unknown = array_values(array_diff(array_map('strval', array_keys($columns)), Schema::COLUMNS_KEYS));
+        if ($unknown !== []) {
+            // The keys are the document's own strings: counted, never echoed.
+            $bad($path, 'columns takes only count, space, separator, widths and spaces (' . count($unknown) . ' other key' . (count($unknown) === 1 ? '' : 's') . ')', 'columns_invalid');
+
+            return;
+        }
+        $count = $columns['count'] ?? null;
+        if (!is_int($count) || $count < 1) {
+            $bad("{$path}.count", 'columns count must be a whole number from 1 to ' . Schema::MAX_COLUMNS, 'columns_invalid');
+
+            return;
+        }
+        if ($count > Schema::MAX_COLUMNS) {
+            $bad("{$path}.count", 'columns count is at most ' . Schema::MAX_COLUMNS . ', as in Word', 'columns_count_exceeded');
+
+            return;
+        }
+        if ($count === 1) {
+            if (count($columns) > 1) {
+                $bad($path, 'one column takes no other key: {"count": 1}', 'columns_invalid');
+            }
+
+            return;
+        }
+        $before = count($errors);
+        if (array_key_exists('separator', $columns) && !is_bool($columns['separator'])) {
+            $bad("{$path}.separator", 'columns separator must be true or false', 'columns_invalid');
+        }
+        if (array_key_exists('space', $columns) && (!Schema::isFiniteNumber($columns['space']) || $columns['space'] < 0)) {
+            $bad("{$path}.space", 'columns space is the points between columns: a number, 0 or more', 'columns_space_invalid');
+        }
+        $widths = $columns['widths'] ?? null;
+        if (array_key_exists('spaces', $columns)) {
+            if ($widths === null) {
+                $bad("{$path}.spaces", 'columns spaces go with widths; for equal columns use space', 'columns_invalid');
+            } elseif (array_key_exists('space', $columns)) {
+                $bad("{$path}.spaces", 'columns takes space or spaces, not both', 'columns_invalid');
+            } else {
+                $spaces = $columns['spaces'];
+                if (!is_array($spaces) || !array_is_list($spaces) || count($spaces) !== $count - 1) {
+                    $bad("{$path}.spaces", 'columns spaces must list ' . ($count - 1) . ' gaps, one after each column but the last', 'columns_space_invalid');
+                } else {
+                    foreach ($spaces as $k => $gap) {
+                        if (!Schema::isFiniteNumber($gap) || $gap < 0) {
+                            $bad("{$path}.spaces[{$k}]", 'a column gap is a number of points, 0 or more', 'columns_space_invalid');
+
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if ($widths !== null) {
+            if (!is_array($widths) || !array_is_list($widths) || count($widths) !== $count) {
+                $bad("{$path}.widths", "columns widths must list {$count} widths, one per column", 'columns_width_invalid');
+            } else {
+                foreach ($widths as $k => $w) {
+                    if (!Schema::isFiniteNumber($w) || $w < Schema::MIN_COLUMN_WIDTH) {
+                        $bad("{$path}.widths[{$k}]", 'a column width is a number of points, at least ' . Schema::MIN_COLUMN_WIDTH, 'columns_width_invalid');
+
+                        break;
+                    }
+                }
+            }
+        }
+        if ($view !== null && count($errors) === $before && !Schema::columnsFit($columns, Schema::textWidth($view))) {
+            $bad($path, self::tooWide($count, Schema::textWidth($view)), 'columns_too_wide');
+        }
+    }
+
+    private static function tooWide(int $count, float $textWidth): string
+    {
+        return "{$count} columns and their gaps do not fit a text width of " . round($textWidth, 2) . 'pt with every column at least ' . Schema::MIN_COLUMN_WIDTH . 'pt';
+    }
+
+    /**
+     * Columns a stretch takes from before its break are checked against ITS page,
+     * which may be narrower: landscape widths carried onto a portrait page.
+     *
+     * @param  array{doc: array<string, mixed>, break: ?int}  $stretch
+     * @param  array<string, mixed>  $doc
+     * @param  list<array{path: string, message: string, code?: string}>  $errors
+     */
+    private function validateInheritedColumns(array $stretch, array $doc, array &$errors): void
+    {
+        $at = $stretch['break'];
+        if ($at === null) {
+            return;
+        }
+        $own = $doc['blocks'][$at]['page'] ?? null;
+        $columns = $stretch['doc']['page']['columns'] ?? null;
+        if (!is_array($own) || array_key_exists('columns', $own) || !is_array($columns)) {
+            return;
+        }
+        $probe = [];
+        $this->validateColumns($columns, null, 'x', $probe);
+        if ($probe !== []) {
+            return; // its own page reports what is wrong with it
+        }
+        if (!Schema::columnsFit($columns, Schema::textWidth($stretch['doc']))) {
+            $errors[] = self::error("blocks[{$at}].page.columns", 'the columns this break carries on from before it: ' . self::tooWide(Schema::columnCount($columns), Schema::textWidth($stretch['doc'])) . '; set columns on this break') + ['code' => 'columns_too_wide'];
+        }
+    }
+
+    /**
+     * A column break: top level of the body only (Word breaks a column of the
+     * section, not of a quote or a cell), in a stretch that has columns.
+     *
+     * @param  list<array{path: string, message: string, code?: string}>  $errors
+     */
+    private function validateColumnBreak(string $path, array &$errors): void
+    {
+        if ($this->context !== 'body' || preg_match('/^blocks\[(\d+)\]$/', $path, $m) !== 1) {
+            $errors[] = self::error("{$path}.type", 'a columnBreak goes at the top level of the body, not in a quote or a table cell') + ['code' => 'column_break_nested'];
+
+            return;
+        }
+        if (($this->columnsAt[(int) $m[1]] ?? 1) < 2) {
+            $errors[] = self::error("{$path}.type", 'a columnBreak needs columns: this stretch has one; set page.columns ({"count": 2}) or remove the break') + ['code' => 'column_break_outside_columns'];
+        }
     }
 
     /**
@@ -462,6 +625,7 @@ final class Validator
             'pageBreak' => $this->validatePageBreak($block, $path, $errors),
             'hr' => null,
             'toc' => $this->validateToc($block, $path, $errors),
+            'columnBreak' => $this->validateColumnBreak($path, $errors),
         };
     }
 
@@ -500,6 +664,20 @@ final class Validator
         if (array_key_exists('background', $page)) {
             $errors[] = self::error("{$path}.page.background", 'a document has one page colour: set background on the top-level page, not on a break');
             unset($page['background']);
+        }
+        if (array_key_exists('start', $page)) {
+            $start = $page['start'];
+            if (!is_string($start) || !in_array($start, Schema::SECTION_STARTS, true)) {
+                $errors[] = self::error("{$path}.page.start", 'start is "nextPage" (a new page, the default) or "continuous" (the same page, to change columns there)') + ['code' => 'section_start_invalid'];
+            } elseif ($start === 'continuous') {
+                $other = array_values(array_diff(array_intersect(array_map('strval', array_keys($page)), Schema::PAGE_BREAK_NEAR_MISS_KEYS), Schema::CONTINUOUS_KEYS));
+                if ($other !== []) {
+                    // Named only when they are page keys: anything else is the document's own string.
+                    $named = array_values(array_intersect($other, Schema::PAGE_BREAK_NEAR_MISS_KEYS));
+                    $what = $named !== [] ? implode(', ', $named) : 'other keys';
+                    $errors[] = self::error("{$path}.page", "a continuous break changes only columns; {$what} need a new page: drop start, or move them to a break of their own") + ['code' => 'section_continuous_invalid'];
+                }
+            }
         }
         $this->validatePage($page, $view, "{$path}.page", $errors);
     }

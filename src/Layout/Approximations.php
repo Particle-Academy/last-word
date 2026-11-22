@@ -78,7 +78,20 @@ final class Approximations
                 $pages[] = $b['page'];
             }
         }
+        // Not laid out at all: the measure is one column the width of the text, and
+        // a continuous break starts a page as any break does. Word flows columns.
+        foreach (is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [] as $b) {
+            if (is_array($b) && ($b['type'] ?? null) === 'columnBreak') {
+                $found['columns'] = true;
+            }
+            if (is_array($b) && ($b['type'] ?? null) === 'pageBreak' && is_array($b['page'] ?? null) && ($b['page']['start'] ?? null) === 'continuous') {
+                $found['continuous section break'] = true;
+            }
+        }
         foreach ($pages as $page) {
+            if (\LastWord\Schema\Schema::columnCount($page['columns'] ?? null) > 1) {
+                $found['columns'] = true;
+            }
             foreach (['header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter'] as $key) {
                 $band = $page[$key] ?? null;
                 if (! is_array($band)) {
