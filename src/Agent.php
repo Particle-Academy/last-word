@@ -694,10 +694,9 @@ final class Agent
      */
     private static function accepted(array $doc): array
     {
-        foreach (is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [] as $i => $block) {
-            if (is_array($block)) {
-                $doc['blocks'][$i] = \LastWord\Schema\Revisions::acceptBlock($block)[0];
-            }
+        if (is_array($doc['blocks'] ?? null)) {
+            $accepted = \LastWord\Schema\Revisions::acceptBlocks($doc['blocks'])[0];
+            $doc['blocks'] = array_values(array_filter($accepted, static fn (mixed $b): bool => $b !== null));
         }
 
         return $doc;

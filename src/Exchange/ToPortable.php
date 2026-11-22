@@ -75,14 +75,18 @@ final class ToPortable
         }
 
         $x = new self($limits['cellBytes'], $limits['columns']);
+        // Portable content has no tracked changes: accepted, so deleted text is never
+        // live text. A block whose paragraph mark was deleted is joined into the next.
+        [$acceptedBlocks, $acceptedCounts] = Revisions::acceptBlocks($blocks);
         foreach ($picked['indexes'] as $i) {
+            if (($acceptedCounts[$i] ?? 0) > 0) {
+                $x->report->add('tracked-change', '/blocks/'.$i, $acceptedCounts[$i]);
+            }
+            if (is_array($blocks[$i]) && $acceptedBlocks[$i] === null) {
+                continue; // joined into the block after it
+            }
             if (is_array($blocks[$i])) {
-                // Portable content has no tracked changes: accepted, so deleted text is never live text.
-                [$block, $accepted] = Revisions::acceptBlock($blocks[$i]);
-                if ($accepted > 0) {
-                    $x->report->add('tracked-change', '/blocks/'.$i, $accepted);
-                }
-                $x->block($block, '/blocks/'.$i);
+                $x->block($acceptedBlocks[$i], '/blocks/'.$i);
             } else {
                 $x->report->add('layout-not-preserved', '/blocks/'.$i);
             }

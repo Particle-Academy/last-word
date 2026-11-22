@@ -328,6 +328,10 @@ final class DocxReader
             $doc[$key] = $value;
         }
 
+        if (!$this->preserveTrackedChanges && $this->trackedChanges['deletions'] > 0) {
+            // Accepting a deleted paragraph mark joins it to the next paragraph, as Word does.
+            $blocks = array_values(array_filter(Revisions::acceptBlocks($blocks)[0], static fn (mixed $b): bool => $b !== null));
+        }
         if ($this->preserveTrackedChanges && $this->trackedChanges !== self::NO_TRACKED_CHANGES) {
             // What the model has no slot for, then the whole document brought inside the rules.
             $this->revUnkept += $this->unkeptRevisions($dom) + ($this->footnotesDom !== null ? $this->unkeptRevisions($this->footnotesDom) : 0);
@@ -1399,6 +1403,14 @@ final class DocxReader
         }
     }
 
+    /** Whether a paragraph's mark is deleted (or moved away): `w:del` or `w:moveFrom` in its mark's rPr. */
+    private function markDeleted(?DOMElement $pPr): bool
+    {
+        $markPr = $this->firstChildByName($pPr, 'rPr');
+
+        return $this->firstChildByName($markPr, 'del') !== null || $this->firstChildByName($markPr, 'moveFrom') !== null;
+    }
+
     /** A move range's start or end: which name a moveFrom or moveTo inside it belongs to. */
     private function moveRange(DOMElement $node): void
     {
@@ -2420,6 +2432,11 @@ final class DocxReader
         }
         $state = ['pageBreak' => false, 'images' => [], 'leading' => [], 'seenText' => false, 'field' => null, 'fields' => [], 'fieldsOff' => $fieldsOff];
         $revision = $this->paragraphRevision($pPr, $style); // before its runs: the order ids are read in
+        if ($revision === null && !$this->preserveTrackedChanges && !$this->inBand && $this->markDeleted($pPr)) {
+            // The default read accepts a deleted paragraph mark too: carried this far,
+            // then joined to the next paragraph once the document is read.
+            $revision = ['delete' => ['id' => 'accepted', 'author' => Revisions::UNKNOWN_AUTHOR]];
+        }
         $runs = $this->parseInlineContainer($p, null, $state);
         // A field still capturing at the paragraph's end: its text, as text.
         foreach ($state['fields'] as $open) {

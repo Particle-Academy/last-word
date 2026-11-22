@@ -92,15 +92,16 @@ final class ToMarkdown
         }
 
         $blocks = is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [];
+        // GFM has no tracked changes: accepted, so deleted text is never live text. A
+        // block whose paragraph mark was deleted is joined into the next.
+        [$acceptedBlocks, $acceptedCounts] = Revisions::acceptBlocks($blocks);
         foreach ($indexes ?? array_keys($blocks) as $i) {
-            $block = $blocks[$i] ?? null;
+            $block = $acceptedBlocks[$i] ?? null;
+            if (($acceptedCounts[$i] ?? 0) > 0) {
+                $this->report?->add('tracked-change', '/blocks/' . $i, $acceptedCounts[$i]);
+            }
             if (!is_array($block)) {
                 continue;
-            }
-            // GFM has no tracked changes: accepted, so deleted text is never live text.
-            [$block, $accepted] = Revisions::acceptBlock($block);
-            if ($accepted > 0) {
-                $this->report?->add('tracked-change', '/blocks/' . $i, $accepted);
             }
             $md = $this->block($block, '/blocks/' . $i);
             if ($md !== null && $md !== '') {

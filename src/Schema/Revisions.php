@@ -730,42 +730,300 @@ final class Revisions
     // ─── Accepting ──────────────────────────────────────────────────────
 
     /**
-     * A block (or a run list's owner) with every tracked change accepted, as Word's
-     * "Accept All" would show it: a deleted or moved-away run is gone, every other
-     * run and paragraph loses its `revision`. A paragraph whose mark was deleted
-     * stays its own paragraph. What every reader of the model that has no notion of
-     * revisions (markdown, portable content, describe) must see, so deleted text
-     * never reads as live text. Also how many revisions it accepted.
+     * Blocks with every tracked change accepted, as Word's "Accept All" leaves
+     * them: what every reader of the model that has no notion of revisions
+     * (markdown, portable content, describe, the default read) must see, so
+     * deleted text never reads as live text.
+     *
+     *  - A deleted or moved-away run is gone; every other run loses `revision`.
+     *  - A paragraph, heading or list item whose MARK is deleted joins the one
+     *    after it, and the joined paragraph has the FOLLOWING one's properties
+     *    (type, level, alignment, list membership): a paragraph's properties
+     *    live in its mark, and the mark that survives is the next one's
+     *    (ECMA-376 Part 1, 17.13.5.15 "del (Deleted Paragraph)": the paragraph's
+     *    content is combined with the following paragraph). The next one may be
+     *    a paragraph, a heading or a list's first item; the last item of a list
+     *    joins a paragraph or heading after the list.
+     *  - Nothing to join (a table or an image next, the end of a cell, a quote,
+     *    a footnote or the body) and the paragraph stays where it is, unless
+     *    accepting left it with no runs, when it goes. A list item with nested
+     *    items keeps its place: the model cannot join it into its first nested
+     *    item without re-parenting the rest.
+     *
+     * Same keys out as in: a block joined into the next is null. Also how many
+     * revisions each block carried.
+     *
+     * @param  array<int, mixed>  $blocks
+     * @return array{0: array<int, mixed>, 1: array<int, int>}
+     */
+    public static function acceptBlocks(array $blocks): array
+    {
+        $counts = [];
+        foreach ($blocks as $i => $block) {
+            $ids = [];
+            if (is_array($block)) {
+                $count = static function (array $item) use (&$ids): array {
+                    if (array_key_exists('revision', $item)) {
+                        self::collect($item['revision'], $ids);
+                    }
+
+                    return $item;
+                };
+                self::map(['blocks' => [$block]], $count, $count);
+            }
+            $counts[$i] = count($ids);
+        }
+
+        return [self::acceptList($blocks, 0), $counts];
+    }
+
+    /**
+     * One block, accepted ({@see acceptBlocks()}); null when nothing of it is left.
      *
      * @param  array<string, mixed>  $block
-     * @return array{0: array<string, mixed>, 1: int}
+     * @return array{0: ?array<string, mixed>, 1: int}
      */
     public static function acceptBlock(array $block): array
     {
-        $ids = [];
-        $accepted = self::map(['blocks' => [$block]], static function (array $owner) use (&$ids): array {
-            if (array_key_exists('revision', $owner)) {
-                self::collect($owner['revision'], $ids);
-                unset($owner['revision']);
+        [$blocks, $counts] = self::acceptBlocks([$block]);
+
+        return [$blocks[0], $counts[0]];
+    }
+
+    /** Set on an owner whose mark is deleted, while a list of blocks is being accepted. */
+    private const MARK_GONE = "\0lastword:mark-deleted";
+
+    /**
+     * @param  array<int, mixed>  $blocks
+     * @return array<int, mixed>
+     */
+    private static function acceptList(array $blocks, int $depth): array
+    {
+        if ($depth > Portable::MAX_DEPTH) {
+            return $blocks;
+        }
+        foreach ($blocks as $i => $block) {
+            if (is_array($block)) {
+                $blocks[$i] = self::acceptOne($block, $depth);
             }
-
-            return $owner;
-        }, static function (array $run) use (&$ids): array {
-            if (array_key_exists('revision', $run)) {
-                self::collect($run['revision'], $ids);
+        }
+        $keys = array_keys($blocks);
+        foreach ($keys as $n => $i) {
+            $block = $blocks[$i];
+            if (!is_array($block)) {
+                continue;
             }
+            $nextKey = $keys[$n + 1] ?? null;
+            $next = $nextKey !== null && is_array($blocks[$nextKey]) ? $blocks[$nextKey] : null;
+            $type = $block['type'] ?? null;
+            if (($type === 'paragraph' || $type === 'heading') && isset($block[self::MARK_GONE])) {
+                $runs = is_array($block['runs'] ?? null) ? $block['runs'] : [];
+                $nextType = $next['type'] ?? null;
+                if ($nextType === 'paragraph' || $nextType === 'heading') {
+                    $blocks[$nextKey]['runs'] = self::joinRuns($runs, is_array($next['runs'] ?? null) ? $next['runs'] : []);
+                    $blocks[$i] = null;
 
-            return $run;
-        });
-        $accepted = self::map($accepted, static function (array $owner): array {
-            if (is_array($owner['runs'] ?? null) && array_is_list($owner['runs'])) {
-                $owner['runs'] = self::acceptRuns($owner['runs']);
+                    continue;
+                }
+                if ($nextType === 'list' && is_array($next['items'] ?? null) && isset($next['items'][0]) && is_array($next['items'][0])) {
+                    $first = $next['items'][0];
+                    $blocks[$nextKey]['items'][0]['runs'] = self::joinRuns($runs, is_array($first['runs'] ?? null) ? $first['runs'] : []);
+                    $blocks[$i] = null;
+
+                    continue;
+                }
+                unset($blocks[$i][self::MARK_GONE]);
+                if ($runs === []) {
+                    $blocks[$i] = null;
+                }
+
+                continue;
             }
+            if ($type === 'list' && is_array($block['items'] ?? null) && $block['items'] !== []) {
+                $last = array_key_last($block['items']);
+                $item = $block['items'][$last];
+                if (is_array($item) && isset($item[self::MARK_GONE])) {
+                    $nextType = $next['type'] ?? null;
+                    if ($nextType === 'paragraph' || $nextType === 'heading') {
+                        $blocks[$nextKey]['runs'] = self::joinRuns(is_array($item['runs'] ?? null) ? $item['runs'] : [], is_array($next['runs'] ?? null) ? $next['runs'] : []);
+                        unset($blocks[$i]['items'][$last]);
+                    } elseif (($item['runs'] ?? []) === []) {
+                        unset($blocks[$i]['items'][$last]);
+                    } else {
+                        unset($blocks[$i]['items'][$last][self::MARK_GONE]);
+                    }
+                    $blocks[$i]['items'] = array_values($blocks[$i]['items']);
+                    if ($blocks[$i]['items'] === []) {
+                        $blocks[$i] = null;
+                    }
+                }
+            }
+        }
 
-            return $owner;
-        }, null);
+        return $blocks;
+    }
 
-        return [$accepted['blocks'][0], count($ids)];
+    /**
+     * @param  array<string, mixed>  $block
+     * @return array<string, mixed>
+     */
+    private static function acceptOne(array $block, int $depth): array
+    {
+        switch ($block['type'] ?? null) {
+            case 'paragraph':
+            case 'heading':
+                return self::acceptOwner($block, $depth);
+            case 'list':
+                if (is_array($block['items'] ?? null) && array_is_list($block['items'])) {
+                    $block['items'] = self::acceptItems($block['items'], $depth, true);
+                }
+
+                return $block;
+            case 'quote':
+                if (is_array($block['blocks'] ?? null) && array_is_list($block['blocks'])) {
+                    $block['blocks'] = self::kept(self::acceptList($block['blocks'], $depth + 1));
+                }
+
+                return $block;
+            case 'table':
+                foreach (is_array($block['rows'] ?? null) ? $block['rows'] : [] as $r => $row) {
+                    foreach (is_array($row) && is_array($row['cells'] ?? null) ? $row['cells'] : [] as $c => $cell) {
+                        if (is_array($cell) && is_array($cell['blocks'] ?? null) && array_is_list($cell['blocks'])) {
+                            $block['rows'][$r]['cells'][$c]['blocks'] = self::kept(self::acceptList($cell['blocks'], $depth + 1));
+                        }
+                    }
+                }
+
+                return $block;
+            default:
+                return $block;
+        }
+    }
+
+    /**
+     * A paragraph, heading or list item: its runs accepted (a footnote's blocks
+     * too), its own `revision` gone, and {@see MARK_GONE} when its mark was deleted.
+     *
+     * @param  array<string, mixed>  $owner
+     * @return array<string, mixed>
+     */
+    private static function acceptOwner(array $owner, int $depth): array
+    {
+        if (is_array($owner['runs'] ?? null) && array_is_list($owner['runs'])) {
+            $runs = self::acceptRuns($owner['runs']);
+            foreach ($runs as $j => $run) {
+                if (is_array($run) && is_array($run['footnote'] ?? null) && is_array($run['footnote']['blocks'] ?? null) && array_is_list($run['footnote']['blocks'])) {
+                    $runs[$j]['footnote']['blocks'] = self::kept(self::acceptList($run['footnote']['blocks'], $depth + 1));
+                }
+            }
+            $owner['runs'] = $runs;
+        }
+        if (array_key_exists('revision', $owner)) {
+            if (is_array($owner['revision']) && array_key_exists('delete', $owner['revision'])) {
+                $owner[self::MARK_GONE] = true;
+            }
+            unset($owner['revision']);
+        }
+
+        return $owner;
+    }
+
+    /**
+     * List items accepted, each joined to the next sibling when its mark is
+     * deleted. The last one keeps the flag at the top level, where the list's
+     * caller may join it to the paragraph after the list.
+     *
+     * @param  list<mixed>  $items
+     * @return list<mixed>
+     */
+    private static function acceptItems(array $items, int $depth, bool $top): array
+    {
+        if ($depth > Portable::MAX_DEPTH) {
+            return $items;
+        }
+        foreach ($items as $k => $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $item = self::acceptOwner($item, $depth);
+            if (is_array($item['children'] ?? null) && array_is_list($item['children'])) {
+                $item['children'] = self::acceptItems($item['children'], $depth + 1, false);
+                if ($item['children'] === []) {
+                    unset($item['children']);
+                }
+            }
+            $items[$k] = $item;
+        }
+        $out = [];
+        $n = count($items);
+        for ($k = 0; $k < $n; $k++) {
+            $item = $items[$k];
+            if (!is_array($item) || !isset($item[self::MARK_GONE])) {
+                $out[] = $item;
+
+                continue;
+            }
+            $runs = is_array($item['runs'] ?? null) ? $item['runs'] : [];
+            if (!empty($item['children'])) {
+                unset($item[self::MARK_GONE]); // keeps its place: see acceptBlocks()
+                $out[] = $item;
+
+                continue;
+            }
+            if ($k + 1 < $n && is_array($items[$k + 1])) {
+                $items[$k + 1]['runs'] = self::joinRuns($runs, is_array($items[$k + 1]['runs'] ?? null) ? $items[$k + 1]['runs'] : []);
+
+                continue;
+            }
+            if ($top) {
+                $out[] = $item; // the caller may join it to the paragraph after the list
+
+                continue;
+            }
+            if ($runs !== []) {
+                unset($item[self::MARK_GONE]);
+                $out[] = $item;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Two run lists as one paragraph's: where they meet, two runs with the same
+     * formatting become one, as the reader merges them.
+     *
+     * @param  list<mixed>  $a
+     * @param  list<mixed>  $b
+     * @return list<mixed>
+     */
+    private static function joinRuns(array $a, array $b): array
+    {
+        $a = array_values($a);
+        $b = array_values($b);
+        $last = $a !== [] ? $a[count($a) - 1] : null;
+        $first = $b[0] ?? null;
+        if (is_array($last) && is_array($first) && is_string($last['text'] ?? null) && is_string($first['text'] ?? null)
+            && !array_key_exists('footnote', $last) && !array_key_exists('footnote', $first)) {
+            $x = $last;
+            $y = $first;
+            unset($x['text'], $y['text']);
+            if ($x == $y) {
+                $a[count($a) - 1]['text'] .= $first['text'];
+                array_shift($b);
+            }
+        }
+
+        return [...$a, ...$b];
+    }
+
+    /**
+     * @param  array<int, mixed>  $blocks
+     * @return list<mixed>
+     */
+    private static function kept(array $blocks): array
+    {
+        return array_values(array_filter($blocks, static fn (mixed $b): bool => $b !== null));
     }
 
     /**

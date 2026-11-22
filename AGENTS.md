@@ -60,7 +60,8 @@ defaults to `[]` — hand the errors back to the model if `ok` is false.
 **Read-then-write flattens revisions unless you check this signal.** The reader
 ACCEPTS every tracked change in a .docx as it reads: an insertion's text is kept,
 a deletion's text is dropped, a move lands at its destination, and a formatting
-change keeps the new formatting. The model has no revisions, so writing the
+change keeps the new formatting. A paragraph whose mark is deleted joins the
+paragraph after it, as Word's Accept All joins them. The model has no revisions, so writing the
 result back erases a person's pending tracked changes for good.
 
 The read result says when that happened, beside `meta` and `unrepresented`:
@@ -274,6 +275,13 @@ $doc = [
   `toMarkdownWithReport()`, `toPortable()`, `catalog()` and the exports leave a
   deleted or moved-away run out and report kind `tracked-change`; `describe()`
   says `Tracked changes: N (...)` and counts words of the accepted text.
+  A paragraph, heading or list item whose MARK is deleted joins the one after
+  it (a paragraph, a heading or a list's first item; a list's last item joins
+  a paragraph after the list), and the joined paragraph has the FOLLOWING one's
+  properties, because they live in the mark that survives (ECMA-376 Part 1,
+  17.13.5.15). With nothing to join it stays, or goes when nothing is left of
+  it; a list item with nested items keeps its place. The default read joins
+  them the same way.
   `Agent::layout()` measures every run, deleted ones included, as Word's All
   Markup view draws them. Another renderer (fine-print, last-word-ui) does not
   know `revision` yet and would draw a deleted run as text: accept first.
