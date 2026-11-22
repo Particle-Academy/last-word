@@ -74,6 +74,15 @@ final class DocxComments
     /** @var array<int, true> positions dropped for overlapping too deep */
     private array $dropped = [];
 
+    /** Parent links followed while resolving threads: the work a hostile reply chain costs. */
+    private int $threadSteps = 0;
+
+    /** How many parent links resolving the threads followed (for tests: it must stay linear in the comments). */
+    public function threadSteps(): int
+    {
+        return $this->threadSteps;
+    }
+
     private function __construct()
     {
         $this->runs = new SplObjectStorage();
@@ -316,6 +325,7 @@ final class DocxComments
         foreach ($parent as $pos => $p) {
             $seen = [$pos => true];
             while ($p >= 0 && isset($parent[$p]) && !isset($seen[$p])) {
+                $this->threadSteps++;
                 $seen[$p] = true;
                 $p = $parent[$p];
             }
