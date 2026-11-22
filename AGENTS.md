@@ -226,7 +226,8 @@ $doc = [
 
 - **A run's `revision`:** `insert` (typed with tracking on), `delete` (deleted;
   the text stays in the run), `moveFrom` / `moveTo` (moved away from here / to
-  here, with a `name` that is the same on both ends), `format` (formatting
+  here, with a `name` that is the same on both ends, and the same text: a
+  pair whose texts differ is refused, `revision_move_mismatch`), `format` (formatting
   changed; `from` is the run's formatting before, as run keys, `{}` for none).
   `insert` with `delete` is a deletion inside an insertion. Refused together:
   `insert` + `moveTo`, `delete` + `moveFrom`, `moveFrom` + anything but `format`.
@@ -256,14 +257,14 @@ $doc = [
   `revision_id_duplicate`, `revision_author_invalid`, `revision_date_invalid`,
   `revision_name_invalid`, `revision_from_invalid`,
   `revision_combination_invalid`, `revision_text_empty`, `revision_range_broken`,
-  `revision_move_unpaired`, `revision_move_outside_body`, `revision_in_band`,
+  `revision_move_unpaired`, `revision_move_mismatch`, `revision_move_outside_body`, `revision_in_band`,
   `revision_count_exceeded`.
 - **Reading:** ids come back as `r1`, `r2` ... in reading order (a paragraph's
   before its runs'; a run's in the order insert, delete, moveFrom, moveTo,
   format), so a document that uses those ids reads back as it was written and
   writes the same bytes. A move keeps its file name when it is a valid one. What
-  cannot be kept is never dropped as text: a move without its pair reads as a
-  deletion or an insertion, an insertion nested in an insertion keeps the outer
+  cannot be kept is never dropped as text: a move without its pair, or whose
+  two texts differ, reads as a deletion and an insertion, an insertion nested in an insertion keeps the outer
   one, an author with refused characters is cleaned (`Unknown` when nothing is
   left), a bad date is dropped. Past the cap, and wherever the model has no slot
   (row, cell, table, section and numbering changes, a paragraph mark's

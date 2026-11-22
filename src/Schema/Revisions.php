@@ -502,13 +502,14 @@ final class Revisions
                     if (($key === 'moveFrom' || $key === 'moveTo') && $where === 'body') {
                         $dir = $key === 'moveFrom' ? 'from' : 'to';
                         $name = $entry['name'];
-                        $moves[$name] ??= ['from' => null, 'to' => null, 'broken' => false];
+                        $moves[$name] ??= ['from' => null, 'to' => null, 'broken' => false, 'text' => ['from' => hash_init('sha256'), 'to' => hash_init('sha256')]];
                         $last = $moves[$name][$dir];
                         if ($last !== null && $last[0] !== $ordinal - 1 && $last[0] !== $ordinal && !$moves[$name]['broken']) {
                             $errors[] = self::error("{$at}.{$key}.name", "the runs moved as \"{$name}\" must be consecutive in reading order; use another move", 'revision_range_broken');
                             $moves[$name]['broken'] = true;
                         }
                         $moves[$name][$dir] = [$ordinal, "{$at}.{$key}"];
+                        hash_update($moves[$name]['text'][$dir], is_string($run['text'] ?? null) ? $run['text'] : '');
                     }
                 }
 
@@ -520,6 +521,9 @@ final class Revisions
             if ($move['from'] === null || $move['to'] === null) {
                 $where = ($move['from'] ?? $move['to'])[1];
                 $errors[] = self::error("{$where}.name", "move \"{$name}\" needs both a moveFrom and a moveTo", 'revision_move_unpaired');
+            } elseif (hash_final($move['text']['from']) !== hash_final($move['text']['to'])) {
+                // A move is one passage in two places: different text is a deletion and an insertion.
+                $errors[] = self::error("{$move['to'][1]}.name", "move \"{$name}\" arrives with different text than it left with; use a delete and an insert", 'revision_move_mismatch');
             }
         }
         if (count($ids) > self::MAX_REVISIONS) {
@@ -1159,7 +1163,8 @@ final class Revisions
                     continue;
                 }
                 $name = (string) ($entry['name'] ?? '');
-                $moves[$name] ??= ['from' => null, 'to' => null, 'ok' => true];
+                $moves[$name] ??= ['from' => null, 'to' => null, 'ok' => true, 'text' => ['from' => hash_init('sha256'), 'to' => hash_init('sha256')]];
+                hash_update($moves[$name]['text'][$dir], is_string($run['text'] ?? null) ? $run['text'] : '');
                 $last = $moves[$name][$dir];
                 if ($where !== 'body' || array_key_exists('footnote', $run) || ($last !== null && $last !== $ordinal - 1)) {
                     $moves[$name]['ok'] = false;
@@ -1171,7 +1176,8 @@ final class Revisions
         });
         $paired = [];
         foreach ($moves as $name => $move) {
-            if ($name !== '' && $move['ok'] && $move['from'] !== null && $move['to'] !== null) {
+            if ($name !== '' && $move['ok'] && $move['from'] !== null && $move['to'] !== null
+                && hash_final($move['text']['from']) === hash_final($move['text']['to'])) {
                 $paired[$name] = true;
             }
         }
