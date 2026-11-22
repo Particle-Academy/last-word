@@ -91,6 +91,47 @@ if ($read['trackedChanges']['present'] ?? false) {
   revisions, so neither the field nor the option says anything about them.
 - **The Node package (`last-word-js`) does not have this yet.**
 
+## Bookmarks, internal links, fields and a table of contents
+
+```json
+{"blocks": [
+  {"type": "paragraph", "runs": [{"text": "Contents", "bold": true}]},
+  {"type": "toc", "levels": 2},
+  {"type": "heading", "level": 1, "runs": [{"text": "Results", "bookmark": "results"}]},
+  {"type": "paragraph", "runs": [
+    {"text": "See "}, {"text": "Results", "link": "#results"},
+    {"text": ", page "}, {"text": "1", "field": "{page}"}, {"text": " of "}, {"text": "1", "field": "{pages}"}
+  ]}
+]}
+```
+
+- **`bookmark`** (on a run) names the place it marks; a run with `text: ""` is
+  a point. A letter, then letters, digits or `_`, at most 40 characters; unique
+  ignoring case; at most 10,000; body text only (not a header, footer or
+  footnote, not a footnote mark). `LastWordCode_` is reserved.
+- **`link: "#name"`** jumps to that bookmark, from the body, a footnote or a
+  header or footer. A link to a bookmark that does not exist is refused with
+  `code: "bookmark_unknown"`; `validateAndRepair()` drops the link, keeps the text.
+- **`field`** (on a run) is ONE token from the header/footer list: `{page}`,
+  `{pages}`, `{section}`, `{sectionpages}`, `{author}`, `{title}`,
+  `{filename}`, `{date}`, `{time}`, `{date:FORMAT}`, `{time:FORMAT}`. `text` is
+  the value shown until Word updates it. Nothing else is accepted, and the
+  instruction is always built from the token. Braces in plain body text stay
+  literal. In a header or footer, write the token in the text instead.
+- **`toc`** is a table of contents: `levels` 1-6 (3 by default), top level of
+  the body only, at most 10. Word fills in page numbers when the file opens
+  (it asks to update fields); until then, and in LibreOffice, the entries show
+  without numbers. Put a "Contents" paragraph above it yourself.
+- **Reading:** a Word bookmark around one run is that run's `bookmark`, any
+  other a point where it starts; hidden ones (`_Toc`, `_GoBack`) are not read.
+  A link to a bookmark that was not read loses its `link` and is counted in
+  `unrepresented` as kind `link`; the .odt, .rtf and .doc readers read no
+  bookmarks yet. A body PAGE / NUMPAGES / DATE ... field reads as a `field`
+  run; any other field as its text. A TOC field reads as a `toc` block.
+- **The Node and Python packages do not have these yet**, and the agent guide
+  does not teach them yet (it is shared byte for byte with them); the JSON
+  schema's descriptions do.
+
 ## Agent guide
 
 Building a document with an LLM? `agent-guide/professional-documents.md` (also

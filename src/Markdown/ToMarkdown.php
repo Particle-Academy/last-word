@@ -158,6 +158,8 @@ final class ToMarkdown
             'chart' => $this->chart($block, $p),
             'pageBreak' => $this->pageBreak($block, $p),
             'hr' => '---',
+            // Markdown has no table of contents: a viewer builds one from the headings.
+            'toc' => $this->note('layout-not-preserved', $p),
             default => null,
         };
     }

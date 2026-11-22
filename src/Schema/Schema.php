@@ -28,6 +28,7 @@ final class Schema
         'chart',
         'pageBreak',
         'hr',
+        'toc',
     ];
 
     /**
@@ -38,7 +39,7 @@ final class Schema
      *
      * @var list<string>
      */
-    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable'];
+    public const BAND_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc'];
 
     /**
      * Block types a footnote's `blocks` refuse, at any depth: a page break means
@@ -48,7 +49,45 @@ final class Schema
      *
      * @var list<string>
      */
-    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable'];
+    public const FOOTNOTE_REFUSED_TYPES = ['chart', 'pageBreak', 'portable', 'toc'];
+
+    /**
+     * A bookmark name (a run's `bookmark`, and what follows `#` in an internal
+     * link): a letter, then letters, digits or `_`, at most 40 characters --
+     * Word's own rule, in ASCII. A leading `_` is Word's hidden bookmark
+     * (`_Toc`, `_GoBack`, `_Ref`), which the writer makes for a toc's headings
+     * and the reader never surfaces; the grammar keeps an agent out of that
+     * namespace. Names are compared ignoring case, as Word does. `D`: a
+     * trailing newline is not a name.
+     */
+    public const BOOKMARK_NAME = '/^[A-Za-z][A-Za-z0-9_]{0,39}$/D';
+
+    /** The pre-0.2.0 code-language bookmark prefix, still read as a code block's language. */
+    public const BOOKMARK_RESERVED_PREFIX = 'LastWordCode_';
+
+    /** The most bookmarks a document may hold. */
+    public const MAX_BOOKMARKS = 10000;
+
+    /** The most `toc` blocks a document may hold: each one repeats every heading. */
+    public const MAX_TOCS = 10;
+
+    /** A toc's `levels` when it does not say: headings 1 to 3, Word's own default. */
+    public const TOC_LEVELS_DEFAULT = 3;
+
+    /** Whether a value is a valid bookmark name (the reserved prefix aside). */
+    public static function isBookmarkName(mixed $name): bool
+    {
+        return is_string($name) && preg_match(self::BOOKMARK_NAME, $name) === 1;
+    }
+
+    /**
+     * Whether a value is exactly one field token ({@see FIELD_TOKEN}), the
+     * whole string and nothing else: what a run's `field` must be.
+     */
+    public static function isFieldToken(mixed $value): bool
+    {
+        return is_string($value) && preg_match(self::FIELD_TOKEN, $value, $m) === 1 && $m[0] === $value;
+    }
 
     /**
      * What a page margin is when the document does not say, in points: one inch
@@ -324,7 +363,9 @@ final class Schema
                 'strike' => ['type' => 'boolean'],
                 'code' => ['type' => 'boolean'],
                 'smallCaps' => ['type' => 'boolean'],
-                'link' => ['type' => 'string', 'description' => 'Hyperlink target URL.'],
+                'link' => ['type' => 'string', 'description' => 'Hyperlink target URL, or "#name" to jump to the run in this document whose bookmark is "name".'],
+                'bookmark' => ['type' => 'string', 'pattern' => '^[A-Za-z][A-Za-z0-9_]{0,39}$', 'description' => 'Names the place this run marks, so a link "#name" can jump to it: {"text": "Results", "bookmark": "results"} on a heading, and {"text": "see Results", "link": "#results"} elsewhere. A letter, then letters, digits or _, at most 40; unique in the document, ignoring case. A run with text "" marks a point. Body text only: not in a header, a footer or a footnote, and not on a footnote mark.'],
+                'field' => ['type' => 'string', 'pattern' => '^\\{(?:page|pages|section|sectionpages|author|title|filename|(?:date|time)(?::[^{}"\\\\]+)?)\\}$', 'description' => 'A live Word field in body text, one token: {page}, {pages}, {section}, {sectionpages}, {author}, {title}, {filename}, {date}, {time}, or {date:FORMAT} / {time:FORMAT} with a Word picture such as {date:d MMMM yyyy}. text is the value shown until Word updates the field: {"text": "1", "field": "{page}"}. Braces in plain text stay literal. In a header or footer write the token in the text instead.'],
                 'color' => $hex,
                 'highlight' => $hex,
                 'size' => ['type' => 'number', 'exclusiveMinimum' => 0, 'description' => 'Font size in points. Half-points are exactly representable.'],
@@ -490,6 +531,15 @@ final class Schema
                 'required' => ['type'],
                 'properties' => ['type' => ['const' => 'hr']],
             ],
+            'toc' => [
+                'type' => 'object',
+                'required' => ['type'],
+                'description' => 'A table of contents: Word lists the document\'s headings here, each linked to its heading, and updates it, page numbers included, when the file opens. Put a "Contents" heading or paragraph above it. Top level of the body only, at most '.self::MAX_TOCS.'.',
+                'properties' => [
+                    'type' => ['const' => 'toc'],
+                    'levels' => ['type' => 'integer', 'minimum' => 1, 'maximum' => self::MAX_HEADING_LEVEL, 'description' => 'The deepest heading level listed: 3 lists headings 1 to 3. 3 by default.'],
+                ],
+            ],
         ];
 
         return [
@@ -549,7 +599,7 @@ final class Schema
                             'items' => [
                                 'allOf' => [
                                     ['$ref' => '#/$defs/block'],
-                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak']]], 'required' => ['type']]],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc']]], 'required' => ['type']]],
                                 ],
                             ],
                         ],
@@ -567,7 +617,7 @@ final class Schema
                             'items' => [
                                 'allOf' => [
                                     ['$ref' => '#/$defs/block'],
-                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak']]], 'required' => ['type']]],
+                                    ['not' => ['properties' => ['type' => ['enum' => ['chart', 'pageBreak', 'toc']]], 'required' => ['type']]],
                                 ],
                             ],
                         ],

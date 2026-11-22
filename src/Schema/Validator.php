@@ -107,8 +107,88 @@ final class Validator
             }
         }
         $this->validateBlocks($doc['blocks'], 'blocks', $errors);
+        $this->validateBookmarks($doc, $errors);
 
         return $errors;
+    }
+
+    /**
+     * What only the whole document can say: every body bookmark unique (ignoring
+     * case, as Word compares them), at most {@see Schema::MAX_BOOKMARKS} of them
+     * and {@see Schema::MAX_TOCS} toc blocks, and every internal link (`"#name"`,
+     * in the body, a footnote or a header or footer) naming one that exists. A
+     * link to nothing is refused rather than written: Word would make it a link
+     * that goes nowhere, and the reader could not read it back.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  list<array{path: string, message: string, code?: string}>  $errors
+     */
+    private function validateBookmarks(array $doc, array &$errors): void
+    {
+        $tocs = count(array_filter($doc['blocks'], static fn (mixed $b): bool => is_array($b) && ($b['type'] ?? null) === 'toc'));
+        if ($tocs > Schema::MAX_TOCS) {
+            $errors[] = self::error('blocks', 'a document holds at most ' . Schema::MAX_TOCS . ' toc blocks');
+        }
+
+        $runs = RunWalk::all($doc);
+        $names = [];
+        $seen = [];
+        foreach ($runs as ['run' => $run, 'path' => $path, 'where' => $where]) {
+            $name = $run['bookmark'] ?? null;
+            if ($where !== 'body' || array_key_exists('footnote', $run) || !Schema::isBookmarkName($name)
+                || str_starts_with($name, Schema::BOOKMARK_RESERVED_PREFIX)) {
+                continue;
+            }
+            $key = strtolower($name);
+            if (isset($seen[$key])) {
+                $errors[] = self::error("{$path}.bookmark", "bookmark \"{$name}\" is already used at {$seen[$key]} (names are compared ignoring case, as Word does)");
+
+                continue;
+            }
+            $seen[$key] = $path;
+            $names[$name] = true;
+        }
+        if (count($seen) > Schema::MAX_BOOKMARKS) {
+            $errors[] = self::error('blocks', 'a document holds at most ' . Schema::MAX_BOOKMARKS . ' bookmarks (found ' . count($seen) . ')');
+        }
+
+        foreach ($runs as ['run' => $run, 'path' => $path]) {
+            $link = $run['link'] ?? null;
+            if (!is_string($link) || !str_starts_with($link, '#')) {
+                continue;
+            }
+            $target = substr($link, 1);
+            if (!Schema::isBookmarkName($target)) {
+                $errors[] = self::error("{$path}.link", 'an internal link is "#" and a bookmark name: a letter, then letters, digits or _, at most 40 characters');
+
+                continue;
+            }
+            if (!isset($names[$target])) {
+                $known = array_keys($names);
+                $list = $known === [] ? 'none' : implode(', ', array_slice($known, 0, 10)) . (count($known) > 10 ? ', ...' : '');
+                $errors[] = self::error("{$path}.link", "no bookmark named \"{$target}\" in the document (bookmarks: {$list}); put \"bookmark\": \"{$target}\" on the run to jump to") + ['code' => 'bookmark_unknown'];
+            }
+        }
+    }
+
+    /**
+     * A table of contents: `levels` 1-6 when present, and only at the top level
+     * of the body (a header, a footer and a footnote refuse it by type).
+     *
+     * @param  array<string, mixed>  $block
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateToc(array $block, string $path, array &$errors): void
+    {
+        if (array_key_exists('levels', $block)) {
+            $levels = $block['levels'];
+            if (!is_int($levels) || $levels < 1 || $levels > Schema::MAX_HEADING_LEVEL) {
+                $errors[] = self::error("{$path}.levels", 'toc levels must be an integer from 1 to ' . Schema::MAX_HEADING_LEVEL);
+            }
+        }
+        if ($this->context === 'body' && preg_match('/^blocks\[\d+\]$/', $path) !== 1) {
+            $errors[] = self::error("{$path}.type", 'a toc goes at the top level of the body, not in a quote or a table cell');
+        }
     }
 
     /**
@@ -374,6 +454,7 @@ final class Validator
             'chart' => $this->validateChart($block, $path, $errors),
             'pageBreak' => $this->validatePageBreak($block, $path, $errors),
             'hr' => null,
+            'toc' => $this->validateToc($block, $path, $errors),
         };
     }
 
@@ -844,6 +925,18 @@ final class Validator
                     ? 'a footnote run requires "text": "" (Word numbers the mark)'
                     : 'run requires a string "text"');
             }
+            if (array_key_exists('bookmark', $run)) {
+                $this->validateBookmark($run, $runPath, $errors);
+            }
+            if (array_key_exists('field', $run)) {
+                if (array_key_exists('footnote', $run)) {
+                    $errors[] = self::error("{$runPath}.field", 'a footnote mark cannot carry a field; put it on a run of its own');
+                } elseif ($this->context === 'band') {
+                    $errors[] = self::error("{$runPath}.field", 'in a header or footer write the token in the text ("Page {page}"); field is for body text');
+                } elseif (!Schema::isFieldToken($run['field'])) {
+                    $errors[] = self::error("{$runPath}.field", 'field must be exactly one field token: {page}, {pages}, {section}, {sectionpages}, {author}, {title}, {filename}, {date}, {time}, {date:FORMAT} or {time:FORMAT}');
+                }
+            }
             if (array_key_exists('footnote', $run)) {
                 $this->validateFootnote($run, $runPath, $errors);
             }
@@ -865,6 +958,30 @@ final class Validator
             }
             $this->validateNumber($run['size'] ?? null, "{$runPath}.size", 'run size', $errors, true);
             $this->validateNumber($run['letterSpacing'] ?? null, "{$runPath}.letterSpacing", 'run letterSpacing', $errors);
+        }
+    }
+
+    /**
+     * A run's `bookmark`: a name ({@see Schema::BOOKMARK_NAME}), not reserved, on
+     * a run of body text. Uniqueness is the document's, checked once it is all seen.
+     *
+     * @param  array<string, mixed>  $run
+     * @param  list<array{path: string, message: string}>  $errors
+     */
+    private function validateBookmark(array $run, string $runPath, array &$errors): void
+    {
+        $at = "{$runPath}.bookmark";
+        $name = $run['bookmark'];
+        if (array_key_exists('footnote', $run)) {
+            $errors[] = self::error($at, 'a footnote mark cannot carry a bookmark; put it on the run before it');
+        } elseif ($this->context === 'band') {
+            $errors[] = self::error($at, 'a bookmark goes in the body, not in a header or footer');
+        } elseif ($this->context === 'footnote') {
+            $errors[] = self::error($at, 'a bookmark goes in the body, not in a footnote');
+        } elseif (!Schema::isBookmarkName($name)) {
+            $errors[] = self::error($at, 'a bookmark name is a letter, then letters, digits or _, at most 40 characters');
+        } elseif (str_starts_with($name, Schema::BOOKMARK_RESERVED_PREFIX)) {
+            $errors[] = self::error($at, 'bookmark names starting ' . Schema::BOOKMARK_RESERVED_PREFIX . ' are reserved');
         }
     }
 

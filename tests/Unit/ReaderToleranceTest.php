@@ -59,7 +59,8 @@ it('reads a hand-built document with outlineLvl headings and unknown elements wi
         ->and($doc['blocks'][0])->toEqual(['type' => 'heading', 'level' => 1, 'runs' => [['text' => 'Chapter']]])
         ->and($doc['blocks'][1])->toEqual(['type' => 'heading', 'level' => 6, 'runs' => [['text' => 'Deep heading']]])
         ->and($doc['blocks'][2])->toEqual(['type' => 'paragraph', 'runs' => [['text' => 'Wrapped paragraph']]])
-        ->and($doc['blocks'][3])->toEqual(['type' => 'paragraph', 'runs' => [['text' => 'Plain 1 text']]]);
+        // A PAGE field in body text reads as a field run, its cached result the text.
+        ->and($doc['blocks'][3])->toEqual(['type' => 'paragraph', 'runs' => [['text' => 'Plain '], ['text' => '1', 'field' => '{page}'], ['text' => ' text']]]);
 });
 
 it('maps named w:highlight colors and buckets unknown numIds as unordered', function () {

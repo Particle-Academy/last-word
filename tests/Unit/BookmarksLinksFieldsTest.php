@@ -122,7 +122,7 @@ describe('bookmarks and internal links', function () {
                 ['text' => 'Back to '],
                 ['text' => 'the start', 'link' => '#intro'],
                 ['text' => ', '],
-                ['text' => 'the point', 'link' => '#here', 'bold' => true],
+                ['text' => 'the point', 'bold' => true, 'link' => '#here'],
                 ['text' => ', '],
                 ['text' => 'the cell', 'link' => '#Cell2'],
                 ['text' => ' and '],
@@ -196,6 +196,32 @@ describe('bookmarks and internal links', function () {
             [['text' => 'd']],
             [['text' => 'e']],
         ])->and(Agent::validate($read))->toBe([]);
+    });
+
+    it('reads overlapping bookmarks as points, and a hostile paragraph of thousands of them', function () {
+        $starts = '';
+        $ends = '';
+        for ($i = 0; $i < 3000; $i++) {
+            $starts .= '<w:bookmarkStart w:id="' . $i . '" w:name="b' . $i . '"/>';
+            $ends .= '<w:bookmarkEnd w:id="' . $i . '"/>';
+        }
+        $read = Agent::read(blfDocxWithBody('<w:p>' . $starts . '<w:r><w:t>text</w:t></w:r>' . $ends . '</w:p>'));
+        $runs = $read['blocks'][0]['runs'];
+
+        expect($runs)->toHaveCount(3001)
+            ->and($runs[0])->toBe(['text' => '', 'bookmark' => 'b0'])
+            ->and($runs[2999])->toBe(['text' => '', 'bookmark' => 'b2999'])
+            ->and($runs[3000])->toBe(['text' => 'text']);
+    });
+
+    it('reads fields nested deeper than it tracks without losing the paragraph', function () {
+        $xml = str_repeat('<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>', 500)
+            . '<w:r><w:t>deep</w:t></w:r>'
+            . str_repeat('<w:r><w:fldChar w:fldCharType="end"/></w:r>', 500)
+            . '<w:r><w:t xml:space="preserve"> after</w:t></w:r>';
+        $read = Agent::read(blfDocxWithBody('<w:p>' . $xml . '</w:p>'));
+
+        expect($read['blocks'][0]['runs'])->toBe([['text' => 'deep after']]);
     });
 
     it('refuses hostile bookmark names', function (mixed $name, string $message) {
@@ -286,7 +312,7 @@ describe('fields in body text', function () {
         $runs = [
             ['text' => 'Page '], ['text' => '3', 'field' => '{page}'], ['text' => ' of '], ['text' => '9', 'field' => '{pages}'],
             ['text' => ' / '], ['text' => '2', 'field' => '{section}'], ['text' => ' / '], ['text' => '4', 'field' => '{sectionpages}'],
-            ['text' => ' / '], ['text' => 'Ada', 'field' => '{author}', 'italic' => true], ['text' => ' / '], ['text' => 'Memo', 'field' => '{title}'],
+            ['text' => ' / '], ['text' => 'Ada', 'italic' => true, 'field' => '{author}'], ['text' => ' / '], ['text' => 'Memo', 'field' => '{title}'],
             ['text' => ' / '], ['text' => 'memo.docx', 'field' => '{filename}'], ['text' => ' / '], ['text' => '21/11/2026', 'field' => '{date}'],
             ['text' => ' / '], ['text' => '2026-11-21', 'field' => '{date:yyyy-MM-dd}'], ['text' => ' / '], ['text' => '09:30', 'field' => '{time:HH:mm}'],
             ['text' => ' / '], ['text' => '9:30 AM', 'field' => '{time}'],
@@ -460,6 +486,13 @@ describe('a table of contents', function () {
     it('refuses more toc blocks than the cap', function () {
         expect(blfMessages(blfDoc(array_fill(0, Schema::MAX_TOCS + 1, ['type' => 'toc']))))
             ->toBe(['a document holds at most ' . Schema::MAX_TOCS . ' toc blocks']);
+    });
+
+    it('leaves a toc out of markdown and says so', function () {
+        $r = Agent::toMarkdownWithReport(blfDoc([['type' => 'toc'], ['type' => 'heading', 'level' => 1, 'runs' => [['text' => 'A']]]]));
+
+        expect($r['markdown'])->toBe("# A\n")
+            ->and($r['report']['approximated'])->toBe([['kind' => 'layout-not-preserved', 'count' => 1, 'where' => ['/blocks/0']]]);
     });
 
     it('repairs a toc: levels clamped, a nested one dropped', function () {

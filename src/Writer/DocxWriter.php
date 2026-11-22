@@ -241,6 +241,31 @@ final class DocxWriter
     /** Whether this document has a page colour (`w:displayBackgroundShape` in settings). */
     private bool $hasBackground = false;
 
+    /** The last `w:bookmarkStart` id used: ids are unique across the body, a toc's included. */
+    private int $bookmarkId = 0;
+
+    /**
+     * The deepest heading level any `toc` block lists, 0 without one. Headings at
+     * or above it get a hidden `_Toc` bookmark for the toc's entries to link to.
+     */
+    private int $tocLevels = 0;
+
+    /**
+     * The body's headings a toc may list, in document order, as they render.
+     *
+     * @var list<array{level: int, text: string, name: string}>
+     */
+    private array $tocHeadings = [];
+
+    /**
+     * Each `toc` block's levels, by the number of the placeholder it rendered as.
+     * A toc lists headings that come after it, so it is written once the whole
+     * body has rendered.
+     *
+     * @var list<int>
+     */
+    private array $tocBlocks = [];
+
     /**
      * The kinds ('header' | 'footer') whose parts come from the template's
      * section (last-word#5) rather than the document's own band. Empty without
@@ -346,6 +371,15 @@ final class DocxWriter
         $this->footnoteRels = [];
         $this->footnoteRelCounter = 0;
         $this->inFootnote = false;
+        $this->bookmarkId = 0;
+        $this->tocHeadings = [];
+        $this->tocBlocks = [];
+        $this->tocLevels = 0;
+        foreach (is_array($doc['blocks'] ?? null) ? $doc['blocks'] : [] as $block) {
+            if (is_array($block) && ($block['type'] ?? null) === 'toc') {
+                $this->tocLevels = max($this->tocLevels, self::tocLevelsOf($block));
+            }
+        }
 
         $hasTitle = array_key_exists('title', $doc);
         // meta.author (0.16.0) is dc:creator, beside the title in the core
@@ -624,11 +658,13 @@ final class DocxWriter
      * the author and the title for AUTHOR and TITLE (`meta.author`, `title`;
      * empty without one); and no result run at all for DATE, TIME and FILENAME.
      *
+     * A body field run passes its own text as `$cached`, and that is written instead.
+     *
      * @param  array{name: string, instruction: string}  $field
      */
-    private function fieldRuns(array $field, string $open): string
+    private function fieldRuns(array $field, string $open, ?string $cached = null): string
     {
-        $result = match ($field['name']) {
+        $result = $cached ?? match ($field['name']) {
             'page', 'pages', 'sectionpages' => '1',
             'section' => $this->fieldSection,
             'author' => $this->fieldAuthor,
@@ -888,6 +924,15 @@ final class DocxWriter
             $this->contentWidth = $geometry[$k]['w'] - $geometry[$k]['left'] - $geometry[$k]['right'];
             $bodies[$k] = $this->renderBlocks(array_values($stretch['blocks']));
         }
+        if ($this->tocBlocks !== []) {
+            foreach ($bodies as $k => $xml) {
+                $bodies[$k] = preg_replace_callback(
+                    '/<lastword:toc n="(\d+)"\/>/',
+                    fn (array $m): string => $this->tocXml($this->tocBlocks[(int) $m[1]]),
+                    $xml,
+                );
+            }
+        }
 
         // Header/footer references come FIRST in w:sectPr; the schema orders them
         // before w:pgSz, and Word drops a reference it finds after it.
@@ -966,7 +1011,7 @@ final class DocxWriter
         $background = self::hex($pageSpec['background'] ?? null);
         $this->hasBackground = $background !== null;
         // Footnotes are registered as the body renders, above, so they are known here.
-        $this->hasSettings = $this->hasBackground || $this->evenAndOdd || $this->footnotes !== [];
+        $this->hasSettings = $this->hasBackground || $this->evenAndOdd || $this->footnotes !== [] || $this->tocBlocks !== [];
 
         return Xml::declaration()
             . '<w:document'
@@ -1198,12 +1243,15 @@ final class DocxWriter
     private function buildSettings(): string
     {
         // CT_Settings is a sequence: displayBackgroundShape precedes
-        // evenAndOddHeaders, which precedes footnotePr. The footnotePr names the
-        // two separator footnotes, as Word itself writes it.
+        // evenAndOddHeaders, then updateFields, then footnotePr. The footnotePr
+        // names the two separator footnotes, as Word itself writes it.
+        // updateFields asks Word to update the fields when the file opens: what
+        // fills in a toc's page numbers.
         return Xml::declaration()
             . '<w:settings xmlns:w="' . self::NS_W . '">'
             . ($this->hasBackground ? '<w:displayBackgroundShape/>' : '')
             . ($this->evenAndOdd ? '<w:evenAndOddHeaders/>' : '')
+            . ($this->tocBlocks !== [] ? '<w:updateFields w:val="true"/>' : '')
             . ($this->footnotes !== [] ? '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>' : '')
             . '</w:settings>';
     }
@@ -1339,6 +1387,8 @@ final class DocxWriter
                 'chart' => $this->renderChart($block),
                 'pageBreak' => '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
                 'hr' => '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>',
+                // Raw markup no escaped text can contain, replaced once the body is done.
+                'toc' => '<lastword:toc n="' . array_push($this->tocBlocks, self::tocLevelsOf($block)) - 1 . '"/>',
                 default => '',
             };
             $prevWasTable = $type === 'table';
@@ -1356,9 +1406,75 @@ final class DocxWriter
         // that, a section label that needed spacing or alignment had to be a
         // bold paragraph impersonating a heading — and so appeared in no
         // navigation pane and no table of contents.
-        return '<w:p>' . self::pPrXml($block, 'Heading' . $level)
-            . $this->renderRuns($block['runs'] ?? [])
-            . '</w:p>';
+        $runs = $this->renderRuns($block['runs'] ?? []);
+        $text = trim(self::plainRunText($block['runs'] ?? []));
+        if ($level <= $this->tocLevels && $text !== '' && !$this->inBand && !$this->inFootnote) {
+            $name = '_Toc' . (count($this->tocHeadings) + 1);
+            $this->tocHeadings[] = ['level' => $level, 'text' => $text, 'name' => $name];
+            $id = ++$this->bookmarkId;
+            $runs = '<w:bookmarkStart w:id="' . $id . '" w:name="' . $name . '"/>' . $runs . '<w:bookmarkEnd w:id="' . $id . '"/>';
+        }
+
+        return '<w:p>' . self::pPrXml($block, 'Heading' . $level) . $runs . '</w:p>';
+    }
+
+    /** A toc block's levels: its own when valid, else the default. */
+    private static function tocLevelsOf(array $block): int
+    {
+        $levels = $block['levels'] ?? null;
+
+        return is_int($levels) && $levels >= 1 && $levels <= Schema::MAX_HEADING_LEVEL ? $levels : Schema::TOC_LEVELS_DEFAULT;
+    }
+
+    /**
+     * Runs as plain text: what a toc entry shows for a heading. A footnote mark is nothing.
+     *
+     * @param  mixed  $runs
+     */
+    private static function plainRunText(mixed $runs): string
+    {
+        $text = '';
+        foreach (is_array($runs) ? $runs : [] as $run) {
+            if (is_array($run) && !array_key_exists('footnote', $run) && is_string($run['text'] ?? null)) {
+                $text .= $run['text'];
+            }
+        }
+
+        return str_replace(["\r\n", "\n", "\t"], ' ', $text);
+    }
+
+    /**
+     * A table of contents: one `TOC \o "1-n" \h \z \u` field, its instruction
+     * built from the validated level alone -- nothing from the document reaches
+     * it. Its cached result is one paragraph per listed heading, each a link to
+     * the heading's `_Toc` bookmark and indented by level; there are no page
+     * numbers, because the writer does not paginate. `w:dirty` and the settings'
+     * `w:updateFields` have Word rebuild it, numbers and its own TOC styles
+     * included, when the file opens.
+     */
+    private function tocXml(int $levels): string
+    {
+        $begin = '<w:r><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r>'
+            . '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-' . $levels . '" \\h \\z \\u </w:instrText></w:r>'
+            . '<w:r><w:fldChar w:fldCharType="separate"/></w:r>';
+        $end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+
+        $entries = array_values(array_filter($this->tocHeadings, static fn (array $h): bool => $h['level'] <= $levels));
+        if ($entries === []) {
+            return '<w:p>' . $begin . $end . '</w:p>';
+        }
+        $xml = '';
+        $last = count($entries) - 1;
+        foreach ($entries as $i => $entry) {
+            $indent = ($entry['level'] - 1) * 240;
+            $xml .= '<w:p><w:pPr><w:spacing w:after="60"/>' . ($indent > 0 ? '<w:ind w:left="' . $indent . '"/>' : '') . '</w:pPr>'
+                . ($i === 0 ? $begin : '')
+                . '<w:hyperlink w:anchor="' . $entry['name'] . '" w:history="1"><w:r><w:t xml:space="preserve">' . Xml::text($entry['text']) . '</w:t></w:r></w:hyperlink>'
+                . ($i === $last ? $end : '')
+                . '</w:p>';
+        }
+
+        return $xml;
     }
 
     /** @param  array<string, mixed>  $block */
@@ -1881,13 +1997,23 @@ final class DocxWriter
             }
             $link = $run['link'] ?? null;
             $runXml = $this->renderRun($run);
-            if (is_string($link) && $link !== '') {
+            if (is_string($link) && str_starts_with($link, '#') && Schema::isBookmarkName(substr($link, 1))) {
+                // An internal link: an anchor, no relationship. Validation has
+                // checked the bookmark exists.
+                $runXml = '<w:hyperlink w:anchor="' . Xml::attr(substr($link, 1)) . '" w:history="1">' . $runXml . '</w:hyperlink>';
+            } elseif (is_string($link) && $link !== '') {
                 $rId = 'rId' . ++$this->relCounter;
                 $this->rels[$rId] = ['type' => 'hyperlink', 'target' => $link];
-                $xml .= '<w:hyperlink r:id="' . $rId . '">' . $runXml . '</w:hyperlink>';
-            } else {
-                $xml .= $runXml;
+                $runXml = '<w:hyperlink r:id="' . $rId . '">' . $runXml . '</w:hyperlink>';
             }
+            // A bookmark spans its run, link and all; an empty run makes it a point.
+            // Body only: validation refuses one in a header, a footer or a footnote.
+            $name = $run['bookmark'] ?? null;
+            if (Schema::isBookmarkName($name) && !$this->inBand && !$this->inFootnote) {
+                $id = ++$this->bookmarkId;
+                $runXml = '<w:bookmarkStart w:id="' . $id . '" w:name="' . Xml::attr($name) . '"/>' . $runXml . '<w:bookmarkEnd w:id="' . $id . '"/>';
+            }
+            $xml .= $runXml;
         }
 
         return $xml;
@@ -1953,6 +2079,13 @@ final class DocxWriter
 
         $text = (string) ($run['text'] ?? '');
         $open = '<w:r>' . ($rPr !== '' ? "<w:rPr>{$rPr}</w:rPr>" : '');
+
+        // A run's `field`: one allow-listed token as a live field, its text the
+        // cached result. Only a token reaches here, so the instruction is
+        // always one {@see Schema::splitFieldTokens()} built.
+        if (Schema::isFieldToken($run['field'] ?? null)) {
+            return $this->fieldRuns(Schema::splitFieldTokens($run['field'])[0], $open, $text !== '' ? $text : null);
+        }
 
         // In a `{blocks}` band (last-word#6) the field tokens are live fields,
         // as in a band's slots: complex fields, every piece in this run's
