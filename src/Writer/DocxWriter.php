@@ -7,6 +7,7 @@ namespace LastWord\Writer;
 use LastWord\Helpers\Chart;
 use LastWord\Helpers\ImageSize;
 use LastWord\Helpers\Xml;
+use LastWord\Schema\RunWalk;
 use LastWord\Schema\Schema;
 use RuntimeException;
 use ZipArchive;
@@ -245,6 +246,14 @@ final class DocxWriter
     private int $bookmarkId = 0;
 
     /**
+     * The body's bookmarks, lower-cased name => name: an internal link is
+     * matched ignoring case, as Word does, and written in its bookmark's spelling.
+     *
+     * @var array<string, string>
+     */
+    private array $bookmarkNames = [];
+
+    /**
      * The deepest heading level any `toc` block lists, 0 without one. Headings at
      * or above it get a hidden `_Toc` bookmark for the toc's entries to link to.
      */
@@ -372,6 +381,12 @@ final class DocxWriter
         $this->footnoteRelCounter = 0;
         $this->inFootnote = false;
         $this->bookmarkId = 0;
+        $this->bookmarkNames = [];
+        foreach (RunWalk::all($doc) as ['run' => $run, 'where' => $where]) {
+            if ($where === 'body' && Schema::isBookmarkName($run['bookmark'] ?? null)) {
+                $this->bookmarkNames[strtolower($run['bookmark'])] ??= $run['bookmark'];
+            }
+        }
         $this->tocHeadings = [];
         $this->tocBlocks = [];
         $this->tocLevels = 0;
@@ -2000,7 +2015,8 @@ final class DocxWriter
             if (is_string($link) && str_starts_with($link, '#') && Schema::isBookmarkName(substr($link, 1))) {
                 // An internal link: an anchor, no relationship. Validation has
                 // checked the bookmark exists.
-                $runXml = '<w:hyperlink w:anchor="' . Xml::attr(substr($link, 1)) . '" w:history="1">' . $runXml . '</w:hyperlink>';
+                $anchor = $this->bookmarkNames[strtolower(substr($link, 1))] ?? substr($link, 1);
+                $runXml = '<w:hyperlink w:anchor="' . Xml::attr($anchor) . '" w:history="1">' . $runXml . '</w:hyperlink>';
             } elseif (is_string($link) && $link !== '') {
                 $rId = 'rId' . ++$this->relCounter;
                 $this->rels[$rId] = ['type' => 'hyperlink', 'target' => $link];

@@ -383,6 +383,8 @@ final class Agent
     /**
      * A read document without internal links to bookmarks it does not have.
      *
+     * A link that names a bookmark in another case is spelt as the bookmark is.
+     *
      * Word files link to Word's hidden bookmarks (`_Toc`, `_Ref`), to ones whose
      * names the model cannot hold, or to nothing at all; and the .odt, .rtf and
      * .doc readers read no bookmarks. Such a link keeps its text and loses its
@@ -398,16 +400,23 @@ final class Agent
         $names = [];
         foreach (RunWalk::all($doc) as ['run' => $run, 'where' => $where]) {
             if ($where === 'body' && Schema::isBookmarkName($run['bookmark'] ?? null)) {
-                $names[$run['bookmark']] = true;
+                $names[strtolower($run['bookmark'])] ??= $run['bookmark'];
             }
         }
         $dropped = [];
         $doc = RunWalk::map($doc, static function (array $run, string $path, string $where) use ($names, &$dropped): array {
             $link = $run['link'] ?? null;
-            if (is_string($link) && str_starts_with($link, '#') && !isset($names[substr($link, 1)])) {
-                unset($run['link']);
-                $at = $where === 'band' ? '/page' : '/blocks';
-                $dropped[$at] = ($dropped[$at] ?? 0) + 1;
+            if (is_string($link) && str_starts_with($link, '#')) {
+                // Word resolves an anchor ignoring case; the model's link is
+                // spelt as its bookmark is, so it round-trips as it reads.
+                $name = $names[strtolower(substr($link, 1))] ?? null;
+                if ($name !== null) {
+                    $run['link'] = '#' . $name;
+                } else {
+                    unset($run['link']);
+                    $at = $where === 'band' ? '/page' : '/blocks';
+                    $dropped[$at] = ($dropped[$at] ?? 0) + 1;
+                }
             }
 
             return $run;

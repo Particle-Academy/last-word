@@ -103,7 +103,7 @@ final class Repairer
                 unset($run['bookmark']);
             } else {
                 $seen[$key] = $path;
-                $names[$run['bookmark']] = true;
+                $names[$key] = true;
             }
 
             return $run;
@@ -111,7 +111,7 @@ final class Repairer
 
         return RunWalk::map($doc, function (array $run, string $path) use ($names): array {
             $link = $run['link'] ?? null;
-            if (is_string($link) && str_starts_with($link, '#') && !isset($names[substr($link, 1)])) {
+            if (is_string($link) && str_starts_with($link, '#') && !isset($names[strtolower(substr($link, 1))])) {
                 $this->note("{$path}.link", "dropped the link to \"{$link}\": no bookmark of that name; the text stays");
                 unset($run['link']);
             }

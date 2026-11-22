@@ -146,7 +146,7 @@ final class Validator
                 continue;
             }
             $seen[$key] = $path;
-            $names[$name] = true;
+            $names[$key] = $name;
         }
         if (count($seen) > Schema::MAX_BOOKMARKS) {
             $errors[] = self::error('blocks', 'a document holds at most ' . Schema::MAX_BOOKMARKS . ' bookmarks (found ' . count($seen) . ')');
@@ -163,8 +163,9 @@ final class Validator
 
                 continue;
             }
-            if (!isset($names[$target])) {
-                $known = array_keys($names);
+            // Matched ignoring case, as Word resolves an anchor.
+            if (!isset($names[strtolower($target)])) {
+                $known = array_values($names);
                 $list = $known === [] ? 'none' : implode(', ', array_slice($known, 0, 10)) . (count($known) > 10 ? ', ...' : '');
                 $errors[] = self::error("{$path}.link", "no bookmark named \"{$target}\" in the document (bookmarks: {$list}); put \"bookmark\": \"{$target}\" on the run to jump to") + ['code' => 'bookmark_unknown'];
             }
