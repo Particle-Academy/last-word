@@ -2358,6 +2358,7 @@ final class DocxReader
                 case 'pPr':
                 case 'proofErr':
                 case 'del':
+                case 'moveFrom': // a move's source: accepted, the text is at its destination
                 case 'commentRangeStart':
                 case 'commentRangeEnd':
                     break;
