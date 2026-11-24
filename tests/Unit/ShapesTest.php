@@ -415,7 +415,7 @@ describe('round trip', function () {
             shpBox('through', ['anchor' => ['horizontal' => ['relativeTo' => 'page', 'align' => 'center'], 'vertical' => ['relativeTo' => 'margin', 'align' => 'bottom'], 'wrap' => 'through', 'allowOverlap' => true]]),
             shpBox('top and bottom', ['anchor' => ['horizontal' => ['relativeTo' => 'margin', 'align' => 'inside'], 'vertical' => ['relativeTo' => 'page', 'align' => 'outside'], 'wrap' => 'topAndBottom', 'allowOverlap' => true]]),
             shpBox('behind', ['anchor' => ['horizontal' => ['relativeTo' => 'margin', 'offset' => -36.5], 'vertical' => ['relativeTo' => 'margin', 'offset' => 1584], 'wrap' => 'behind', 'allowOverlap' => false]]),
-            shpBox('inFront', ['anchor' => ['horizontal' => ['relativeTo' => 'margin', 'align' => 'left'], 'vertical' => ['relativeTo' => 'paragraph', 'align' => 'center'], 'wrap' => 'inFront', 'allowOverlap' => true]]),
+            shpBox('inFront', ['anchor' => ['horizontal' => ['relativeTo' => 'margin', 'align' => 'left'], 'vertical' => ['relativeTo' => 'line', 'align' => 'center'], 'wrap' => 'inFront', 'allowOverlap' => true]]),
         ]]],
         'plain shapes, every outline' => [['blocks' => [
             ['type' => 'shape', 'geometry' => 'ellipse', 'widthPx' => 96, 'heightPx' => 64, 'fill' => '#1F6FEB'],
@@ -517,6 +517,8 @@ describe('validation', function () {
         'a vertical from the column' => [['vertical' => ['relativeTo' => 'column']], ['anchor_invalid']],
         'both offset and align' => [['horizontal' => ['offset' => 0, 'align' => 'left']], ['anchor_invalid']],
         'a vertical align of middle' => [['vertical' => ['align' => 'middle']], ['anchor_invalid']],
+        'a vertical align from the paragraph, which Word cannot make' => [['vertical' => ['relativeTo' => 'paragraph', 'align' => 'top']], ['anchor_invalid']],
+        'a vertical align from the default, the paragraph' => [['vertical' => ['align' => 'bottom']], ['anchor_invalid']],
         'an axis that is a number' => [['horizontal' => 12], ['anchor_invalid']],
         'an offset that is a string' => [['horizontal' => ['offset' => '12']], ['anchor_offset_invalid']],
         'an offset past 22 inches' => [['horizontal' => ['offset' => 1585]], ['anchor_offset_invalid']],
@@ -634,6 +636,10 @@ describe('repair', function () {
         'a junk anchor is mended' => [
             ['blocks' => [['type' => 'shape', 'widthPx' => 10, 'heightPx' => 10, 'anchor' => ['horizontal' => ['relativeTo' => 'paragraph', 'offset' => 99999, 'align' => 'left'], 'vertical' => ['align' => 'middle'], 'wrap' => 'inline', 'allowOverlap' => 'no', 'z' => 1]]]],
             [['type' => 'shape', 'widthPx' => 10, 'heightPx' => 10, 'anchor' => ['horizontal' => ['relativeTo' => 'column', 'offset' => 1584], 'vertical' => ['offset' => 0], 'wrap' => 'square']]],
+        ],
+        'a vertical align from the paragraph becomes an offset' => [
+            ['blocks' => [['type' => 'shape', 'widthPx' => 10, 'heightPx' => 10, 'anchor' => ['vertical' => ['relativeTo' => 'paragraph', 'align' => 'center'], 'wrap' => 'square']]]],
+            [['type' => 'shape', 'widthPx' => 10, 'heightPx' => 10, 'anchor' => ['vertical' => ['relativeTo' => 'paragraph', 'offset' => 0], 'wrap' => 'square']]],
         ],
         'an anchor that is not an object makes the shape inline' => [
             ['blocks' => [['type' => 'shape', 'widthPx' => 10, 'heightPx' => 10, 'anchor' => 'left']]],
@@ -763,6 +769,11 @@ describe('reading', function () {
             [['type' => 'shape', 'widthPx' => 96, 'heightPx' => 96, 'fill' => '#FFFFFF',
                 'anchor' => ['horizontal' => ['relativeTo' => 'margin', 'align' => 'right'], 'vertical' => ['relativeTo' => 'paragraph', 'offset' => 0], 'wrap' => 'square', 'allowOverlap' => true], 'blocks' => [shpP('Right')]]],
         ],
+        'a floating box aligned to the top of its paragraph, which Word cannot make' => [
+            '<v:rect style="position:absolute;width:72pt;height:72pt;margin-top:6pt;mso-position-vertical:top"><v:textbox><w:txbxContent>' . shpPara('Top') . '</w:txbxContent></v:textbox><w10:wrap type="square"/></v:rect>',
+            [['type' => 'shape', 'widthPx' => 96, 'heightPx' => 96, 'fill' => '#FFFFFF',
+                'anchor' => ['horizontal' => ['relativeTo' => 'column', 'offset' => 0], 'vertical' => ['relativeTo' => 'paragraph', 'offset' => 6], 'wrap' => 'square', 'allowOverlap' => true], 'blocks' => [shpP('Top')]]],
+        ],
         'a style with no size' => [
             '<v:rect style="nonsense"><v:textbox><w:txbxContent>' . shpPara('Sized by default') . '</w:txbxContent></v:textbox></v:rect>',
             [['type' => 'shape', 'widthPx' => 240, 'heightPx' => 120, 'fill' => '#FFFFFF', 'blocks' => [shpP('Sized by default')]]],
@@ -802,6 +813,8 @@ describe('reading', function () {
             ['type' => 'shape', 'widthPx' => 240, 'heightPx' => 96, 'fill' => '#FFFFFF', 'anchor' => ['horizontal' => ['relativeTo' => 'page', 'offset' => 0], 'vertical' => ['relativeTo' => 'page', 'offset' => 0], 'wrap' => 'square', 'allowOverlap' => true]], ['layout-not-preserved' => 1]],
         'no position at all, no wrap' => [['frame' => 'anchor', 'position' => '', 'wrap' => ''],
             ['type' => 'shape', 'widthPx' => 240, 'heightPx' => 96, 'fill' => '#FFFFFF', 'anchor' => ['horizontal' => ['relativeTo' => 'column', 'offset' => 0], 'vertical' => ['relativeTo' => 'paragraph', 'offset' => 0], 'wrap' => 'inFront', 'allowOverlap' => true]], ['layout-not-preserved' => 1]],
+        'a vertical align from the paragraph, which Word cannot make' => [['frame' => 'anchor', 'position' => '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:align>top</wp:align></wp:positionV>'],
+            ['type' => 'shape', 'widthPx' => 240, 'heightPx' => 96, 'fill' => '#FFFFFF', 'anchor' => ['horizontal' => ['relativeTo' => 'column', 'offset' => 0], 'vertical' => ['relativeTo' => 'paragraph', 'offset' => 0], 'wrap' => 'square', 'allowOverlap' => true]], ['layout-not-preserved' => 1]],
         'Word 2010 percentage offsets, read from their fallback' => [['frame' => 'anchor', 'position' => '<wp:positionH relativeFrom="margin"><mc:AlternateContent><mc:Choice Requires="wp14"><wp14:pctPosHOffset>50000</wp14:pctPosHOffset></mc:Choice><mc:Fallback><wp:posOffset>12700</wp:posOffset></mc:Fallback></mc:AlternateContent></wp:positionH><wp:positionV relativeFrom="line"><wp:align>bottom</wp:align></wp:positionV>', 'wrap' => '<wp:wrapNone/>', 'behind' => '1'],
             ['type' => 'shape', 'widthPx' => 240, 'heightPx' => 96, 'fill' => '#FFFFFF', 'anchor' => ['horizontal' => ['relativeTo' => 'margin', 'offset' => 1], 'vertical' => ['relativeTo' => 'line', 'align' => 'bottom'], 'wrap' => 'behind', 'allowOverlap' => true]], []],
     ]);
@@ -832,6 +845,47 @@ describe('reading', function () {
             . '<w:p><mc:AlternateContent><mc:Choice Requires="zz">' . shpRun('not this') . '</mc:Choice><mc:Fallback>' . shpRun('this') . '</mc:Fallback></mc:AlternateContent></w:p>';
 
         expect(shpTexts(Agent::read(shpDocx($body))['blocks']))->toBe(['chosen', 'this']);
+    });
+
+    it('reads every paragraph and table under body-level mc:AlternateContent, however deep', function (int $depth) {
+        $xml = shpPara('first') . '<w:tbl><w:tr><w:tc>' . shpPara('cell') . '</w:tc></w:tr></w:tbl>' . shpPara('last');
+        for ($i = 0; $i < $depth; $i++) {
+            $xml = '<mc:AlternateContent><mc:Choice Requires="wps">' . $xml . '</mc:Choice></mc:AlternateContent>';
+        }
+        $read = Agent::read(shpDocx(shpPara('Before') . $xml . shpPara('After')));
+
+        expect(array_column(shpModel($read)['blocks'], 'type'))->toBe(['paragraph', 'paragraph', 'table', 'paragraph', 'paragraph'])
+            ->and(shpTexts($read['blocks']))->toBe(['Before', 'first', 'cell', 'last', 'After'])
+            ->and($read['unrepresented'] ?? [])->toBe([])
+            ->and(Agent::validate(shpModel($read)))->toBe([]);
+    })->with(['nine deep' => 9, 'twenty deep' => 20]);
+
+    it('reads a choice it does not understand, with no fallback, as its text and says so', function (string $xml) {
+        $read = Agent::read(shpDocx(shpPara('Before') . $xml . shpPara('After')));
+
+        expect(shpTexts($read['blocks']))->toBe(['Before', 'kept', 'After'])
+            ->and(shpReport($read))->toBe(['shape' => 1])
+            ->and(Agent::validate(shpModel($read)))->toBe([]);
+    })->with([
+        'between paragraphs' => ['<mc:AlternateContent><mc:Choice Requires="zz"><w:p><w:r><w:t>kept</w:t></w:r></w:p></mc:Choice></mc:AlternateContent>'],
+        'in a paragraph' => ['<w:p><mc:AlternateContent><mc:Choice Requires="zz"><w:r><w:t>kept</w:t></w:r></mc:Choice></mc:AlternateContent></w:p>'],
+        'in a run' => ['<w:p><w:r><mc:AlternateContent><mc:Choice Requires="zz"><w:drawing><w:txbxContent><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:txbxContent></w:drawing></mc:Choice></mc:AlternateContent></w:r></w:p>'],
+        'between paragraphs, nine deep' => ['<mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="zz"><w:p><w:r><w:t>kept</w:t></w:r></w:p></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent>'],
+    ]);
+
+    it('reads mc:AlternateContent in a header paragraph as one branch, as it read before shapes, without the copy', function () {
+        $hdr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr' . SHP_NS . '><w:p><mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>Acme</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>Acme</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p></w:hdr>';
+        $bytes = Agent::toBytes(['page' => ['header' => ['blocks' => [shpP('H')]]], 'blocks' => [shpP('x')]]);
+        $path = lwTemp('lw-shp', '.docx');
+        file_put_contents($path, $bytes);
+        $zip = new ZipArchive();
+        expect($zip->open($path))->toBeTrue();
+        $zip->addFromString('word/header1.xml', $hdr);
+        $zip->close();
+        $read = Agent::read((string) file_get_contents($path));
+        @unlink($path);
+
+        expect($read['page']['header'] ?? null)->toBe(['blocks' => [shpP('Acme')]]);
     });
 
     it('moves what a text box cannot hold after it', function () {
