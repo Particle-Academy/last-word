@@ -172,6 +172,8 @@ final class ToMarkdown
             'toc' => $this->note('layout-not-preserved', $p),
             // Markdown has no columns: the text runs on, and the break is reported.
             'columnBreak' => $this->note('layout-not-preserved', $p),
+            // Markdown has no shapes: a text box's blocks stand on their own, the box is reported.
+            'shape' => $this->shape($block, $p),
             default => null,
         };
     }
@@ -305,6 +307,24 @@ final class ToMarkdown
     }
 
     /** @param  array<string, mixed>  $block */
+    /** @param  array<string, mixed>  $block */
+    private function shape(array $block, ?string $p = null): ?string
+    {
+        $this->note('shape', $p);
+        $inner = [];
+        foreach (is_array($block['blocks'] ?? null) ? $block['blocks'] : [] as $k => $child) {
+            if (!is_array($child)) {
+                continue;
+            }
+            $md = $this->block($child, $p === null ? null : $p . '/blocks/' . $k);
+            if ($md !== null && $md !== '') {
+                $inner[] = $md;
+            }
+        }
+
+        return $inner === [] ? null : implode("\n\n", $inner);
+    }
+
     private function quote(array $block, ?string $p = null): string
     {
         $inner = [];

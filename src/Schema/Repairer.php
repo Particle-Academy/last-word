@@ -27,6 +27,12 @@ final class Repairer
     /** 'body', 'band' or 'footnote': where a footnote run is being repaired, and so whether it may stay. */
     private string $context = 'body';
 
+    /** Shapes kept so far: past {@see Shapes::MAX_SHAPES} a shape becomes its text. */
+    private int $shapes = 0;
+
+    /** A footnote typed inside a text box: its blocks, to follow the box. */
+    private array $boxSpill = [];
+
     /**
      * @param  array<string, mixed>  $doc
      * @return array{doc: array<string, mixed>, notes: list<array{path: string, message: string}>}
@@ -35,6 +41,8 @@ final class Repairer
     {
         $this->notes = [];
         $this->context = 'body';
+        $this->shapes = 0;
+        $this->boxSpill = [];
 
         if (array_key_exists('title', $doc) && !is_string($doc['title'])) {
             if (is_scalar($doc['title'])) {
@@ -247,6 +255,12 @@ final class Repairer
         foreach ($blocks as $i => $block) {
             $at = "{$path}[{$i}]";
             $type = $block['type'] ?? null;
+            if ($type === 'shape') {
+                $this->note($at, 'replaced a shape with its text: a header or footer cannot hold a shape');
+                array_push($out, ...$this->dropRefusedInBand(Shapes::flatten($block), $at));
+
+                continue;
+            }
             if (in_array($type, Schema::BAND_REFUSED_TYPES, true)) {
                 $this->note($at, "dropped a {$type} block: a header or footer cannot hold one");
 
@@ -307,6 +321,11 @@ final class Repairer
         $out = [];
         foreach ($blocks as $i => $block) {
             $blockPath = "{$path}[{$i}]";
+            if (is_array($block) && ($block['type'] ?? null) === 'shape') {
+                array_push($out, ...$this->repairShape($block, $blockPath));
+
+                continue;
+            }
             $repaired = $this->repairBlock($block, $blockPath);
             if ($repaired !== null) {
                 $out[] = $repaired;
@@ -371,6 +390,7 @@ final class Repairer
             'hr' => ['type' => 'hr'],
             'toc' => $this->repairToc($block, $path),
             'columnBreak' => $this->repairColumnBreak($path),
+            'shape' => $this->repairShape($block, $path)[0] ?? null, // repairBlocks() takes shapes itself
         };
     }
 
@@ -857,9 +877,11 @@ final class Repairer
                 $name = $run['bookmark'];
                 if ($this->context !== 'body') {
                     unset($run['bookmark']);
-                    $this->note("{$runPath}.bookmark", $this->context === 'band'
-                        ? 'dropped a bookmark: a header or footer cannot hold one'
-                        : 'dropped a bookmark: a footnote cannot hold one');
+                    $this->note("{$runPath}.bookmark", match ($this->context) {
+                        'band' => 'dropped a bookmark: a header or footer cannot hold one',
+                        'textbox' => 'dropped a bookmark: a text box cannot hold one',
+                        default => 'dropped a bookmark: a footnote cannot hold one',
+                    });
                 } elseif (!Schema::isBookmarkName($name) || str_starts_with($name, Schema::BOOKMARK_RESERVED_PREFIX)) {
                     unset($run['bookmark']);
                     $this->note("{$runPath}.bookmark", 'dropped a bookmark whose name is not a letter, then letters, digits or _, at most 40 characters (or is reserved)');
@@ -910,6 +932,23 @@ final class Repairer
             $this->note("{$path}.text", 'moved text typed on a footnote mark into a run of its own before it');
         }
 
+        if ($this->context === 'textbox') {
+            // A text box holds no footnote: its text follows the box instead.
+            $this->context = 'body';
+            try {
+                $moved = $this->repairFootnoteRun(['text' => '', 'footnote' => $note], $path);
+            } finally {
+                $this->context = 'textbox';
+            }
+            foreach ($moved as $kept) {
+                if (is_array($kept['footnote']['blocks'] ?? null)) {
+                    array_push($this->boxSpill, ...$kept['footnote']['blocks']);
+                    $this->note("{$path}.footnote", 'moved a footnote\'s text after the text box: a text box cannot hold a footnote');
+                }
+            }
+
+            return $out;
+        }
         if ($this->context !== 'body') {
             $this->note("{$path}.footnote", $this->context === 'band'
                 ? 'dropped a footnote: a header or footer cannot hold one'
@@ -968,6 +1007,12 @@ final class Repairer
         foreach ($blocks as $i => $block) {
             $at = "{$path}[{$i}]";
             $type = $block['type'] ?? null;
+            if ($type === 'shape') {
+                $this->note($at, 'replaced a shape with its text: a footnote cannot hold a shape');
+                array_push($out, ...$this->dropRefusedInFootnote(Shapes::flatten($block), $at));
+
+                continue;
+            }
             if (in_array($type, Schema::FOOTNOTE_REFUSED_TYPES, true)) {
                 $this->note($at, "dropped a {$type} block: a footnote cannot hold one");
 
@@ -1161,6 +1206,222 @@ final class Repairer
         $doc['blocks'] = $kept;
 
         return $doc;
+    }
+
+    /**
+     * A shape or text box: its own keys made valid, its blocks repaired under a
+     * text box's rules, and anything the box cannot hold placed after it. Never
+     * drops text: where no shape may go (a header, a footer, a footnote, another
+     * text box, past the cap) the shape becomes its blocks, and what a box is too
+     * small for follows it.
+     *
+     * @param  array<string, mixed>  $block
+     * @return list<array<string, mixed>>
+     */
+    private function repairShape(array $block, string $path): array
+    {
+        $blocks = $block['blocks'] ?? null;
+        if (is_string($blocks)) {
+            $blocks = $blocks === '' ? [] : [['type' => 'paragraph', 'runs' => [['text' => $blocks]]]];
+            $this->note("{$path}.blocks", 'coerced a text box\'s text to a paragraph block');
+        } elseif (is_array($blocks) && $blocks !== [] && !array_is_list($blocks)) {
+            $blocks = [$blocks];
+            $this->note("{$path}.blocks", 'coerced a single block to a list of blocks');
+        } elseif (array_key_exists('blocks', $block) && !is_array($blocks)) {
+            $this->note("{$path}.blocks", 'dropped text box blocks that are not a list');
+            $blocks = null;
+        }
+        if ($blocks === null) {
+            unset($block['blocks']);
+        } else {
+            $block['blocks'] = $blocks;
+        }
+
+        if ($this->context !== 'body' || $this->shapes >= Shapes::MAX_SHAPES) {
+            $this->note($path, match ($this->context) {
+                'textbox' => 'replaced a shape inside a text box with its text: text boxes do not nest',
+                'band' => 'replaced a shape with its text: a header or footer cannot hold a shape',
+                'footnote' => 'replaced a shape with its text: a footnote cannot hold a shape',
+                default => 'replaced a shape with its text: a document holds at most ' . Shapes::MAX_SHAPES . ' shapes',
+            });
+
+            return $this->repairBlocks(Shapes::flatten($block), $path);
+        }
+        $this->shapes++;
+        $notes = [];
+        $block = self::repairShapeKeys($block, $path, $notes);
+        array_push($this->notes, ...$notes);
+        if (!array_key_exists('blocks', $block)) {
+            return [$block];
+        }
+
+        [$outer, $this->context] = [$this->context, 'textbox'];
+        [$spill, $this->boxSpill] = [$this->boxSpill, []];
+        try {
+            $inner = $this->dropRefusedInBox($this->repairBlocks($block['blocks'], "{$path}.blocks"), "{$path}.blocks");
+        } finally {
+            $this->context = $outer;
+            [$footnotes, $this->boxSpill] = [$this->boxSpill, $spill];
+        }
+        if (Revisions::present(['blocks' => $inner])) {
+            $inner = array_values(array_filter(Revisions::acceptBlocks($inner)[0], static fn (mixed $b): bool => $b !== null));
+            $this->note("{$path}.blocks", 'accepted the tracked changes in a text box: it carries none');
+        }
+        [$kept, $over] = Shapes::fit($inner);
+        if ($over !== []) {
+            $this->note("{$path}.blocks", 'moved ' . count($over) . ' block' . (count($over) === 1 ? '' : 's') . ' after the text box: it holds at most ' . Shapes::MAX_BOX_BLOCKS . ' blocks and ' . Shapes::MAX_BOX_TEXT . ' characters');
+        }
+        $block['blocks'] = $kept;
+
+        return [$block, ...$over, ...$footnotes];
+    }
+
+    /**
+     * A shape's own keys, each one the model cannot use made the nearest it can.
+     *
+     * @param  array<string, mixed>  $block
+     * @param  list<array{path: string, message: string}>  $notes
+     * @return array<string, mixed>
+     */
+    private static function repairShapeKeys(array $block, string $path, array &$notes): array
+    {
+        $note = static function (string $at, string $message) use (&$notes): void {
+            $notes[] = ['path' => $at, 'message' => $message];
+        };
+        if (array_key_exists('geometry', $block) && !in_array($block['geometry'], Shapes::GEOMETRIES, true)) {
+            unset($block['geometry']);
+            $note("{$path}.geometry", 'set the geometry to rect: it must be one of the preset geometries');
+        }
+        $isLine = in_array($block['geometry'] ?? 'rect', Shapes::LINES, true);
+        if ($isLine && array_key_exists('blocks', $block)) {
+            unset($block['geometry']);
+            $isLine = false;
+            $note("{$path}.geometry", 'made the line a rect: a line holds no text, and this one had blocks');
+        }
+        foreach (['widthPx' => Shapes::DEFAULT_WIDTH_PX, 'heightPx' => Shapes::DEFAULT_HEIGHT_PX] as $dim => $default) {
+            $value = $block[$dim] ?? null;
+            if (is_string($value) && is_numeric($value)) {
+                $value = (float) $value;
+                $note("{$path}.{$dim}", "coerced {$dim} to a number");
+            }
+            if ((!is_int($value) && !is_float($value)) || !is_finite((float) $value) || $value < 0) {
+                $note("{$path}.{$dim}", "set {$dim} to {$default}: it must be a number of px, 0 or more");
+                $value = $default;
+            } elseif ($value > Shapes::MAX_EXTENT_PX) {
+                $note("{$path}.{$dim}", "clamped {$dim} to " . Shapes::MAX_EXTENT_PX);
+                $value = Shapes::MAX_EXTENT_PX;
+            } elseif ($value == 0 && !$isLine) {
+                $note("{$path}.{$dim}", "set {$dim} to {$default}: only a line may be 0 across");
+                $value = $default;
+            }
+            $block[$dim] = $value;
+        }
+        if ($block['widthPx'] == 0 && $block['heightPx'] == 0) {
+            $block['widthPx'] = Shapes::DEFAULT_WIDTH_PX;
+            $note("{$path}.widthPx", 'set widthPx to ' . Shapes::DEFAULT_WIDTH_PX . ': a line needs a length');
+        }
+        if (array_key_exists('fill', $block) && !Shapes::isHex($block['fill'])) {
+            unset($block['fill']);
+            $note("{$path}.fill", 'dropped a fill that is not #RRGGBB: no fill');
+        }
+        if (array_key_exists('outline', $block)) {
+            $outline = $block['outline'];
+            if (!is_array($outline) || ($outline !== [] && array_is_list($outline))) {
+                unset($block['outline']);
+                $note("{$path}.outline", 'dropped an outline that is not an object: the default outline');
+            } else {
+                $fixed = [];
+                foreach ($outline as $key => $value) {
+                    $ok = match ($key) {
+                        'color' => Shapes::isHex($value),
+                        'width' => (is_int($value) || is_float($value)) && is_finite((float) $value) && $value > 0,
+                        'style' => in_array($value, Shapes::OUTLINE_STYLES, true),
+                        'headEnd', 'tailEnd' => in_array($value, Shapes::LINE_ENDS, true),
+                        default => null,
+                    };
+                    if ($ok === null) {
+                        continue; // counted below, never named
+                    }
+                    if (!$ok) {
+                        $note("{$path}.outline.{$key}", "dropped an invalid outline {$key}");
+
+                        continue;
+                    }
+                    $fixed[$key] = $key === 'width' && $value > Shapes::MAX_OUTLINE_WIDTH ? Shapes::MAX_OUTLINE_WIDTH : $value;
+                }
+                $unknown = count(array_diff(array_keys($outline), ['color', 'width', 'style', 'headEnd', 'tailEnd']));
+                if ($unknown > 0) {
+                    $note("{$path}.outline", "dropped {$unknown} unknown outline key" . ($unknown === 1 ? '' : 's'));
+                }
+                $block['outline'] = $fixed;
+            }
+        }
+        foreach (['flipH', 'flipV'] as $flag) {
+            if (array_key_exists($flag, $block) && !is_bool($block[$flag])) {
+                unset($block[$flag]);
+                $note("{$path}.{$flag}", "dropped a {$flag} that is not a boolean");
+            }
+        }
+        if (array_key_exists('alt', $block) && !is_string($block['alt'])) {
+            if (is_scalar($block['alt'])) {
+                $block['alt'] = (string) $block['alt'];
+                $note("{$path}.alt", 'coerced alt to a string');
+            } else {
+                unset($block['alt']);
+                $note("{$path}.alt", 'dropped an alt that is not a string');
+            }
+        }
+        if (array_key_exists('verticalAlign', $block)
+            && (!in_array($block['verticalAlign'], Shapes::VERTICAL_ALIGNS, true) || !array_key_exists('blocks', $block))) {
+            unset($block['verticalAlign']);
+            $note("{$path}.verticalAlign", 'dropped verticalAlign: it is top, middle or bottom, on a text box');
+        }
+        if (array_key_exists('anchor', $block)) {
+            $anchor = Anchor::repair($block['anchor'], "{$path}.anchor", $notes);
+            if ($anchor === null) {
+                unset($block['anchor']);
+            } else {
+                $block['anchor'] = $anchor;
+            }
+        }
+
+        return $block;
+    }
+
+    /**
+     * A text box's blocks without what a text box cannot hold
+     * ({@see Shapes::TEXTBOX_REFUSED_TYPES}), at any depth, each drop noted.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     * @return list<array<string, mixed>>
+     */
+    private function dropRefusedInBox(array $blocks, string $path): array
+    {
+        $out = [];
+        foreach ($blocks as $i => $block) {
+            $at = "{$path}[{$i}]";
+            $type = $block['type'] ?? null;
+            if (in_array($type, Shapes::TEXTBOX_REFUSED_TYPES, true)) {
+                $this->note($at, "dropped a {$type} block: a text box cannot hold one");
+
+                continue;
+            }
+            if ($type === 'quote' && is_array($block['blocks'] ?? null)) {
+                $block['blocks'] = $this->dropRefusedInBox($block['blocks'], "{$at}.blocks");
+            }
+            if ($type === 'table' && is_array($block['rows'] ?? null)) {
+                foreach ($block['rows'] as $r => $row) {
+                    foreach (is_array($row['cells'] ?? null) ? $row['cells'] : [] as $c => $cell) {
+                        if (is_array($cell['blocks'] ?? null)) {
+                            $block['rows'][$r]['cells'][$c]['blocks'] = $this->dropRefusedInBox($cell['blocks'], "{$at}.rows[{$r}].cells[{$c}].blocks");
+                        }
+                    }
+                }
+            }
+            $out[] = $block;
+        }
+
+        return $out;
     }
 
     private function note(string $path, string $message): void

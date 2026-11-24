@@ -61,6 +61,7 @@ final class Approximations
                 match ($b['type'] ?? null) {
                     'code' => $found['code'] = true,
                     'quote' => $walk($b['blocks'] ?? null),
+                    'shape' => $found['text box or shape'] = true,
                     'list' => self::items($b['items'] ?? null, $runs),
                     'table' => array_map(
                         static fn ($row) => array_map(static fn ($c) => $walk(is_array($c) ? ($c['blocks'] ?? null) : null), is_array($row) && is_array($row['cells'] ?? null) ? $row['cells'] : []),

@@ -10,6 +10,7 @@ use LastWord\Helpers\Xml;
 use LastWord\Schema\RunWalk;
 use LastWord\Schema\Revisions;
 use LastWord\Schema\Schema;
+use LastWord\Schema\Shapes;
 use RuntimeException;
 use ZipArchive;
 
@@ -143,6 +144,15 @@ final class DocxWriter
      * treats a repeated wp:docPr id as a damaged document.
      */
     private const CHART_DOCPR_BASE = 10000;
+
+    /** Shapes and text boxes number theirs above the charts' (at most {@see Shapes::MAX_SHAPES}). */
+    private const SHAPE_DOCPR_BASE = 20000;
+
+    /** Shapes written so far: each one's name, and its stacking order when it floats. */
+    private int $shapeCounter = 0;
+
+    /** Inside a text box's content: a heading there is not a table of contents entry. */
+    private bool $inTextBox = false;
 
     /** Added to every wp:docPr id: the largest a template's letterhead parts use (last-word#5). */
     private int $drawingIdOffset = 0;
@@ -389,6 +399,8 @@ final class DocxWriter
         // from colliding with the first image in a templated document.
         $this->relCounter = $this->template !== null && $this->template->hasTheme() ? 3 : 2;
         $this->imageCounter = 0;
+        $this->shapeCounter = 0;
+        $this->inTextBox = false;
         // Drawing ids are unique across the package, the template's letterhead
         // parts included, so ours start above the largest it uses. Zero without
         // a section template: the ids are what they always were.
@@ -1451,6 +1463,7 @@ final class DocxWriter
                 'quote' => $this->renderQuote($block),
                 'image' => $this->renderImage($block),
                 'chart' => $this->renderChart($block),
+                'shape' => $this->renderShape($block),
                 'pageBreak' => '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
                 'columnBreak' => '<w:p><w:r><w:br w:type="column"/></w:r></w:p>',
                 'hr' => '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>',
@@ -1475,7 +1488,7 @@ final class DocxWriter
         // navigation pane and no table of contents.
         $runs = $this->renderRuns($block['runs'] ?? []);
         $text = trim(self::plainRunText($block['runs'] ?? []));
-        if ($level <= $this->tocLevels && $text !== '' && !$this->inBand && !$this->inFootnote) {
+        if ($level <= $this->tocLevels && $text !== '' && !$this->inBand && !$this->inFootnote && !$this->inTextBox) {
             $name = '_Toc' . (count($this->tocHeadings) + 1);
             $this->tocHeadings[] = ['level' => $level, 'text' => $text, 'name' => $name];
             $id = ++$this->bookmarkId;
@@ -1902,6 +1915,40 @@ final class DocxWriter
             . '</a:graphicData></a:graphic>'
             . '</wp:inline>'
             . '</w:drawing></w:r></w:p>';
+    }
+
+    /**
+     * A shape or text box, in its own paragraph: inline, or floating from that
+     * paragraph when it has an anchor. A text box's blocks are laid out against
+     * the box's inner width. Validation keeps a shape out of a header, a footer,
+     * a footnote and another text box; unvalidated, one there is written as its
+     * text, which is never dropped.
+     *
+     * @param  array<string, mixed>  $block
+     */
+    private function renderShape(array $block): string
+    {
+        if ($this->inBand || $this->inFootnote || $this->inTextBox) {
+            return $this->renderBlocks(Shapes::flatten($block));
+        }
+        $n = ++$this->shapeCounter;
+        $content = null;
+        if (is_array($block['blocks'] ?? null) && array_is_list($block['blocks'])) {
+            [$width, $this->contentWidth] = [$this->contentWidth, ShapeXml::innerTwips($block)];
+            $this->inTextBox = true;
+            try {
+                $content = $this->renderBlocks($block['blocks']);
+            } finally {
+                $this->inTextBox = false;
+                $this->contentWidth = $width;
+            }
+            // CT_TxbxContent needs a block, and Word wants a paragraph last, as in a cell.
+            if ($content === '' || !str_ends_with($content, '</w:p>')) {
+                $content .= '<w:p/>';
+            }
+        }
+
+        return '<w:p><w:r>' . ShapeXml::drawing($block, $content, $this->drawingIdOffset + self::SHAPE_DOCPR_BASE + $n, $n) . '</w:r></w:p>';
     }
 
     /**

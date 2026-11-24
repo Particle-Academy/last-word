@@ -26,7 +26,7 @@ use ParticleAcademy\Conformance\Conformance;
  * exactly that difference. The implementation accepts both decodings; the
  * object one is the one that can tell the two apart, so it is the one tested.
  */
-const LWX_PINNED_SUITE_VERSION = '0.62.0';
+const LWX_PINNED_SUITE_VERSION = '0.63.0';
 
 /** The suites this package is named an implementation of, with a vacuity floor each. */
 const LWX_SUITES = [
@@ -165,6 +165,11 @@ function lwxSchemaDef(string $def): array
         'tableRow' => $table['rows']['items'],
         'tableCell' => $table['rows']['items']['properties']['cells']['items'],
         'border' => $s['$defs']['border'],
+        'shape' => $blocks['shape'],
+        'shapeOutline' => $blocks['shape']['properties']['outline'],
+        'anchor' => $s['$defs']['anchor'],
+        'anchorHorizontal' => $s['$defs']['anchor']['properties']['horizontal'],
+        'anchorVertical' => $s['$defs']['anchor']['properties']['vertical'],
     };
 }
 
@@ -192,6 +197,15 @@ function lwxLastWordConstraint(string $path): array
         'band.size' => $s['$defs']['band']['properties']['size'],
         'image.src' => lwxSchemaDef('image')['properties']['src'],
         'page.size' => $s['properties']['page']['properties']['size'],
+        'anchor.wrap' => $s['$defs']['anchor']['properties']['wrap'],
+        'anchor.horizontal.offset' => $s['$defs']['anchor']['properties']['horizontal']['properties']['offset'],
+        'anchor.vertical.offset' => $s['$defs']['anchor']['properties']['vertical']['properties']['offset'],
+        'anchor.horizontal.relativeTo' => $s['$defs']['anchor']['properties']['horizontal']['properties']['relativeTo'],
+        'anchor.vertical.relativeTo' => $s['$defs']['anchor']['properties']['vertical']['properties']['relativeTo'],
+        'anchor.horizontal.align' => $s['$defs']['anchor']['properties']['horizontal']['properties']['align'],
+        'anchor.vertical.align' => $s['$defs']['anchor']['properties']['vertical']['properties']['align'],
+        'shape.widthPx' => lwxSchemaDef('shape')['properties']['widthPx'],
+        'shape.heightPx' => lwxSchemaDef('shape')['properties']['heightPx'],
     };
 
     return array_intersect_key($node, array_flip(['type', 'pattern', 'enum', 'minimum', 'maximum', 'exclusiveMinimum']));
