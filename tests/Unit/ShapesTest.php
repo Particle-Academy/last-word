@@ -873,6 +873,39 @@ describe('reading', function () {
         'between paragraphs, nine deep' => ['<mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="zz"><w:p><w:r><w:t>kept</w:t></w:r></w:p></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent>'],
     ]);
 
+    it('reads an empty mc:AlternateContent as nothing, and reports nothing', function (string $xml) {
+        $read = Agent::read(shpDocx(shpPara('Before') . $xml . shpPara('After')));
+
+        expect(shpTexts($read['blocks']))->toBe(['Before', 'After'])
+            ->and($read['unrepresented'] ?? [])->toBe([]);
+    })->with([
+        'between paragraphs' => ['<mc:AlternateContent/>'],
+        'in a paragraph' => ['<w:p><mc:AlternateContent/></w:p>'],
+        'in a run' => ['<w:p><w:r><mc:AlternateContent/></w:r></w:p>'],
+    ]);
+
+    it('reads a VML line whose from and to run to megabytes of commas in bounded memory', function () {
+        // Straight to the VML reader: a .docx this repetitive is refused by the
+        // archive's compression-ratio limit before any shape is read.
+        $dom = new DOMDocument();
+        $line = $dom->createElementNS('urn:schemas-microsoft-com:vml', 'v:line');
+        $commas = str_repeat(',', 8_000_000);
+        $line->setAttribute('from', '0,0' . $commas);
+        $line->setAttribute('to', '150pt,0' . $commas);
+        $dom->appendChild($line);
+        unset($commas);
+        gc_collect_cycles();
+        memory_reset_peak_usage();
+        $before = memory_get_usage();
+        [$shape] = \LastWord\Reader\ShapeReader::fromVml($line);
+        $peak = memory_get_peak_usage() - $before;
+
+        // Unbounded, explode() makes 8 million strings per attribute: well over
+        // 100 MB. Bounded, the peak is a copy or two of the 8 MB attribute.
+        expect($peak)->toBeLessThan(64 * 1024 * 1024)
+            ->and($shape)->toBe(['type' => 'shape', 'geometry' => 'line', 'widthPx' => 200, 'heightPx' => 0, 'fill' => '#FFFFFF']);
+    });
+
     it('reads mc:AlternateContent in a header paragraph as one branch, never dropping it', function (string $body, array $expected, array $report) {
         $hdr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr' . SHP_NS . '>' . $body . '</w:hdr>';
         $bytes = Agent::toBytes(['page' => ['header' => ['blocks' => [shpP('H')]]], 'blocks' => [shpP('x')]]);
@@ -908,6 +941,18 @@ describe('reading', function () {
         'a header of blocks, between its paragraphs' => [
             '<mc:AlternateContent><mc:Choice Requires="wps"><w:p><w:r><w:t>Acme</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>Acme</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent><w:p><w:r><w:t>Street</w:t></w:r></w:p>',
             ['blocks' => [shpP('Acme'), shpP('Street')]], [],
+        ],
+        'a header of blocks, in a run, a choice it does not understand and no fallback' => [
+            '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="zz"><w:t>Acme</w:t></mc:Choice></mc:AlternateContent></w:r></w:p><w:p><w:r><w:t>Street</w:t></w:r></w:p>',
+            ['blocks' => [shpP('Acme'), shpP('Street')]], ['shape' => 1],
+        ],
+        'a one-line header, in a run, a choice it does not understand and no fallback' => [
+            '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="zz"><w:t>Acme</w:t></mc:Choice></mc:AlternateContent></w:r></w:p>',
+            ['left' => 'Acme'], ['shape' => 1],
+        ],
+        'a header of blocks, a Word text box in a run: a picture the header cannot hold, as before' => [
+            '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:pict><v:rect><v:textbox><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p><w:p><w:r><w:t>Street</w:t></w:r></w:p>',
+            ['blocks' => [shpP('Street')]], ['image' => 1],
         ],
     ]);
 
