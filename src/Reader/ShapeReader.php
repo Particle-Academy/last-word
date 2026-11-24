@@ -229,8 +229,8 @@ final class ShapeReader
         $css = self::css($el->getAttribute('style'));
 
         if ($geometry === 'line') {
-            $from = array_map(self::length(...), explode(',', $el->getAttribute('from') ?: '0,0') + [1 => '0']);
-            $to = array_map(self::length(...), explode(',', $el->getAttribute('to') ?: '0,0') + [1 => '0']);
+            $from = array_map(self::length(...), explode(',', $el->getAttribute('from') ?: '0,0', 3) + [1 => '0']);
+            $to = array_map(self::length(...), explode(',', $el->getAttribute('to') ?: '0,0', 3) + [1 => '0']);
             $w = $from[0] !== null && $to[0] !== null ? abs($to[0] - $from[0]) : null;
             $h = $from[1] !== null && $to[1] !== null ? abs($to[1] - $from[1]) : null;
         } else {
@@ -271,7 +271,7 @@ final class ShapeReader
         }
 
         if (strtolower($css['position'] ?? '') === 'absolute') {
-            $shape['anchor'] = self::vmlAnchor($el, $css);
+            $shape['anchor'] = self::vmlAnchor($el, $css, $notes);
         }
 
         $box = self::child($el, 'textbox');
@@ -289,9 +289,10 @@ final class ShapeReader
 
     /**
      * @param  array<string, string>  $css
+     * @param  list<string>  $notes
      * @return array{horizontal: array<string, mixed>, vertical: array<string, mixed>, wrap: string, allowOverlap: bool}
      */
-    private static function vmlAnchor(DOMElement $el, array $css): array
+    private static function vmlAnchor(DOMElement $el, array $css, array &$notes): array
     {
         $h = match (strtolower($css['mso-position-horizontal-relative'] ?? '')) {
             'page' => 'page',
@@ -305,9 +306,12 @@ final class ShapeReader
             'line' => 'line',
             default => 'paragraph',
         };
-        $axis = static function (string $from, ?string $align, ?float $offset, array $allowed): array {
+        $axis = static function (string $name, string $from, ?string $align, ?float $offset, array $allowed) use (&$notes): array {
             if ($align !== null && in_array($align, $allowed, true)) {
-                return ['relativeTo' => $from, 'align' => $align];
+                if (!Anchor::alignFromParagraph($name, ['relativeTo' => $from])) {
+                    return ['relativeTo' => $from, 'align' => $align];
+                }
+                $notes[] = 'layout-not-preserved'; // Word aligns nothing to a paragraph: its offset instead
             }
             $offset = $offset === null ? 0 : self::round(max(-Anchor::MAX_OFFSET, min(Anchor::MAX_OFFSET, $offset)));
 
@@ -330,8 +334,8 @@ final class ShapeReader
         };
 
         return [
-            'horizontal' => $axis($h, strtolower($css['mso-position-horizontal'] ?? '') ?: null, self::length($css['margin-left'] ?? ($css['left'] ?? '')), Anchor::HORIZONTAL_ALIGN),
-            'vertical' => $axis($v, strtolower($css['mso-position-vertical'] ?? '') ?: null, self::length($css['margin-top'] ?? ($css['top'] ?? '')), Anchor::VERTICAL_ALIGN),
+            'horizontal' => $axis('horizontal', $h, strtolower($css['mso-position-horizontal'] ?? '') ?: null, self::length($css['margin-left'] ?? ($css['left'] ?? '')), Anchor::HORIZONTAL_ALIGN),
+            'vertical' => $axis('vertical', $v, strtolower($css['mso-position-vertical'] ?? '') ?: null, self::length($css['margin-top'] ?? ($css['top'] ?? '')), Anchor::VERTICAL_ALIGN),
             'wrap' => $wrap,
             'allowOverlap' => strtolower($el->getAttribute('o:allowoverlap')) !== 'f' && strtolower($el->getAttribute('o:allowoverlap')) !== 'false',
         ];
@@ -374,7 +378,10 @@ final class ShapeReader
                 }
                 $align = self::child($holder, 'align');
                 $offset = self::child($holder, 'posOffset');
-                if ($align !== null && in_array(trim($align->textContent), $aligns, true)) {
+                if ($align !== null && in_array(trim($align->textContent), $aligns, true) && Anchor::alignFromParagraph($axis, ['relativeTo' => $relative])) {
+                    $notes[] = 'layout-not-preserved'; // the schema allows it, Word cannot make it: the model refuses it
+                    $anchor[$axis] = ['relativeTo' => $relative, 'offset' => 0];
+                } elseif ($align !== null && in_array(trim($align->textContent), $aligns, true)) {
                     $anchor[$axis] = ['relativeTo' => $relative, 'align' => trim($align->textContent)];
                 } elseif ($offset !== null) {
                     $anchor[$axis] = ['relativeTo' => $relative, 'offset' => self::offset(trim($offset->textContent), $notes)];

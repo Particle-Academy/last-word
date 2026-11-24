@@ -51,6 +51,9 @@ final class Anchor
 
     public const VERTICAL_ALIGN = ['top', 'center', 'bottom', 'inside', 'outside'];
 
+    /** What a vertical `align` may be relative to: not the paragraph, which Word only offsets from. */
+    public const VERTICAL_ALIGN_FROM = ['page', 'margin', 'line'];
+
     public const WRAPS = ['square', 'tight', 'through', 'topAndBottom', 'behind', 'inFront'];
 
     /** The defaults an omitted part takes: Word's own for a newly floated object. */
@@ -89,13 +92,16 @@ final class Anchor
             ],
         ];
 
+        $vertical = $axis(self::VERTICAL_FROM, self::VERTICAL_ALIGN, '{"relativeTo": "paragraph", "offset": 0}');
+        $vertical['description'] .= ' align needs relativeTo ' . implode(', ', self::VERTICAL_ALIGN_FROM) . ': Word aligns nothing to a paragraph.';
+
         return [
             'type' => 'object',
             'additionalProperties' => false,
             'description' => 'Float the drawing instead of setting it in the line of text: where it sits and how text flows round it. e.g. {"horizontal": {"relativeTo": "margin", "align": "right"}, "vertical": {"relativeTo": "paragraph", "offset": 0}, "wrap": "square"}. Offsets are points; the drawing\'s size is its own widthPx / heightPx. Absent, the drawing is inline and moves with the text. Word: wp:anchor.',
             'properties' => [
                 'horizontal' => $axis(self::HORIZONTAL_FROM, self::HORIZONTAL_ALIGN, '{"relativeTo": "column", "offset": 0}'),
-                'vertical' => $axis(self::VERTICAL_FROM, self::VERTICAL_ALIGN, '{"relativeTo": "paragraph", "offset": 0}'),
+                'vertical' => $vertical,
                 'wrap' => ['enum' => self::WRAPS, 'description' => 'How text flows round it: square (the default), tight, through, topAndBottom (text above and below only), or none at all, the drawing behind the text or inFront of it.'],
                 'allowOverlap' => ['type' => 'boolean', 'description' => 'Whether other floating drawings may overlap this one. true by default.'],
             ],
@@ -155,6 +161,8 @@ final class Anchor
         }
         if (array_key_exists('align', $value) && !in_array($value['align'], $align, true)) {
             $errors[] = self::error("{$path}.align", "anchor {$axis} align must be one of: " . implode(', ', $align), 'anchor_invalid');
+        } elseif (array_key_exists('align', $value) && !array_key_exists('offset', $value) && self::alignFromParagraph($axis, $value)) {
+            $errors[] = self::error("{$path}.align", 'anchor vertical align needs relativeTo ' . implode(', ', self::VERTICAL_ALIGN_FROM) . ': Word aligns nothing to a paragraph (use offset)', 'anchor_invalid');
         }
         if (array_key_exists('offset', $value)) {
             $offset = $value['offset'];
@@ -226,7 +234,10 @@ final class Anchor
                     $notes[] = ['path' => "{$path}.{$axis}.align", 'message' => 'dropped align: the position has an offset'];
                 }
             } elseif (array_key_exists('align', $value)) {
-                if (in_array($value['align'], $align, true)) {
+                if (self::alignFromParagraph($axis, $fixed)) {
+                    $notes[] = ['path' => "{$path}.{$axis}.align", 'message' => 'set the offset to 0: Word aligns nothing vertically to a paragraph'];
+                    $fixed['offset'] = 0;
+                } elseif (in_array($value['align'], $align, true)) {
                     $fixed['align'] = $value['align'];
                 } else {
                     $notes[] = ['path' => "{$path}.{$axis}.align", 'message' => 'set the offset to 0: align must be one of ' . implode(', ', $align)];
@@ -285,6 +296,21 @@ final class Anchor
             'wrap' => is_string($anchor['wrap'] ?? null) ? $anchor['wrap'] : self::DEFAULT_WRAP,
             'allowOverlap' => is_bool($anchor['allowOverlap'] ?? null) ? $anchor['allowOverlap'] : self::DEFAULT_ALLOW_OVERLAP,
         ];
+    }
+
+    /**
+     * Whether a vertical position aligns to the paragraph (named, or the
+     * default). The format's schema allows `wp:align` under
+     * `relativeFrom="paragraph"`, but Word offers no such position: its
+     * vertical alignment is relative to the page, a margin or the line only, and
+     * a paragraph takes an absolute offset. The model refuses what Word cannot
+     * make, the reader reads it as offset 0 and reports `layout-not-preserved`.
+     *
+     * @param  array<string, mixed>  $value
+     */
+    public static function alignFromParagraph(string $axis, array $value): bool
+    {
+        return $axis === 'vertical' && ($value['relativeTo'] ?? self::DEFAULT_VERTICAL['relativeTo']) === 'paragraph';
     }
 
     /** @return array{path: string, message: string, code: string} */

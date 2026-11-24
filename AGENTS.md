@@ -434,9 +434,14 @@ boxed note. Inline by default (it sits in the flow like an image); give it an
   counts only) and never costs text: `format-approximated` (an unknown preset or
   custom geometry read as `rect`, a gradient or theme fill, a rotation, anything
   read from VML), `layout-not-preserved` (a size or position out of range, a
-  position frame the model does not name, text a full box could not hold), and
+  position frame the model does not name, a vertical `align` from the paragraph,
+  which Word cannot make, read as offset 0, text a full box could not hold), and
   `shape` (a shape read as its text: one inside another text box, in a footnote,
-  past the cap, or behind more than 8 nested `mc:AlternateContent`). A footnote
+  past the cap, behind more than 8 nested `mc:AlternateContent` inside a
+  paragraph or run, or a choice the reader does not understand with no
+  fallback; in a header or footer it is reported at `/page/header` or
+  `/page/footer`). Between paragraphs, `mc:AlternateContent` is followed to any
+  depth, so the paragraphs and tables under it are always read. A footnote
   in a text box is read after the box (`nested-block`); a tracked change in one
   is accepted (`tracked-change`, with `preserveTrackedChanges`). A VML picture is
   still not read. Shapes in a header or footer are read as before (dropped and
@@ -461,7 +466,7 @@ inline (`wp:inline`); present, even `{}`, it floats (`wp:anchor`).
 | `vertical.relativeTo` | `page`, `margin`, `paragraph`, `line` | `paragraph` |
 | `horizontal.offset`, `vertical.offset` | **points** from the frame's top-left corner, negative allowed, -1584 to 1584 | 0 |
 | `horizontal.align` | `left`, `center`, `right`, `inside`, `outside` (instead of `offset`, never both) | |
-| `vertical.align` | `top`, `center`, `bottom`, `inside`, `outside` | |
+| `vertical.align` | `top`, `center`, `bottom`, `inside`, `outside`; only with `relativeTo` `page`, `margin` or `line`. Word cannot align to a paragraph (the default), so that is refused with `anchor_invalid`: use `offset` | |
 | `wrap` | `square`, `tight`, `through`, `topAndBottom`, `behind`, `inFront` | `square` |
 | `allowOverlap` | boolean: may other floating drawings overlap this one | true |
 

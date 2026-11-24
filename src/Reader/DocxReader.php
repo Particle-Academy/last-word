@@ -257,15 +257,19 @@ final class DocxReader
     /** Shapes read into the model so far: past {@see Shapes::MAX_SHAPES} a shape is read as its text. */
     private int $shapeCount = 0;
 
-    /** How deep the `mc:AlternateContent` being read is nested. */
+    /** How deep the `mc:AlternateContent` being read is nested, in paragraphs and runs. */
     private int $mcDepth = 0;
+
+    /** Where a shape report goes: `/blocks`, or the header or footer being read. */
+    private string $shapeWhere = '/blocks';
 
     /** Blocks read inside a text box that the box cannot hold (a footnote's): placed after the box. */
     private array $boxSpill = [];
 
     /**
-     * The deepest `mc:AlternateContent` read as markup; any deeper is read as its
-     * text, paragraph by paragraph, and reported.
+     * The deepest `mc:AlternateContent` read as markup inside a paragraph or a
+     * run; any deeper is read as its text, paragraph by paragraph, and reported.
+     * Between blocks there is no cap: the part's nesting limit bounds that walk.
      */
     private const MAX_MC_DEPTH = 8;
 
@@ -1104,7 +1108,7 @@ final class DocxReader
         $segments = [''];
         $firstRun = null;
         $field = null; // inside a complex field: its instruction so far
-        $walk = function (DOMElement $node) use (&$walk, &$segments, &$firstRun, &$field): void {
+        $walk = function (DOMElement $node) use (&$walk, &$segments, &$firstRun, &$field, $kind): void {
             foreach ($node->childNodes as $child) {
                 if (!$child instanceof DOMElement) {
                     continue;
@@ -1141,6 +1145,23 @@ final class DocxReader
                     $segments[] = '';
                 } elseif ($name === 'hyperlink' || $name === 'smartTag') {
                     $walk($child);
+                } elseif ($name === 'AlternateContent') {
+                    // One branch, never both; one the reader cannot choose is read
+                    // as its first choice, and reported.
+                    $branch = ShapeReader::branch($child);
+                    if ($branch === null) {
+                        $this->noteShapeAt('/page/' . $kind, 'shape');
+                        foreach ($child->childNodes as $c) {
+                            if ($c instanceof DOMElement && $c->localName === 'Choice') {
+                                $branch = $c;
+
+                                break;
+                            }
+                        }
+                    }
+                    if ($branch !== null) {
+                        $walk($branch);
+                    }
                 }
             }
         };
@@ -1197,11 +1218,13 @@ final class DocxReader
     {
         [$rels, $this->rels] = [$this->rels, $this->bandRels[$name] ?? []];
         $this->inBand = true;
+        $this->shapeWhere = '/page/' . $kind;
         try {
             $blocks = $this->parseBlockContainer($root);
         } finally {
             $this->rels = $rels;
             $this->inBand = false;
+            $this->shapeWhere = '/blocks';
         }
 
         $kept = $charts = 0;
@@ -1294,7 +1317,7 @@ final class DocxReader
                     $blocks++;
                 }
                 $first = false;
-            } elseif ($node->localName === 'tbl' || $node->localName === 'sdt') {
+            } elseif (in_array($node->localName, ['tbl', 'sdt', 'AlternateContent'], true)) { // what may hold blocks
                 $blocks++;
             }
         }
@@ -2057,6 +2080,13 @@ final class DocxReader
 
                 continue;
             }
+            if ($node->localName === 'AlternateContent') {
+                // A choice the reader does not understand, with no fallback: its text.
+                $flushAll();
+                array_push($blocks, ...$this->textOfMarkup($node));
+
+                continue;
+            }
             if ($node->localName !== 'p') {
                 continue; // unknown body-level construct — skip
             }
@@ -2274,14 +2304,15 @@ final class DocxReader
 
                     break;
                 case 'AlternateContent':
-                    $branch = !$this->inBand && $this->mcDepth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
+                    // No depth cap between blocks: the part's nesting limit already
+                    // bounds this walk, and a cap here would drop the paragraphs
+                    // under it. A branch the reader cannot choose is read as its
+                    // text by parseBlockContainer().
+                    $branch = ShapeReader::branch($node);
                     if ($branch !== null) {
-                        $this->mcDepth++;
-                        try {
-                            array_push($out, ...$this->blockChildren($branch));
-                        } finally {
-                            $this->mcDepth--;
-                        }
+                        array_push($out, ...$this->blockChildren($branch));
+                    } else {
+                        $out[] = $node;
                     }
 
                     break;
@@ -2452,17 +2483,22 @@ final class DocxReader
         $this->unrepresented[] = ['where' => '/blocks', 'kind' => 'layout-not-preserved', 'count' => 1];
     }
 
-    /** One more of a shape report kind at `/blocks`: counts only, never text. */
+    /** One more of a shape report kind at `/blocks`, or the header or footer being read: counts only, never text. */
     private function noteShape(string $kind): void
     {
+        $this->noteShapeAt($this->shapeWhere, $kind);
+    }
+
+    private function noteShapeAt(string $where, string $kind): void
+    {
         foreach ($this->unrepresented as $k => $note) {
-            if ($note['where'] === '/blocks' && $note['kind'] === $kind) {
+            if ($note['where'] === $where && $note['kind'] === $kind) {
                 $this->unrepresented[$k]['count']++;
 
                 return;
             }
         }
-        $this->unrepresented[] = ['where' => '/blocks', 'kind' => $kind, 'count' => 1];
+        $this->unrepresented[] = ['where' => $where, 'kind' => $kind, 'count' => 1];
     }
 
     /**
@@ -2486,14 +2522,11 @@ final class DocxReader
 
                 continue;
             }
-            if ($this->mcDepth + $depth >= self::MAX_MC_DEPTH) {
-                array_push($state['images'], ...$this->textOfMarkup($node));
-
-                continue;
-            }
-            $branch = ShapeReader::branch($node);
+            $branch = $this->mcDepth + $depth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
             if ($branch !== null) {
                 array_push($out, ...$this->runChildren($branch, $state, $depth + 1));
+            } else {
+                array_push($state['images'], ...$this->textOfMarkup($node)); // too deep, or no branch it can read
             }
         }
 
@@ -3170,7 +3203,7 @@ final class DocxReader
                     break;
                 case 'AlternateContent':
                     // One branch, never both: the fallback is the same content again.
-                    $branch = !$this->inBand && $this->mcDepth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
+                    $branch = $this->mcDepth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
                     if ($branch !== null) {
                         $this->mcDepth++;
                         try {
@@ -3178,7 +3211,7 @@ final class DocxReader
                         } finally {
                             $this->mcDepth--;
                         }
-                    } elseif (!$this->inBand) {
+                    } else {
                         array_push($state['images'], ...$this->textOfMarkup($node));
                     }
 

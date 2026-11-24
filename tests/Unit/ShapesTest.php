@@ -886,7 +886,8 @@ describe('reading', function () {
         @unlink($path);
 
         expect($read['page']['header'] ?? null)->toBe($expected)
-            ->and(shpReport($read))->toBe($report);
+            ->and(shpReport($read))->toBe($report)
+            ->and(array_unique(array_column($read['unrepresented'] ?? [], 'where')))->toBe($report === [] ? [] : ['/page/header']);
     })->with([
         'a one-line header, choice and fallback' => [
             '<w:p><mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>Acme</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>Acme</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p>',
