@@ -1147,13 +1147,13 @@ final class DocxReader
                     $walk($child);
                 } elseif ($name === 'AlternateContent') {
                     // One branch, never both; one the reader cannot choose is read
-                    // as its first choice, and reported.
+                    // as its first choice, and reported; an empty one loses nothing.
                     $branch = ShapeReader::branch($child);
                     if ($branch === null) {
-                        $this->noteShapeAt('/page/' . $kind, 'shape');
                         foreach ($child->childNodes as $c) {
                             if ($c instanceof DOMElement && $c->localName === 'Choice') {
                                 $branch = $c;
+                                $this->noteShapeAt('/page/' . $kind, 'shape');
 
                                 break;
                             }
@@ -2517,11 +2517,13 @@ final class DocxReader
             if (!($node instanceof DOMElement)) {
                 continue;
             }
-            if ($node->localName !== 'AlternateContent' || $this->inBand) {
+            if ($node->localName !== 'AlternateContent') {
                 $out[] = $node;
 
                 continue;
             }
+            // In a header or footer too: a drawing in the branch is still read
+            // the band's way (a picture it cannot hold, reported), and text is kept.
             $branch = $this->mcDepth + $depth < self::MAX_MC_DEPTH ? ShapeReader::branch($node) : null;
             if ($branch !== null) {
                 array_push($out, ...$this->runChildren($branch, $state, $depth + 1));
@@ -2536,13 +2538,20 @@ final class DocxReader
     /**
      * Markup the reader will not interpret, as the text in it: one paragraph per
      * `w:p` that holds text, in document order, from one branch only (the
-     * fallback when there is one). Reported as a `shape` the model did not keep.
+     * fallback when there is one). Reported as a `shape` the model did not keep,
+     * unless it holds nothing at all: an empty `mc:AlternateContent` loses nothing.
      *
      * @return list<array<string, mixed>>
      */
     private function textOfMarkup(DOMElement $alternate): array
     {
-        $this->noteShape('shape');
+        foreach ($alternate->childNodes as $child) {
+            if ($child instanceof DOMElement) {
+                $this->noteShape('shape');
+
+                break;
+            }
+        }
         $texts = [];
         $this->collectText($alternate, null, $texts);
         $out = [];
