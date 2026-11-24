@@ -873,8 +873,8 @@ describe('reading', function () {
         'between paragraphs, nine deep' => ['<mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="wps"><mc:AlternateContent><mc:Choice Requires="zz"><w:p><w:r><w:t>kept</w:t></w:r></w:p></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent></mc:Choice></mc:AlternateContent>'],
     ]);
 
-    it('reads mc:AlternateContent in a header paragraph as one branch, as it read before shapes, without the copy', function () {
-        $hdr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr' . SHP_NS . '><w:p><mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>Acme</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>Acme</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p></w:hdr>';
+    it('reads mc:AlternateContent in a header paragraph as one branch, never dropping it', function (string $body, array $expected, array $report) {
+        $hdr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr' . SHP_NS . '>' . $body . '</w:hdr>';
         $bytes = Agent::toBytes(['page' => ['header' => ['blocks' => [shpP('H')]]], 'blocks' => [shpP('x')]]);
         $path = lwTemp('lw-shp', '.docx');
         file_put_contents($path, $bytes);
@@ -885,8 +885,30 @@ describe('reading', function () {
         $read = Agent::read((string) file_get_contents($path));
         @unlink($path);
 
-        expect($read['page']['header'] ?? null)->toBe(['blocks' => [shpP('Acme')]]);
-    });
+        expect($read['page']['header'] ?? null)->toBe($expected)
+            ->and(shpReport($read))->toBe($report);
+    })->with([
+        'a one-line header, choice and fallback' => [
+            '<w:p><mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>Acme</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>Acme</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p>',
+            ['left' => 'Acme'], [],
+        ],
+        'a one-line header, a choice it does not understand and no fallback' => [
+            '<w:p><mc:AlternateContent><mc:Choice Requires="zz"><w:r><w:t>Acme</w:t></w:r></mc:Choice></mc:AlternateContent></w:p>',
+            ['left' => 'Acme'], ['shape' => 1],
+        ],
+        'a header of blocks, choice and fallback' => [
+            '<w:p><mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>Acme</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>Acme</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p><w:p><w:r><w:t>Street</w:t></w:r></w:p>',
+            ['blocks' => [shpP('Acme'), shpP('Street')]], [],
+        ],
+        'a header of blocks, a choice it does not understand and no fallback' => [
+            '<w:p><mc:AlternateContent><mc:Choice Requires="zz"><w:r><w:t>Acme</w:t></w:r></mc:Choice></mc:AlternateContent></w:p><w:p><w:r><w:t>Street</w:t></w:r></w:p>',
+            ['blocks' => [shpP('Acme'), shpP('Street')]], ['shape' => 1],
+        ],
+        'a header of blocks, between its paragraphs' => [
+            '<mc:AlternateContent><mc:Choice Requires="wps"><w:p><w:r><w:t>Acme</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>Acme</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent><w:p><w:r><w:t>Street</w:t></w:r></w:p>',
+            ['blocks' => [shpP('Acme'), shpP('Street')]], [],
+        ],
+    ]);
 
     it('moves what a text box cannot hold after it', function () {
         $read = Agent::read(shpDocx(shpInRun(shpWsp(str_repeat(shpPara('x'), 503))) . shpPara('end')));
